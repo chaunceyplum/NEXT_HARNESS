@@ -32,6 +32,7 @@ import { callMcpTool } from '@/lib/mcp-client';
 import { planUseCaseAsync } from '@/lib/llm-planner';
 import { runPlan } from '@/lib/execution-runner';
 import { createExecution, ExecutionPlanningInfo } from '@/lib/execution-store';
+import { createTracer } from '@/lib/observability';
 import { BuildRequest, BuildResponse, PlanningInfo, ApiError } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
@@ -221,6 +222,26 @@ export async function POST(request: Request): Promise<Response> {
     // and the client can poll /api/executions/:id/status.
     const executionId = randomUUID();
     createExecution(executionId, description, solutionConfig, steps, storedPlanning);
+
+    // Observability: record creation + the planning decision before the
+    // runner takes over (the runner emits execution.started onward).
+    const tracer = createTracer(executionId);
+    tracer.event('execution.created', `Execution created for "${solutionConfig.website_domain}" (${solutionConfig.business_vertical}).`, {
+      data: {
+        domain: solutionConfig.website_domain,
+        vertical: solutionConfig.business_vertical,
+        stepCount: steps.length,
+      },
+    });
+    tracer.event('planning.decided', `Planned via ${plan.planningMode} analysis: ${planningInfo.module_order.join(' -> ')}`, {
+      data: {
+        planningMode: plan.planningMode,
+        useCaseSummary: plan.useCase.summary,
+        moduleOrder: planningInfo.module_order,
+        skippedModules: plan.modules.filter((m) => !m.included).map((m) => m.id),
+        llmFallbackReason: plan.llmFallbackReason,
+      },
+    });
 
     runPlan(executionId, steps).catch((err) => {
       // Defensive: runPlan already handles per-step errors internally, but

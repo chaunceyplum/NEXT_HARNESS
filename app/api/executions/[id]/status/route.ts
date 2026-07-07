@@ -10,7 +10,7 @@
  */
 
 import { getExecution, computeProgress, currentStepLabel } from '@/lib/execution-store';
-import { StatusResponse, StepResponse, PlanningInfo, ApiError } from '@/lib/types';
+import { StatusResponse, StepResponse, PlanningInfo, ObservabilitySummary, ApiError } from '@/lib/types';
 
 export async function GET(
   request: Request,
@@ -66,6 +66,19 @@ export async function GET(
         }
       : undefined;
 
+    const invocationsByStatus: Record<string, number> = {};
+    let totalToolDurationMs = 0;
+    for (const inv of record.invocations) {
+      invocationsByStatus[inv.status] = (invocationsByStatus[inv.status] ?? 0) + 1;
+      totalToolDurationMs += inv.durationMs;
+    }
+    const observability: ObservabilitySummary = {
+      total_events: record.trace.length,
+      total_invocations: record.invocations.length,
+      invocations_by_status: invocationsByStatus,
+      total_tool_duration_ms: totalToolDurationMs,
+    };
+
     const response: StatusResponse = {
       execution_id: record.id,
       status: record.status,
@@ -74,6 +87,7 @@ export async function GET(
       steps,
       error: record.error,
       planning,
+      observability,
     };
 
     return Response.json(response, { status: 200 });

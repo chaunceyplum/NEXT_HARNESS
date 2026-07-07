@@ -142,6 +142,79 @@ export interface StatusResponse {
   steps: StepResponse[];
   error?: string;
   planning?: PlanningInfo;
+  /** Lightweight observability rollup so the status view can show live counts. */
+  observability?: ObservabilitySummary;
+}
+
+// ============================================================================
+// Observability Types
+//
+// Everything the build function does is traced (lib/observability.ts):
+// an ordered timeline of events, plus one structured record per real MCP
+// tool call (with timing, arg/output previews, and errors). These types
+// shape that data for the API (GET /api/executions/:id/trace) and the UI.
+// ============================================================================
+
+export type TraceLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export interface TraceEventResponse {
+  seq: number;
+  timestamp: string;
+  level: TraceLevel;
+  type: string;
+  message: string;
+  step_id?: string;
+  tool?: string;
+  category?: string;
+  duration_ms?: number;
+  data?: Record<string, any>;
+}
+
+export interface ToolInvocationResponse {
+  seq: number;
+  step_id: string;
+  tool: string;
+  category: string;
+  status: 'success' | 'error';
+  args_preview: string;
+  output_preview?: string;
+  output_bytes?: number;
+  error?: string;
+  duration_ms: number;
+  started_at: string;
+  completed_at: string;
+}
+
+export interface ObservabilityMetrics {
+  total_events: number;
+  total_invocations: number;
+  invocations_by_status: Record<string, number>;
+  invocations_by_tool: Record<string, number>;
+  invocations_by_category: Record<string, number>;
+  total_tool_duration_ms: number;
+  avg_tool_duration_ms: number;
+  slowest_invocation?: {
+    tool: string;
+    step_id: string;
+    duration_ms: number;
+  };
+  wall_clock_ms: number;
+}
+
+/** Compact rollup embedded in the status response for the live UI. */
+export interface ObservabilitySummary {
+  total_events: number;
+  total_invocations: number;
+  invocations_by_status: Record<string, number>;
+  total_tool_duration_ms: number;
+}
+
+export interface TraceResponse {
+  execution_id: string;
+  status: ExecutionStatus;
+  metrics: ObservabilityMetrics;
+  events: TraceEventResponse[];
+  invocations: ToolInvocationResponse[];
 }
 
 export interface ExecutionSummary {
@@ -155,6 +228,8 @@ export interface ExecutionSummary {
   completed_step_count: number;
   failed_step_count: number;
   planning_mode?: PlanningMode;
+  /** Total real MCP tool calls made during this build (observability). */
+  invocation_count?: number;
   created_at: string;
   updated_at: string;
 }
