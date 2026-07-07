@@ -11,8 +11,10 @@
  * "empty means yes" fallbacks.
  */
 
-import { planUseCase, classifyUseCase, ModuleId } from '../lib/plan-builder';
+import { planUseCase, classifyUseCase, ModuleId, makeRunToken } from '../lib/plan-builder';
 import { SolutionConfig } from '../lib/types';
+import { buildSynthesisPrompt } from '../lib/llm-planner';
+import { validateSynthesizedSteps } from '../lib/tool-catalog';
 
 function baseConfig(overrides: Partial<SolutionConfig> = {}): SolutionConfig {
   return {
@@ -154,6 +156,69 @@ assertModules(
   ['cja'],
   ['ajo_activation', 'launch']
 );
+
+// ── FEAT-003: LLM synthesis prompt scope-gating ─────────────────────────────
+//
+// We cannot make a live Anthropic call in this sandbox (no ANTHROPIC_API_KEY),
+// so instead we render buildSynthesisPrompt() directly with a schema-only
+// description/config and confirm the new "STAY IN SCOPE" instruction text
+// (and the negative example) actually appear in the rendered prompt string
+// that would be sent to the model.
+{
+  console.log('\n=== Fixture D: buildSynthesisPrompt() scope-limiting instruction text ===');
+  const prompt = buildSynthesisPrompt('build me a schema in AEP', schemaOnly, makeRunToken());
+
+  const mustContain = [
+    'STAY IN SCOPE',
+    'cja_*',
+    'msb_create_ajo_*',
+    'reactor_*',
+    'adobe_create_schema',
+  ];
+  const missing = mustContain.filter((needle) => !prompt.includes(needle));
+  if (missing.length > 0) {
+    console.error(`  FAIL: prompt is missing expected scope-limiting text: ${missing.join(', ')}`);
+    failures++;
+  } else {
+    console.log('  PASS: rendered prompt contains the scope-limiting instruction and negative example.');
+  }
+}
+
+// ── FEAT-003: validateSynthesizedSteps() current (intentional) behavior ────
+//
+// validateSynthesizedSteps() only checks catalog-membership / required-params
+// / well-formed refs — it deliberately does NOT reject a plan for mixing
+// categories (see the NOTE comment above its definition in tool-catalog.ts),
+// because it has no access to the raw description to judge relevance. These
+// two checks document that current behavior: a narrowly-scoped payload
+// validates OK, and a payload mixing unrelated categories ALSO validates OK.
+{
+  console.log('\n=== Fixture E: validateSynthesizedSteps() — narrowly-scoped payload ===');
+  const narrow = validateSynthesizedSteps([
+    { id: 'schema', tool: 'adobe_create_schema', args: { title: 'Profile_x', base_class: 'https://ns.adobe.com/xdm/context/profile' } },
+    { id: 'dataset', tool: 'adobe_create_dataset', args: { name: 'Profile_ds_x' }, refs: { schema_ref_id: 'schema.$id' } },
+  ]);
+  if (!narrow.ok) {
+    console.error(`  FAIL: expected narrowly-scoped payload to validate OK, got error: ${narrow.error}`);
+    failures++;
+  } else {
+    console.log('  PASS: narrowly-scoped (aep-only) payload validates OK.');
+  }
+
+  console.log('\n=== Fixture F: validateSynthesizedSteps() — over-scoped mixed-category payload ===');
+  const mixed = validateSynthesizedSteps([
+    { id: 'schema', tool: 'adobe_create_schema', args: { title: 'Profile_x', base_class: 'https://ns.adobe.com/xdm/context/profile' } },
+    { id: 'prop', tool: 'reactor_create_property', args: { name: 'Prop_x', platform: 'web' } },
+    { id: 'dv', tool: 'cja_list_data_views', args: {} },
+    { id: 'journey', tool: 'msb_create_ajo_journey', args: { name: 'Journey_x', entry_criteria: { type: 'segment', segment_name: 'vip' } } },
+  ]);
+  if (!mixed.ok) {
+    console.error(`  FAIL (unexpected): mixed-category payload was rejected: ${mixed.error}. validateSynthesizedSteps() is documented to NOT enforce category scope; if this was intentionally changed, update this fixture's expectation.`);
+    failures++;
+  } else {
+    console.log('  PASS (documented behavior): mixed-category payload still validates OK — scope enforcement lives in the prompt, not in validation.');
+  }
+}
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);
 process.exit(failures === 0 ? 0 : 1);

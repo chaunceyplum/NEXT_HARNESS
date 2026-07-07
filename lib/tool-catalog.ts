@@ -359,6 +359,22 @@ const REF_PATTERN = /^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_$.]+$/;
  * all-or-nothing: any problem rejects the entire plan (the caller then
  * falls back to the deterministic heuristic), so a partially-hallucinated
  * plan can never reach the runner.
+ *
+ * NOTE on scope (why there is no "this plan mixes unrelated categories"
+ * rejection here): this function only ever sees the already-synthesized
+ * `steps` array — it has no access to the raw customer request, so it has
+ * no way to judge whether e.g. a cja_* step is actually relevant to a given
+ * ask or is scope creep. Hard-rejecting based on category mix without that
+ * context would risk falsely rejecting legitimate multi-category plans
+ * (e.g. a request that genuinely wants a schema AND a reporting dashboard).
+ * Narrow-scope enforcement therefore lives in the PROMPT
+ * (buildSynthesisPrompt's "STAY IN SCOPE" rule above in llm-planner.ts),
+ * where the model still has the raw description to reason against. This is
+ * an accepted tradeoff: the fallback-to-heuristic safety net means a
+ * synthesized plan is never fatally wrong even if the LLM ignores the
+ * instruction, and any persistent over-scoping would surface for a human to
+ * notice via the `reasoning` field surfaced in PlanningInfo, not via a hard
+ * validation rejection.
  */
 export function validateSynthesizedSteps(rawSteps: unknown): ValidationResult {
   if (!Array.isArray(rawSteps)) {

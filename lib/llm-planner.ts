@@ -182,7 +182,10 @@ async function synthesizePlan(
   return { steps: validation.steps, reasoning: parsed.reasoning };
 }
 
-function buildSynthesisPrompt(description: string, config: SolutionConfig, runToken: string): string {
+// Exported (in addition to being used internally by synthesizePlan) so that
+// verification scripts / tests can render the prompt directly without
+// making a live Anthropic API call — see scripts/verify-planning.ts.
+export function buildSynthesisPrompt(description: string, config: SolutionConfig, runToken: string): string {
   const events = (config.events || []).map((e: any) => (typeof e === 'string' ? e : e?.name));
   const segments = (config.segments || []).map((s: any) => s?.name);
 
@@ -207,6 +210,8 @@ ${catalogForPrompt()}
 
 Design rules:
 - Build the plan that best fits THIS specific request. DIFFERENT requests must produce DIFFERENT plans — do not emit a fixed template. Include only the tools this request actually needs, and as many segments/rules/offers/journeys as the request implies.
+- STAY IN SCOPE — do NOT include CJA (cja_*), AJO (msb_create_ajo_*, msb_activate_ajo_campaign), or Adobe Launch/Reactor (reactor_*) tools unless the request explicitly asks for: reporting/analytics dashboards or calculated metrics (CJA), outbound campaigns/journeys/personalization/offer content (AJO), or client-side event tracking/tag instrumentation (Launch/Reactor). A request that only asks for a schema, dataset, or segment in AEP should produce ONLY aep_* tool calls (plus, optionally, a search_adobe_knowledge step) — do not pad the plan with unrelated tools "for completeness".
+  Example: for the request "build me a schema in AEP", the correct plan is 1-2 steps: adobe_create_schema and optionally adobe_create_dataset. Do NOT add reactor_create_property, cja_list_data_views, or msb_create_ajo_journey for this request.
 - Chain outputs to inputs with "refs": a ref value is "<earlierStepId>.<path>". Examples: feed a schema step's id into a dataset via {"schema_ref_id": "<schemaStepId>.$id"}; feed a property id via {"property_id": "<propStepId>.id"}; feed a data view via {"data_view_id": "<dvStepId>.data_views.0.id"}; feed a journey via {"journey_id": "<journeyStepId>.journey_id"}.
 - Use "listRefs" (a map of arg -> array of "<stepId>.path" refs) for reactor_add_resources_to_library rule_ids / data_element_ids.
 - Every ref/listRef MUST point to an EARLIER step's id. Give each step a unique short id (e.g. "schema", "dataset", "seg_vip").
