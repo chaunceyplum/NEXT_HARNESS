@@ -1,65 +1,154 @@
-import Image from "next/image";
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { BuildRequest, BuildResponse, ApiError } from '@/lib/types';
 
 export default function Home() {
+  const router = useRouter();
+  const [description, setDescription] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleBuild(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      const payload: BuildRequest = {
+        description: description.trim(),
+      };
+
+      const response = await fetch('/api/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        const errorData: ApiError = await response.json();
+        throw new Error(
+          errorData.error || `HTTP ${response.status}: ${response.statusText}`
+        );
+      }
+
+      const data: BuildResponse = await response.json();
+
+      if (!data.execution_id) {
+        throw new Error('No execution_id returned from server');
+      }
+
+      // Redirect to execution monitor
+      router.push(`/executions/${data.execution_id}`);
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to start build';
+      setError(errorMessage);
+      console.error('Build error:', err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+      <div className="max-w-2xl mx-auto">
+        {/* Header */}
+        <div className="mb-12 pt-8 text-center sm:text-left">
+          <h1 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
+            Autonomous MarTech Builder
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+          <p className="text-lg sm:text-xl text-gray-600 max-w-lg">
+            Describe your MarTech solution in plain English, and we'll build it
+            automatically.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        {/* Main Card */}
+        <div className="bg-white rounded-lg shadow-lg p-8 mb-6">
+          <form onSubmit={handleBuild} className="space-y-6">
+            <div>
+              <label
+                htmlFor="description"
+                className="block text-lg font-semibold text-gray-700 mb-3"
+              >
+                What do you want to build?
+              </label>
+              <textarea
+                id="description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Example: Build an AEP solution that tracks ecommerce purchases and identifies high-value customers for email activation..."
+                className="w-full h-48 p-4 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 resize-none transition-all"
+                disabled={loading}
+              />
+              <p className="text-sm text-gray-500 mt-2">
+                {description.length} / 5000 characters
+              </p>
+            </div>
+
+            {/* Error message */}
+            {error && (
+              <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded">
+                <p className="text-red-800 font-medium">Error</p>
+                <p className="text-red-700 text-sm mt-1">{error}</p>
+              </div>
+            )}
+
+            {/* Submit button */}
+            <div className="flex gap-4">
+              <button
+                type="submit"
+                disabled={loading || !description.trim()}
+                className="flex-1 px-6 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                    Building...
+                  </span>
+                ) : (
+                  'Build'
+                )}
+              </button>
+            </div>
+          </form>
         </div>
-      </main>
+
+        {/* Examples */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">
+            Example Descriptions
+          </h3>
+          <ul className="space-y-3 text-sm text-gray-600">
+            <li className="flex gap-3">
+              <span className="text-blue-500 font-bold">•</span>
+              <span>
+                "Build an AEP solution for our ecommerce store. Track product
+                views, add-to-cart, and purchases. Create segments for
+                high-value customers and repeat buyers, then activate to email."
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-blue-500 font-bold">•</span>
+              <span>
+                "Set up Adobe Experience Platform for a financial services
+                company. We need to track account views, loan applications, and
+                document downloads for personalization."
+              </span>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-blue-500 font-bold">•</span>
+              <span>
+                "Create a media site solution in AEP with article views, video
+                plays, and subscription events. Build segments for engaged
+                readers."
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
     </div>
   );
 }
