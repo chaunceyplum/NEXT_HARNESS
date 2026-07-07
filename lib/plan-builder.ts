@@ -155,8 +155,13 @@ export function classifyUseCase(config: SolutionConfig): UseCaseProfile {
   const hasRealSegments = Array.isArray(config.segments) && config.segments.length > 0;
 
   const activationDestinations = destinations.filter((d) => ['email', 'web', 'push', 'sms'].includes(d));
-  const analyticsSignals = goals.some((g) => g.includes('engagement') || g.includes('conversion_rate') || g.includes('report'))
-    || destinations.length === 0;
+  // NOTE: this used to also fire on `destinations.length === 0`, i.e. "no
+  // destinations means the use case must be about analytics" — that's
+  // backwards. An empty destinations array on a narrow ask (e.g. "build me
+  // a schema in AEP") isn't an analytics signal at all; it's the absence
+  // of ANY signal. Only an explicit reporting/engagement goal or a CRM
+  // destination should mark a use case as analytics-focused.
+  const analyticsSignals = goals.some((g) => g.includes('engagement') || g.includes('conversion_rate') || g.includes('report'));
 
   const activationFocused = activationDestinations.length > 0 && hasRealSegments;
   const personalizationFocused = placements.length > 0 || destinations.includes('web');
@@ -270,11 +275,13 @@ const aepModule: CapabilityModule = {
       refs: { schema_ref_id: `${schemaStepId}.$id` },
     });
 
-    const segmentList = segments.length > 0
-      ? segments
-      : [{ name: 'engaged_visitors', pql_expression: 'profile.visits > 1', description: 'Default segment — planner returned none' }];
-
-    segmentList.forEach((seg: any, idx: number) => {
+    // NOTE: this used to fall back to a synthetic 'engaged_visitors'
+    // segment whenever config.segments was empty. That's the root cause of
+    // downstream modules (cja/ajo_activation) seeing "a segment exists"
+    // for use cases that never asked for one at all (e.g. "build me a
+    // schema in AEP"). Only create segment steps for segments the
+    // user/enrichment actually supplied — if there are none, create none.
+    segments.forEach((seg: any, idx: number) => {
       const stepId = `aep_segment_${idx}`;
       ctx.aepSegmentStepIds.push(stepId);
       steps.push({
@@ -356,9 +363,16 @@ const launchModule: CapabilityModule = {
     // Events drive what gets instrumented — a finance signup flow gets a
     // form_fill rule, an ecommerce site gets a purchase rule, etc., instead
     // of one generic template regardless of input.
-    const eventList: any[] = Array.isArray(config.events) && config.events.length > 0
-      ? config.events
-      : [{ name: 'page_view', description: 'Default event — planner returned none' }];
+    //
+    // NOTE: build() is only ever called when isApplicable() returned true,
+    // which requires config.events.length > 0 (see above) — so the
+    // `eventList` here should always be non-empty. There is deliberately
+    // NO synthetic 'page_view' fallback anymore: it used to exist "just in
+    // case", but a defensive default here would silently mask a bug in
+    // isApplicable() rather than surface it, and it was part of the same
+    // "empty means yes" pattern that caused Launch to be built for use
+    // cases (like a schema-only AEP ask) that never asked for it.
+    const eventList: any[] = config.events;
 
     const launchRuleStepIds: string[] = [];
     const launchDataElementStepIds: string[] = [];
@@ -484,8 +498,16 @@ const cjaModule: CapabilityModule = {
   id: 'cja',
   label: 'CJA analytics (data view, segment, calculated metric)',
   // Needed whenever there's any reporting intent — which is effectively
-  // whenever there are segments to measure, OR the use case is explicitly
-  // analytics-focused (no outbound destination / CRM+reporting goals).
+  // whenever there are REAL segments to measure, OR the use case is
+  // explicitly analytics-focused (reporting/engagement goals or a CRM
+  // destination). "hasSegments" alone used to be too permissive because
+  // aepModule.build() injected a synthetic default segment whenever
+  // config.segments was empty, so ANY request (even a bare schema ask)
+  // ended up looking like it "had a segment worth reporting on". Now that
+  // aepModule no longer synthesizes a default segment (see aepModule.build
+  // above), config.segments.length > 0 genuinely means the user/enrichment
+  // asked for a segment — which IS worth mirroring in CJA for reporting,
+  // so mere real-segment presence remains a valid signal on its own.
   isApplicable: (config) => {
     const hasSegments = Array.isArray(config.segments) && config.segments.length > 0;
     const profile = classifyUseCase(config);
@@ -493,8 +515,11 @@ const cjaModule: CapabilityModule = {
   },
   reason: (config) => {
     const profile = classifyUseCase(config);
-    if (profile.analyticsFocused) return 'Use case is analytics-focused (no outbound destination, or reporting/CRM goals) — CJA is the primary deliverable.';
-    return 'Segments exist that are worth reporting on in CJA alongside AEP.';
+    if (profile.analyticsFocused) return 'Use case is analytics-focused (reporting/engagement goals, or a CRM destination) — CJA is the primary deliverable.';
+    const hasSegments = Array.isArray(config.segments) && config.segments.length > 0;
+    return hasSegments
+      ? 'Segments exist that are worth reporting on in CJA alongside AEP.'
+      : 'No segments and no explicit analytics/reporting signal — CJA is not included.';
   },
   priority: (config, useCase) => {
     // Analytics-first use cases want CJA reporting stood up before (or in
@@ -572,23 +597,30 @@ const ajoActivationModule: CapabilityModule = {
   isApplicable: (config) => {
     const hasSegments = Array.isArray(config.segments) && config.segments.length > 0;
     const destinations = (Array.isArray(config.destinations) ? config.destinations : []).map((d) => String(d).toLowerCase());
-    const wantsActivation = destinations.length === 0 || destinations.some((d) => ['email', 'web', 'push', 'sms'].includes(d));
+    // An empty destinations array must NOT imply activation is wanted —
+    // that "assume yes by default" branch used to fire AJO activation for
+    // any request with segments, even a narrow schema-only ask. Only fire
+    // when the user explicitly specified an activation-channel
+    // destination (email/web/push/sms).
+    const wantsActivation = destinations.some((d) => ['email', 'web', 'push', 'sms'].includes(d));
     return hasSegments && wantsActivation;
   },
   reason: (config) => {
     const destinations = Array.isArray(config.destinations) ? config.destinations : [];
-    return destinations.length === 0
-      ? 'No destinations specified, so activation is assumed by default.'
-      : `Destinations (${destinations.join(', ')}) include an activation channel (email/web/push/sms).`;
+    const activationDestinations = destinations.filter((d) => ['email', 'web', 'push', 'sms'].includes(String(d).toLowerCase()));
+    return activationDestinations.length > 0
+      ? `Destinations (${destinations.join(', ')}) include an activation channel (email/web/push/sms).`
+      : 'No explicit activation-channel destination (email/web/push/sms) — AJO activation is not included.';
   },
   priority: (config, useCase) => (useCase.activationFocused ? 25 : 45),
   build: (config, ctx) => {
     const vertical = config.business_vertical || 'general';
+    // isApplicable() above requires hasSegments to be true, so config.segments
+    // is guaranteed non-empty here — no synthetic default segment needed.
     const segments = Array.isArray(config.segments) ? config.segments : [];
-    const segmentList = segments.length > 0 ? segments : [{ name: 'engaged_visitors' }];
     const steps: PlannedStep[] = [];
 
-    segmentList.forEach((seg: any, idx: number) => {
+    segments.forEach((seg: any, idx: number) => {
       const journeyStepId = `ajo_journey_${idx}`;
       steps.push({
         id: journeyStepId,
