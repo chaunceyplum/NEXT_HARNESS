@@ -33,6 +33,7 @@ export async function GET(): Promise<Response> {
         step_count: record.steps.length,
         completed_step_count: completedStepCount,
         failed_step_count: failedStepCount,
+        planning_mode: record.planning?.planningMode,
         created_at: record.createdAt,
         updated_at: record.updatedAt,
       };

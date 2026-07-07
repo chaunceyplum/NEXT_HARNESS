@@ -119,6 +119,15 @@ export default function ExecutionsListPage() {
                         )}
                         {exec.status.replace(/_/g, ' ')}
                       </span>
+                      {exec.planning_mode && (
+                        <span
+                          className={`ml-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${
+                            exec.planning_mode === 'llm' ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500'
+                          }`}
+                        >
+                          {exec.planning_mode === 'llm' ? '✨ LLM' : 'heuristic'}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 w-40">
                       <div className="flex items-center gap-2">

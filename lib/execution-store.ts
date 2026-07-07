@@ -41,12 +41,22 @@ export type ExecutionStatus =
   | 'completed_with_errors'
   | 'failed';
 
+export interface ExecutionPlanningInfo {
+  planningMode: 'llm' | 'heuristic';
+  useCase: Record<string, any>;
+  modules: Record<string, any>[];
+  moduleOrder: string[];
+  llmReasoning?: string;
+  llmFallbackReason?: string;
+}
+
 export interface ExecutionRecord {
   id: string;
   description: string;
   solutionConfig: Record<string, any>;
   status: ExecutionStatus;
   steps: StepRecord[];
+  planning?: ExecutionPlanningInfo;
   error?: string;
   createdAt: string;
   updatedAt: string;
@@ -59,7 +69,8 @@ export function createExecution(
   id: string,
   description: string,
   solutionConfig: Record<string, any>,
-  steps: Omit<StepRecord, 'status'>[]
+  steps: Omit<StepRecord, 'status'>[],
+  planning?: ExecutionPlanningInfo
 ): ExecutionRecord {
   const now = new Date().toISOString();
   const record: ExecutionRecord = {
@@ -68,6 +79,7 @@ export function createExecution(
     solutionConfig,
     status: 'running',
     steps: steps.map((s) => ({ ...s, status: 'pending' as StepStatus })),
+    planning,
     createdAt: now,
     updatedAt: now,
   };

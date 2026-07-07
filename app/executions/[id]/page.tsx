@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { StatusResponse, StepResponse, ApiError } from '@/lib/types';
+import { StatusResponse, StepResponse, PlanningInfo, ApiError } from '@/lib/types';
 
 const CATEGORY_LABELS: Record<string, string> = {
   rag: 'RAG',
@@ -175,6 +175,9 @@ export default function ExecutionPage() {
               </div>
             )}
 
+            {/* Planning transparency */}
+            {status.planning && <PlanningPanel planning={status.planning} />}
+
             {/* Step list */}
             <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8">
               <h2 className="text-xl font-bold text-gray-900 mb-4">
@@ -226,6 +229,76 @@ export default function ExecutionPage() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function PlanningPanel({ planning }: { planning: PlanningInfo }) {
+  const included = planning.modules.filter((m) => m.included);
+  const skipped = planning.modules.filter((m) => !m.included);
+
+  return (
+    <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-bold text-gray-900">Build Plan (why this order)</h2>
+        <span
+          className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
+            planning.planning_mode === 'llm' ? 'bg-violet-100 text-violet-800' : 'bg-gray-100 text-gray-700'
+          }`}
+        >
+          {planning.planning_mode === 'llm' ? '✨ LLM-refined' : 'Heuristic'}
+        </span>
+      </div>
+
+      <p className="text-sm text-gray-600 mb-4">
+        <span className="font-semibold">Use case:</span> {planning.use_case.summary}
+      </p>
+
+      {planning.llm_reasoning && (
+        <div className="bg-violet-50 border border-violet-200 rounded-lg p-3 mb-4">
+          <p className="text-xs text-violet-500 font-bold uppercase mb-1">LLM Reasoning</p>
+          <p className="text-sm text-violet-900">{planning.llm_reasoning}</p>
+        </div>
+      )}
+
+      {planning.llm_fallback_reason && (
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
+          <p className="text-xs text-gray-500 font-bold uppercase mb-1">Fell back to heuristic</p>
+          <p className="text-sm text-gray-700">{planning.llm_fallback_reason}</p>
+        </div>
+      )}
+
+      <div className="mb-3">
+        <p className="text-xs text-gray-500 font-bold uppercase mb-2">
+          Module order ({included.length} included)
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {planning.module_order.map((id, i) => {
+            const mod = included.find((m) => m.id === id);
+            return (
+              <div key={id} className="flex items-center gap-2">
+                <span className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold border border-indigo-200">
+                  {i + 1}. {mod?.label || id} ({mod?.step_count ?? 0} steps)
+                </span>
+                {i < planning.module_order.length - 1 && <span className="text-gray-300">→</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {skipped.length > 0 && (
+        <div className="mt-4">
+          <p className="text-xs text-gray-500 font-bold uppercase mb-2">Skipped modules</p>
+          <ul className="space-y-1">
+            {skipped.map((m) => (
+              <li key={m.id} className="text-sm text-gray-500">
+                <span className="font-medium text-gray-600">{m.label}:</span> {m.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
