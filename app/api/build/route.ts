@@ -132,13 +132,21 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Verify solution_config has required fields
-    if (!solutionConfig.website_domain && !solutionConfig.business_vertical) {
-      console.error('[BUILD] Missing required config fields:', solutionConfig);
+    const missingFields: string[] = [];
+    if (!solutionConfig.website_domain) missingFields.push('website_domain');
+    if (!solutionConfig.business_vertical) missingFields.push('business_vertical');
+    
+    if (missingFields.length > 0) {
+      console.error('[BUILD] Missing required config fields:', missingFields, 'Config:', solutionConfig);
       return Response.json(
         {
-          error: 'Planner response missing required fields (website_domain, business_vertical)',
+          error: `Planner response missing required fields (${missingFields.join(', ')})`,
           code: 'INVALID_RESPONSE',
-          details: { received: Object.keys(solutionConfig) },
+          details: { 
+            missingFields,
+            availableFields: Object.keys(solutionConfig),
+            received: solutionConfig,
+          },
         } as ApiError,
         { status: 500 }
       );
