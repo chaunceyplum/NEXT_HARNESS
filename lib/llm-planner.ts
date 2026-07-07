@@ -1,104 +1,142 @@
 /**
- * LLM Planner (optional refinement layer)
+ * Dynamic Planner
  *
- * The deterministic module system in plan-builder.ts (`planUseCase`) already
- * makes the build plan use-case aware: it decides which capability modules
- * (RAG/AEP/Launch/CJA/AJO activation/AJO offers) apply and in what order,
- * based on heuristics read off the planner's SolutionConfig.
+ * This is the piece that makes the build genuinely non-deterministic and
+ * ask-specific. It has two layers:
  *
- * This module adds an *optional* LLM pass on top: given the same config and
- * the same heuristic result, ask an LLM whether it agrees with which
- * modules should run and in what order, and let it override both — because
- * heuristics are necessarily coarse (a handful of if/else signals) and a
- * genuinely novel use case description may call for a module combination
- * the heuristics don't anticipate.
+ *   1. SYNTHESIS (preferred, needs ANTHROPIC_API_KEY): an LLM reads the RAW
+ *      natural-language request plus a validated catalog of the real,
+ *      working MCP tools (lib/tool-catalog.ts) and designs a concrete,
+ *      request-specific plan — which tools to call, with what arguments,
+ *      chained via refs. Different requests produce genuinely different
+ *      plans (different tools, counts, args), not one fixed template with a
+ *      reordered set of modules.
  *
- * SAFETY / DEGRADATION CONTRACT — this is the important part:
- *   - If ANTHROPIC_API_KEY is not set, the LLM is never called. No network
- *     request, no delay, straight to the heuristic result.
- *   - If the API call fails, times out (8s budget), or returns a
- *     non-2xx / malformed response, the heuristic result is used.
- *   - If the LLM's response *parses* but is semantically invalid (not a
- *     permutation of exactly the applicable module ids, includes an
- *     unknown module, is missing a module, etc.), the heuristic result is
- *     used. The LLM can only ever reorder or drop-with-justification
- *     modules that isApplicable() already allowed through — it cannot
- *     invent calls to tools that don't exist, and it never sees or
- *     produces raw PlannedStep/tool-call content itself.
- *   - Any exception anywhere in this module is caught; callers always get
- *     a valid UseCasePlan back, never a throw.
+ *   2. HEURISTIC FALLBACK (always available): the deterministic capability-
+ *      module planner in plan-builder.ts, run against a config that has
+ *      first been ENRICHED from the raw description (lib/intent-extractor.ts).
+ *      So even with no LLM key, two different requests yield different
+ *      configs and therefore different plans — just deterministically.
  *
- * In other words: this is a pure planning *hint* layered on top of a
- * working deterministic planner, never a replacement for one.
+ * SAFETY / DEGRADATION CONTRACT:
+ *   - No API key -> synthesis skipped entirely, straight to the (enriched)
+ *     heuristic. No network call.
+ *   - Synthesis network failure / timeout (12s) / non-2xx / malformed or
+ *     unparseable output -> heuristic fallback, with the reason recorded.
+ *   - Synthesized steps are validated against the tool catalog
+ *     (validateSynthesizedSteps): unknown/disallowed tools, missing required
+ *     params, or malformed/forward refs reject the ENTIRE plan -> heuristic
+ *     fallback. A partially-hallucinated plan can never reach the runner.
+ *   - planBuildAsync never throws; callers always get a runnable plan.
  */
 
 import { SolutionConfig } from './types';
-import { MODULES, planUseCase, classifyUseCase, ModuleId, UseCasePlan, ModulePlanSummary } from './plan-builder';
+import { PlannedStep, planUseCase, classifyUseCase, UseCaseProfile, ModulePlanSummary } from './plan-builder';
+import { enrichConfigFromDescription } from './intent-extractor';
+import { catalogForPrompt, validateSynthesizedSteps, ValidatedStep } from './tool-catalog';
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
-const LLM_TIMEOUT_MS = 8000;
+const LLM_TIMEOUT_MS = 12000;
 
-export type PlanningMode = 'llm' | 'heuristic';
+export type PlanningMode = 'llm_synthesized' | 'heuristic';
 
-export interface PlanUseCaseResult extends UseCasePlan {
+export interface PlanBuildResult {
+  steps: PlannedStep[];
   planningMode: PlanningMode;
-  /** Present only when planningMode === 'llm': the model's stated rationale. */
-  llmReasoning?: string;
-  /** Present only when the LLM path was attempted but fell back — why. */
-  llmFallbackReason?: string;
+  useCase: UseCaseProfile;
+  /** The config after intent enrichment (what planning actually ran against). */
+  enrichedConfig: SolutionConfig;
+  /** Intent flags/notes detected from the raw description (transparency). */
+  intentNotes: string[];
+  // Heuristic-mode only:
+  modules?: ModulePlanSummary[];
+  moduleOrder?: string[];
+  // Synthesized-mode only:
+  reasoning?: string;
+  // Set whenever synthesis was attempted but we fell back to heuristic:
+  fallbackReason?: string;
 }
 
 /**
- * Async entry point used by the build API route. Always resolves — never
- * rejects — and always returns a usable plan.
+ * Main entry point used by the build API route. Always resolves with a
+ * runnable plan. `description` is the RAW user request (critical — this is
+ * what breaks the determinism; the regex-collapsed config alone is not
+ * enough signal).
  */
-export async function planUseCaseAsync(config: SolutionConfig): Promise<PlanUseCaseResult> {
-  const heuristicPlan = planUseCase(config);
+export async function planBuildAsync(
+  description: string,
+  config: SolutionConfig
+): Promise<PlanBuildResult> {
+  // Always enrich the config from the raw description first — this benefits
+  // both the synthesis prompt and the heuristic fallback.
+  const { config: enrichedConfig, intent } = enrichConfigFromDescription(config, description);
+  const intentNotes = intent.notes;
+
+  const heuristic = (): PlanBuildResult => {
+    const plan = planUseCase(enrichedConfig);
+    return {
+      steps: plan.steps,
+      planningMode: 'heuristic',
+      useCase: plan.useCase,
+      enrichedConfig,
+      intentNotes,
+      modules: plan.modules,
+      moduleOrder: plan.modules.filter((m) => m.included).map((m) => m.id),
+    };
+  };
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return { ...heuristicPlan, planningMode: 'heuristic' };
+    return heuristic();
   }
 
   try {
-    const refinement = await requestLlmRefinement(config, heuristicPlan, apiKey);
-    if (!refinement) {
-      return { ...heuristicPlan, planningMode: 'heuristic', llmFallbackReason: 'LLM returned no usable refinement.' };
+    const result = await synthesizePlan(description, enrichedConfig, apiKey);
+    if (result.error || !result.steps) {
+      return { ...heuristic(), fallbackReason: result.error || 'Synthesis returned no steps.' };
     }
 
-    const applicableIds = heuristicPlan.modules.filter((m) => m.included).map((m) => m.id);
-    const validationError = validateModuleOrder(refinement.moduleOrder, applicableIds);
-    if (validationError) {
-      return { ...heuristicPlan, planningMode: 'heuristic', llmFallbackReason: validationError };
-    }
-
-    const rebuilt = rebuildFromOrder(config, refinement.moduleOrder, heuristicPlan.modules);
+    const steps: PlannedStep[] = result.steps.map(toPlannedStep);
     return {
-      ...rebuilt,
-      useCase: heuristicPlan.useCase,
-      planningMode: 'llm',
-      llmReasoning: refinement.reasoning,
+      steps,
+      planningMode: 'llm_synthesized',
+      useCase: classifyUseCase(enrichedConfig),
+      enrichedConfig,
+      intentNotes,
+      reasoning: result.reasoning,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ...heuristicPlan, planningMode: 'heuristic', llmFallbackReason: `LLM refinement failed: ${message}` };
+    return { ...heuristic(), fallbackReason: `Synthesis failed: ${message}` };
   }
 }
 
-interface LlmRefinement {
-  moduleOrder: string[];
-  reasoning: string;
+function toPlannedStep(v: ValidatedStep): PlannedStep {
+  return {
+    id: v.id,
+    label: v.label,
+    tool: v.tool,
+    category: v.category,
+    critical: v.critical,
+    args: v.args as Record<string, any>,
+    refs: v.refs,
+    listRefs: v.listRefs,
+  };
 }
 
-async function requestLlmRefinement(
-  config: SolutionConfig,
-  heuristicPlan: UseCasePlan,
-  apiKey: string
-): Promise<LlmRefinement | null> {
-  const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  const applicable = heuristicPlan.modules.filter((m) => m.included);
+interface SynthesisResult {
+  steps?: ValidatedStep[];
+  reasoning?: string;
+  error?: string;
+}
 
-  const prompt = buildPrompt(config, heuristicPlan, applicable);
+async function synthesizePlan(
+  description: string,
+  config: SolutionConfig,
+  apiKey: string
+): Promise<SynthesisResult> {
+  const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+  const prompt = buildSynthesisPrompt(description, config);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -114,7 +152,7 @@ async function requestLlmRefinement(
       },
       body: JSON.stringify({
         model,
-        max_tokens: 512,
+        max_tokens: 4096,
         messages: [{ role: 'user', content: prompt }],
       }),
       signal: controller.signal,
@@ -129,130 +167,72 @@ async function requestLlmRefinement(
 
   const data = await response.json();
   const text: string | undefined = data?.content?.[0]?.text;
-  if (!text) return null;
+  if (!text) return { error: 'LLM returned empty content.' };
 
-  return parseLlmResponse(text);
+  const parsed = parseSynthesisResponse(text);
+  if (!parsed) return { error: 'Could not parse a JSON plan from the LLM response.' };
+
+  const validation = validateSynthesizedSteps(parsed.steps);
+  if (!validation.ok) {
+    return { error: `Synthesized plan rejected by catalog validation: ${validation.error}` };
+  }
+
+  return { steps: validation.steps, reasoning: parsed.reasoning };
 }
 
-function buildPrompt(config: SolutionConfig, heuristicPlan: UseCasePlan, applicable: ModulePlanSummary[]): string {
-  const moduleDescriptions = applicable
-    .map((m) => `  - "${m.id}": ${m.label} (heuristic included it because: ${m.reason})`)
-    .join('\n');
+function buildSynthesisPrompt(description: string, config: SolutionConfig): string {
+  const events = (config.events || []).map((e: any) => (typeof e === 'string' ? e : e?.name));
+  const segments = (config.segments || []).map((s: any) => s?.name);
 
-  return `You are helping order build steps for a martech (Adobe Experience Platform) implementation.
+  return `You are an expert Adobe Experience Platform solutions architect. Given a customer's request in plain English, design a CONCRETE build plan as an ordered list of tool calls.
 
-A deterministic heuristic already decided which capability modules apply to this use case and produced a default order. Your job is ONLY to review and, if you disagree, propose a different ORDER for the SAME set of modules — you cannot add or remove modules.
+Customer request:
+"""
+${description}
+"""
 
-Use case description context:
-  - website_domain: ${config.website_domain}
-  - business_vertical: ${config.business_vertical}
-  - events: ${JSON.stringify((config.events || []).map((e: any) => (typeof e === 'string' ? e : e?.name)))}
-  - segments: ${JSON.stringify((config.segments || []).map((s: any) => s?.name))}
-  - destinations: ${JSON.stringify(config.destinations || [])}
-  - personalization_placements: ${JSON.stringify(config.personalization_placements || [])}
-  - goals: ${JSON.stringify(config.goals || [])}
+Parsed context (hints, not limits — trust the request over these):
+- domain: ${config.website_domain}
+- vertical: ${config.business_vertical}
+- events: ${JSON.stringify(events)}
+- segments: ${JSON.stringify(segments)}
+- destinations: ${JSON.stringify(config.destinations || [])}
+- personalization_placements: ${JSON.stringify(config.personalization_placements || [])}
+- goals: ${JSON.stringify(config.goals || [])}
 
-Applicable modules (you must include EVERY one of these ids exactly once, in whatever order you think is best):
-${moduleDescriptions}
+You may ONLY use these tools (never invent others — a param marked * is required):
+${catalogForPrompt()}
 
-Heuristic's default order: ${JSON.stringify(heuristicPlan.modules.filter((m) => m.included).map((m) => m.id))}
+Design rules:
+- Build the plan that best fits THIS specific request. DIFFERENT requests must produce DIFFERENT plans — do not emit a fixed template. Include only the tools this request actually needs, and as many segments/rules/offers/journeys as the request implies.
+- Chain outputs to inputs with "refs": a ref value is "<earlierStepId>.<path>". Examples: feed a schema step's id into a dataset via {"schema_ref_id": "<schemaStepId>.$id"}; feed a property id via {"property_id": "<propStepId>.id"}; feed a data view via {"data_view_id": "<dvStepId>.data_views.0.id"}; feed a journey via {"journey_id": "<journeyStepId>.journey_id"}.
+- Use "listRefs" (a map of arg -> array of "<stepId>.path" refs) for reactor_add_resources_to_library rule_ids / data_element_ids.
+- Every ref/listRef MUST point to an EARLIER step's id. Give each step a unique short id (e.g. "schema", "dataset", "seg_vip").
+- Supply every REQUIRED param, directly in "args" or via a ref. For object params (CJA "definition", AJO "entry_criteria"/"content") provide a reasonable JSON object.
+- Keep it realistic: between 3 and 30 steps. If knowledge grounding helps, start with a search_adobe_knowledge step.
 
-Respond with ONLY a JSON object, no other text, in this exact shape:
-{"module_order": ["module_id", "module_id", ...], "reasoning": "one or two sentences explaining the order"}
-
-The "module_order" array MUST contain exactly the same module ids listed above (every one, no duplicates, no new ids) — only their order may change.`;
+Respond with ONLY JSON, no prose or code fences:
+{"steps":[{"id":"...","label":"short human label","tool":"<catalog tool>","args":{...},"refs":{...},"listRefs":{...}}],"reasoning":"1-3 sentences on why this plan fits THIS request"}`;
 }
 
-function parseLlmResponse(text: string): LlmRefinement | null {
-  // Be tolerant of the model wrapping JSON in prose or a code fence.
+interface ParsedSynthesis {
+  steps: unknown;
+  reasoning?: string;
+}
+
+function parseSynthesisResponse(text: string): ParsedSynthesis | null {
+  // Tolerate prose or code fences around the JSON object.
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
-
   let parsed: any;
   try {
     parsed = JSON.parse(match[0]);
   } catch {
     return null;
   }
-
-  if (!parsed || !Array.isArray(parsed.module_order)) return null;
-  if (!parsed.module_order.every((id: any) => typeof id === 'string')) return null;
-
+  if (!parsed || typeof parsed !== 'object' || !('steps' in parsed)) return null;
   return {
-    moduleOrder: parsed.module_order,
-    reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : 'No reasoning provided.',
+    steps: parsed.steps,
+    reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : undefined,
   };
-}
-
-/**
- * Validate that the LLM's proposed order is exactly a permutation of the
- * applicable module ids — same set, same count, no additions or omissions.
- * Returns an error string if invalid, or null if valid.
- */
-function validateModuleOrder(proposedOrder: string[], applicableIds: ModuleId[]): string | null {
-  const knownIds = new Set(MODULES.map((m) => m.id));
-  const unknown = proposedOrder.filter((id) => !knownIds.has(id as ModuleId));
-  if (unknown.length > 0) {
-    return `LLM proposed unknown module id(s): ${unknown.join(', ')}.`;
-  }
-
-  const proposedSet = new Set(proposedOrder);
-  if (proposedSet.size !== proposedOrder.length) {
-    return 'LLM proposed duplicate module ids in its order.';
-  }
-
-  const applicableSet = new Set(applicableIds);
-  const missing = applicableIds.filter((id) => !proposedSet.has(id));
-  const extra = proposedOrder.filter((id) => !applicableSet.has(id as ModuleId));
-
-  if (missing.length > 0) {
-    return `LLM's proposed order is missing required module(s): ${missing.join(', ')}.`;
-  }
-  if (extra.length > 0) {
-    return `LLM's proposed order includes module(s) the heuristic marked not applicable: ${extra.join(', ')}.`;
-  }
-
-  return null;
-}
-
-/**
- * Rebuild the full UseCasePlan's step list using the LLM-approved module
- * order, reusing each module's own `build()` — the LLM never generates
- * PlannedStep/tool-call content itself, only the ordering of modules whose
- * step-generation logic is exactly the same deterministic code as the
- * heuristic path.
- */
-function rebuildFromOrder(
-  config: SolutionConfig,
-  order: string[],
-  moduleSummaries: ModulePlanSummary[]
-): UseCasePlan {
-  const useCase = classifyUseCase(config);
-  const ctx = { aepSegmentStepIds: [] as string[], aepSchemaStepId: undefined as string | undefined };
-  const byId = new Map(MODULES.map((m) => [m.id as string, m]));
-  const summaryById = new Map(moduleSummaries.map((s) => [s.id, s]));
-
-  const steps = [];
-  const orderedSummaries: ModulePlanSummary[] = [];
-
-  // Rebuild summaries in the LLM's chosen order (not the heuristic's
-  // original order) — this is what module_order in the API response and
-  // the UI's step-order display reflect, so it must match the order steps
-  // actually ran in.
-  for (const id of order) {
-    const mod = byId.get(id as ModuleId);
-    const originalSummary = summaryById.get(id as ModuleId);
-    if (!mod || !originalSummary) continue; // unreachable given prior validation, but stay defensive
-    const modSteps = mod.build(config, ctx);
-    steps.push(...modSteps);
-    orderedSummaries.push({ ...originalSummary, stepCount: modSteps.length });
-  }
-
-  // Modules the heuristic marked not-applicable were never in `order`
-  // (validated) — append them unchanged for the "skipped modules" list.
-  for (const s of moduleSummaries) {
-    if (!s.included) orderedSummaries.push({ ...s });
-  }
-
-  return { steps, useCase, modules: orderedSummaries };
 }

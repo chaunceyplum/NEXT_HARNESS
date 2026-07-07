@@ -77,12 +77,17 @@ export type ExecutionStatus =
   | 'failed';
 
 export interface ExecutionPlanningInfo {
-  planningMode: 'llm' | 'heuristic';
+  planningMode: 'llm_synthesized' | 'heuristic';
   useCase: Record<string, any>;
-  modules: Record<string, any>[];
-  moduleOrder: string[];
-  llmReasoning?: string;
-  llmFallbackReason?: string;
+  intentNotes?: string[];
+  /** Heuristic-mode only. */
+  modules?: Record<string, any>[];
+  moduleOrder?: string[];
+  /** Synthesized-mode only. */
+  reasoning?: string;
+  synthesizedSteps?: Record<string, any>[];
+  /** Set whenever synthesis was attempted but fell back to heuristic. */
+  fallbackReason?: string;
 }
 
 export interface ExecutionRecord {

@@ -99,7 +99,12 @@ export interface BuildRequest {
 // was skipped/fell back, when applicable).
 // ============================================================================
 
-export type PlanningMode = 'llm' | 'heuristic';
+// planning_mode:
+//   'llm_synthesized' — an LLM designed the actual tool plan (tools + args)
+//                        from the raw request against the tool catalog.
+//   'heuristic'       — the deterministic capability-module planner, run
+//                        against a config first enriched from the raw request.
+export type PlanningMode = 'llm_synthesized' | 'heuristic';
 
 export interface ModulePlanSummary {
   id: string;
@@ -117,13 +122,27 @@ export interface UseCaseProfile {
   summary: string;
 }
 
+/** A compact summary of a synthesized step, for planning transparency. */
+export interface SynthesizedStepSummary {
+  id: string;
+  label: string;
+  tool: string;
+  category: string;
+}
+
 export interface PlanningInfo {
   planning_mode: PlanningMode;
   use_case: UseCaseProfile;
-  modules: ModulePlanSummary[];
-  module_order: string[];
-  llm_reasoning?: string;
-  llm_fallback_reason?: string;
+  /** Intent flags detected from the raw request (both modes). */
+  intent_notes?: string[];
+  /** Heuristic mode: the capability modules considered and their outcome. */
+  modules?: ModulePlanSummary[];
+  module_order?: string[];
+  /** Synthesized mode: the model's rationale + the ordered tool plan it produced. */
+  reasoning?: string;
+  synthesized_steps?: SynthesizedStepSummary[];
+  /** Set when synthesis was attempted but fell back to the heuristic. */
+  fallback_reason?: string;
 }
 
 export interface BuildResponse {
