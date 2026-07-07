@@ -103,6 +103,25 @@ export interface StatusResponse {
   error?: string;
 }
 
+export interface ExecutionSummary {
+  execution_id: string;
+  description: string;
+  status: ExecutionStatus;
+  progress: number;
+  website_domain?: string;
+  business_vertical?: string;
+  step_count: number;
+  completed_step_count: number;
+  failed_step_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListExecutionsResponse {
+  executions: ExecutionSummary[];
+  total: number;
+}
+
 // ============================================================================
 // API Error Types
 // ============================================================================
