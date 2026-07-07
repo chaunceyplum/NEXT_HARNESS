@@ -1,29 +1,22 @@
 /**
  * GET /api/executions/:id/artifacts
  *
- * There are no generated files in this execution model — every step is a
- * live call to a real AEP / CJA / AJO tool that creates a real resource
- * (a schema, a dataset, a segment, a journey, etc.) in the connected Adobe
- * org. This endpoint returns a manifest of those created resources, built
- * directly from each completed step's raw result, instead of a nonexistent
- * "artifacts" tool.
+ * There is no dedicated "get artifacts" tool on the MCP (the old
+ * orchestrator_get_artifacts this route used to call doesn't exist).
+ * msb_execute_solution's description implies it commits/deploys as part of
+ * the build rather than returning downloadable files, so this best-effort
+ * reads whatever msb_get_execution_status returns and looks for anything
+ * that looks like artifacts (an `artifacts`/`files`/`outputs` array).
  *
- * Only meaningful once the execution has finished (completed / failed /
- * completed_with_errors) — while running, it returns whatever has resolved
- * so far.
+ * Verify this against a real execution and tighten it once you know the
+ * actual shape — until then, the UI should treat a missing/empty result
+ * here as normal, not an error.
  */
 
-import { getExecution } from '@/lib/execution-store';
-import { ApiError } from '@/lib/types';
+import { callMcpTool } from '@/lib/mcp-client';
+import { ApiError, Artifact } from '@/lib/types';
 
-interface ResourceEntry {
-  step_id: string;
-  label: string;
-  tool: string;
-  category: 'rag' | 'aep' | 'launch' | 'cja' | 'ajo';
-  status: string;
-  result: any;
-}
+const CANDIDATE_KEYS = ['artifacts', 'files', 'outputs', 'generated_files'];
 
 export async function GET(
   request: Request,
@@ -40,42 +33,40 @@ export async function GET(
     }
 
     const executionId = id.trim();
-    const record = getExecution(executionId);
 
-    if (!record) {
+    let raw: unknown;
+    try {
+      raw = await callMcpTool('msb_get_execution_status', { execution_id: executionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes('not found')) {
+        return Response.json(
+          { error: `Execution not found: ${executionId}`, code: 'NOT_FOUND' } as ApiError,
+          { status: 404 }
+        );
+      }
       return Response.json(
-        { error: `Execution not found: ${executionId}`, code: 'NOT_FOUND' } as ApiError,
-        { status: 404 }
+        { error: `Failed to get execution status: ${message}`, code: 'MCP_ERROR' } as ApiError,
+        { status: 500 }
       );
     }
 
-    const resources: ResourceEntry[] = record.steps
-      .filter((s) => s.status === 'completed' && s.result !== undefined)
-      .map((s) => ({
-        step_id: s.id,
-        label: s.label,
-        tool: s.tool,
-        category: s.category,
-        status: s.status,
-        result: s.result,
-      }));
+    let artifacts: Artifact[] = [];
+    if (raw && typeof raw === 'object') {
+      const obj = raw as Record<string, unknown>;
+      for (const key of CANDIDATE_KEYS) {
+        if (Array.isArray(obj[key])) {
+          artifacts = obj[key] as Artifact[];
+          break;
+        }
+      }
+    }
 
-    return Response.json(
-      {
-        execution_id: record.id,
-        execution_status: record.status,
-        resource_count: resources.length,
-        resources,
-      },
-      { status: 200 }
-    );
+    return Response.json({ artifacts, raw }, { status: 200 });
   } catch (error) {
     console.error('[ARTIFACTS] Unexpected error:', error);
     return Response.json(
-      {
-        error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`,
-        code: 'INTERNAL_ERROR',
-      } as ApiError,
+      { error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`, code: 'INTERNAL_ERROR' } as ApiError,
       { status: 500 }
     );
   }

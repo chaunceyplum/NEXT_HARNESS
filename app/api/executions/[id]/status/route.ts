@@ -1,16 +1,18 @@
 /**
  * GET /api/executions/:id/status
  *
- * Returns the live status of a harness-driven execution directly from the
- * in-memory execution store (lib/execution-store.ts). There is no MCP
- * status tool being polled here — the harness itself is running the plan
- * (lib/execution-runner.ts) and this endpoint just reports its progress.
+ * Polls msb_get_execution_status for a build kicked off via
+ * msb_execute_solution. Only reachable when the agent actually returned an
+ * execution_id (i.e. a full end-to-end build was explicitly allowed and
+ * triggered) — most agent runs resolve inline and never hit this route.
  *
- * Called frequently (every 2-3 seconds) from the frontend while running.
+ * The exact response shape of msb_get_execution_status hasn't been verified
+ * against a live execution, so this passes the raw result through rather
+ * than assuming a rigid structure.
  */
 
-import { getExecution, computeProgress, currentStepLabel } from '@/lib/execution-store';
-import { StatusResponse, StepResponse, PlanningInfo, ObservabilitySummary, ApiError } from '@/lib/types';
+import { callMcpTool } from '@/lib/mcp-client';
+import { ApiError, ExecutionStatus } from '@/lib/types';
 
 export async function GET(
   request: Request,
@@ -27,79 +29,42 @@ export async function GET(
     }
 
     const executionId = id.trim();
-    const record = getExecution(executionId);
+    console.log('[STATUS] Polling status for execution:', executionId);
 
-    if (!record) {
+    let raw: unknown;
+    try {
+      raw = await callMcpTool('msb_get_execution_status', { execution_id: executionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[STATUS] msb_get_execution_status error:', message);
+
+      if (message.toLowerCase().includes('not found')) {
+        return Response.json(
+          { error: `Execution not found: ${executionId}`, code: 'NOT_FOUND' } as ApiError,
+          { status: 404 }
+        );
+      }
+
       return Response.json(
-        {
-          error: `Execution not found: ${executionId}`,
-          code: 'NOT_FOUND',
-          details: {
-            hint: 'Execution state is in-memory and process-local. If the harness restarted or is running as multiple instances, this execution id will not be found. See lib/execution-store.ts for details.',
-          },
-        } as ApiError,
-        { status: 404 }
+        { error: `Failed to get status: ${message}`, code: 'MCP_ERROR' } as ApiError,
+        { status: 500 }
       );
     }
 
-    const steps: StepResponse[] = record.steps.map((s) => ({
-      id: s.id,
-      label: s.label,
-      tool: s.tool,
-      category: s.category,
-      critical: s.critical,
-      status: s.status,
-      result: s.result,
-      error: s.error,
-      startedAt: s.startedAt,
-      completedAt: s.completedAt,
-    }));
-
-    const planning: PlanningInfo | undefined = record.planning
-      ? {
-          planning_mode: record.planning.planningMode,
-          use_case: record.planning.useCase as PlanningInfo['use_case'],
-          intent_notes: record.planning.intentNotes,
-          modules: record.planning.modules as PlanningInfo['modules'],
-          module_order: record.planning.moduleOrder,
-          reasoning: record.planning.reasoning,
-          synthesized_steps: record.planning.synthesizedSteps as PlanningInfo['synthesized_steps'],
-          fallback_reason: record.planning.fallbackReason,
-        }
-      : undefined;
-
-    const invocationsByStatus: Record<string, number> = {};
-    let totalToolDurationMs = 0;
-    for (const inv of record.invocations) {
-      invocationsByStatus[inv.status] = (invocationsByStatus[inv.status] ?? 0) + 1;
-      totalToolDurationMs += inv.durationMs;
+    if (!raw || typeof raw !== 'object') {
+      console.error('[STATUS] Unexpected response from msb_get_execution_status:', raw);
+      return Response.json(
+        { error: 'msb_get_execution_status returned an unexpected response', code: 'INVALID_RESPONSE', details: { received: raw } } as ApiError,
+        { status: 500 }
+      );
     }
-    const observability: ObservabilitySummary = {
-      total_events: record.trace.length,
-      total_invocations: record.invocations.length,
-      invocations_by_status: invocationsByStatus,
-      total_tool_duration_ms: totalToolDurationMs,
-    };
 
-    const response: StatusResponse = {
-      execution_id: record.id,
-      status: record.status,
-      progress: computeProgress(record),
-      current_step: currentStepLabel(record),
-      steps,
-      error: record.error,
-      planning,
-      observability,
-    };
-
-    return Response.json(response, { status: 200 });
+    const status: ExecutionStatus = { execution_id: executionId, ...(raw as Record<string, unknown>) };
+    return Response.json(status, { status: 200 });
   } catch (error) {
     console.error('[STATUS] Unexpected error:', error);
     return Response.json(
-      {
-        error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`,
-        code: 'INTERNAL_ERROR',
-      } as ApiError,
+      { error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`, code: 'INTERNAL_ERROR' } as ApiError,
       { status: 500 }
     );
   }

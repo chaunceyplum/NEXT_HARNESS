@@ -1,5 +1,15 @@
 # START HERE: Building the MCP Harness
 
+> **⚠️ Superseded.** This doc describes the original fixed
+> `planner_parse_natural_language → orchestrator_execute → orchestrator_get_status`
+> pipeline. Two things turned out to be wrong with it: `orchestrator_*` tools
+> don't exist on the real MCP (the real tool is `msb_execute_solution`, with
+> a different config schema), and routing every request — even narrow ones
+> like "create a schema" — through one fixed full-build tool caused it to
+> touch dozens of unrelated tools. The harness now runs a dynamic agent
+> instead: see `lib/llm/agent.ts`, `lib/llm/tool-retrieval.ts`, and
+> `lib/llm/model-registry.ts`. This file is kept for historical context only.
+
 ## TL;DR
 
 You have a complete MCP (139 tools, planner, orchestrator) on AWS Lambda. You need to build a Next.js web app that:
