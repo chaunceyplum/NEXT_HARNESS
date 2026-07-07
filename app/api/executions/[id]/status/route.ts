@@ -1,16 +1,16 @@
 /**
  * GET /api/executions/:id/status
- * 
- * Polls the orchestrator for execution status
- * Called frequently (every 2-5 seconds) from the frontend
+ *
+ * Returns the live status of a harness-driven execution directly from the
+ * in-memory execution store (lib/execution-store.ts). There is no MCP
+ * status tool being polled here — the harness itself is running the plan
+ * (lib/execution-runner.ts) and this endpoint just reports its progress.
+ *
+ * Called frequently (every 2-3 seconds) from the frontend while running.
  */
 
-import { callMcpTool } from '@/lib/mcp-client';
-import {
-  StatusResponse,
-  OrchestratorStatusResponse,
-  ApiError,
-} from '@/lib/types';
+import { getExecution, computeProgress, currentStepLabel } from '@/lib/execution-store';
+import { StatusResponse, StepResponse, ApiError } from '@/lib/types';
 
 export async function GET(
   request: Request,
@@ -19,93 +19,49 @@ export async function GET(
   try {
     const { id } = await params;
 
-    // Validate execution ID format
     if (!id || typeof id !== 'string' || id.trim().length === 0) {
       return Response.json(
-        {
-          error: 'Invalid execution ID',
-          code: 'VALIDATION_ERROR',
-          details: { received: id },
-        } as ApiError,
+        { error: 'Invalid execution ID', code: 'VALIDATION_ERROR', details: { received: id } } as ApiError,
         { status: 400 }
       );
     }
 
     const executionId = id.trim();
+    const record = getExecution(executionId);
 
-    console.log('[STATUS] Polling status for execution:', executionId);
-
-    // Call orchestrator to get status
-    let orchestratorStatus: OrchestratorStatusResponse;
-
-    try {
-      orchestratorStatus = await callMcpTool('orchestrator_get_status', {
-        execution_id: executionId,
-      });
-    } catch (error) {
-      console.error('[STATUS] Orchestrator error:', error);
-
-      // Check if it's a "not found" error
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes('not found') || errorMessage.includes('NOT_FOUND')) {
-        return Response.json(
-          {
-            error: `Execution not found: ${executionId}`,
-            code: 'NOT_FOUND',
-          } as ApiError,
-          { status: 404 }
-        );
-      }
-
+    if (!record) {
       return Response.json(
         {
-          error: `Failed to get status: ${errorMessage}`,
-          code: 'ORCHESTRATOR_ERROR',
+          error: `Execution not found: ${executionId}`,
+          code: 'NOT_FOUND',
+          details: {
+            hint: 'Execution state is in-memory and process-local. If the harness restarted or is running as multiple instances, this execution id will not be found. See lib/execution-store.ts for details.',
+          },
         } as ApiError,
-        { status: 500 }
+        { status: 404 }
       );
     }
 
-    // Validate orchestrator response
-    if (!orchestratorStatus) {
-      console.error('[STATUS] Invalid orchestrator response:', orchestratorStatus);
-      return Response.json(
-        {
-          error: 'Orchestrator returned invalid response',
-          code: 'INVALID_RESPONSE',
-        } as ApiError,
-        { status: 500 }
-      );
-    }
+    const steps: StepResponse[] = record.steps.map((s) => ({
+      id: s.id,
+      label: s.label,
+      tool: s.tool,
+      category: s.category,
+      critical: s.critical,
+      status: s.status,
+      result: s.result,
+      error: s.error,
+      startedAt: s.startedAt,
+      completedAt: s.completedAt,
+    }));
 
-    // Log status for debugging
-    if (orchestratorStatus.status === 'COMPLETED' || orchestratorStatus.status === 'FAILED') {
-      console.log('[STATUS] Execution finished:', {
-        executionId: orchestratorStatus.execution_id,
-        status: orchestratorStatus.status,
-        phase: orchestratorStatus.current_phase,
-        error: orchestratorStatus.error,
-      });
-    } else {
-      console.log('[STATUS] Execution running:', {
-        executionId: orchestratorStatus.execution_id,
-        status: orchestratorStatus.status,
-        phase: orchestratorStatus.current_phase,
-        progress: orchestratorStatus.progress,
-        phaseNumber: orchestratorStatus.phase_number,
-      });
-    }
-
-    // Format response
     const response: StatusResponse = {
-      execution_id: orchestratorStatus.execution_id,
-      status: orchestratorStatus.status,
-      current_phase: orchestratorStatus.current_phase,
-      phase_number: orchestratorStatus.phase_number,
-      total_phases: orchestratorStatus.total_phases,
-      progress: orchestratorStatus.progress,
-      logs: orchestratorStatus.logs || [],
-      error: orchestratorStatus.error,
+      execution_id: record.id,
+      status: record.status,
+      progress: computeProgress(record),
+      current_step: currentStepLabel(record),
+      steps,
+      error: record.error,
     };
 
     return Response.json(response, { status: 200 });

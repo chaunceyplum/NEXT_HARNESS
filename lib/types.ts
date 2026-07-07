@@ -55,64 +55,30 @@ export interface PlannerParseResponse {
 }
 
 // ============================================================================
-// Orchestrator Types
+// Execution Types (harness-driven — the harness itself runs the build by
+// calling individual AEP / CJA / AJO / RAG tools directly. There is no
+// MCP orchestrator tool; msb_execute_solution exists in the MCP but cannot
+// be safely invoked via JSON-RPC and is bound by a 30s Lambda timeout that
+// a multi-phase build cannot complete within. See lib/plan-builder.ts and
+// lib/execution-runner.ts for the real execution model.)
 // ============================================================================
 
-export interface OrchestratorExecuteResponse {
-  execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  phase: string;
-  estimated_duration_seconds: number;
-  message: string;
-}
+export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
-export interface OrchestratorStatusResponse {
-  execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  current_phase: string;
-  phase_number: number;
-  total_phases: number;
-  progress: number; // 0.0 to 1.0
-  estimated_time_remaining_seconds: number;
-  logs: string[];
-  error?: string;
-  artifacts?: string[];
-}
-
-export interface Artifact {
-  type: 'sql' | 'json' | 'javascript' | 'terraform' | 'text' | 'yaml';
-  filename: string;
-  content: string;
-  size_bytes: number;
-  generated_at: string;
-}
-
-export interface OrchestratorArtifactsResponse {
-  artifacts: Artifact[];
-  summary: {
-    total_artifacts: number;
-    total_size_bytes: number;
-  };
-}
-
-// ============================================================================
-// Execution Types
-// ============================================================================
-
-export interface Execution {
+export interface StepResponse {
   id: string;
-  user_id?: string;
-  description: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  phase?: string;
-  progress: number;
-  solution_config?: SolutionConfig;
-  error_message?: string;
-  created_at: string;
-  started_at?: string;
-  completed_at?: string;
-  updated_at: string;
+  label: string;
+  tool: string;
+  category: 'rag' | 'aep' | 'cja' | 'ajo';
+  critical: boolean;
+  status: StepStatus;
+  result?: any;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
 }
+
+export type ExecutionStatus = 'running' | 'completed' | 'completed_with_errors' | 'failed';
 
 export interface BuildRequest {
   description: string;
@@ -123,25 +89,18 @@ export interface BuildRequest {
 
 export interface BuildResponse {
   execution_id: string;
-  status: string;
+  status: ExecutionStatus;
   message: string;
+  step_count: number;
 }
 
 export interface StatusResponse {
   execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  current_phase: string;
-  phase_number: number;
-  total_phases: number;
-  progress: number;
-  logs: string[];
+  status: ExecutionStatus;
+  progress: number; // 0.0 to 1.0
+  current_step: string | null;
+  steps: StepResponse[];
   error?: string;
-}
-
-export interface ArtifactsResponse {
-  artifacts: Artifact[];
-  total_artifacts: number;
-  total_size_bytes: number;
 }
 
 // ============================================================================
@@ -179,10 +138,9 @@ export class ValidationError extends Error {
 export interface ExecutionState {
   id: string;
   description: string;
-  status: 'idle' | 'loading' | 'running' | 'completed' | 'error';
+  status: 'idle' | 'loading' | ExecutionStatus;
   progress: number;
-  currentPhase: string;
-  logs: string[];
+  currentStep: string | null;
+  steps: StepResponse[];
   error?: string;
-  artifacts?: Artifact[];
 }
