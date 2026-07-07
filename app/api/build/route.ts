@@ -87,9 +87,7 @@ export async function POST(request: Request): Promise<Response> {
 
     try {
       planResponse = await callMcpTool('planner_parse_natural_language', {
-        natural_language: description,
-        business_vertical: body.business_vertical || 'generic',
-        url: body.url,
+        user_input: description,
       });
     } catch (error) {
       console.error('[BUILD] Planner error:', error);
