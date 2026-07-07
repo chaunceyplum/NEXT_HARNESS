@@ -33,6 +33,41 @@ export interface StepRecord {
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  /** Wall-clock duration of the step in ms (set when it finishes). */
+  durationMs?: number;
+}
+
+// Observability record types. Kept structurally independent from
+// lib/observability.ts to avoid an import cycle (observability.ts imports
+// this store; this store must not import observability.ts). The tracer in
+// observability.ts constructs these shapes and appends them via the helpers
+// below.
+export interface StoredTraceEvent {
+  seq: number;
+  timestamp: string;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  type: string;
+  message: string;
+  stepId?: string;
+  tool?: string;
+  category?: string;
+  durationMs?: number;
+  data?: Record<string, any>;
+}
+
+export interface StoredInvocation {
+  seq: number;
+  stepId: string;
+  tool: string;
+  category: string;
+  status: 'success' | 'error';
+  argsPreview: string;
+  outputPreview?: string;
+  outputBytes?: number;
+  error?: string;
+  durationMs: number;
+  startedAt: string;
+  completedAt: string;
 }
 
 export type ExecutionStatus =
@@ -60,6 +95,10 @@ export interface ExecutionRecord {
   error?: string;
   createdAt: string;
   updatedAt: string;
+  /** Ordered structured trace of everything the build did (observability). */
+  trace: StoredTraceEvent[];
+  /** One record per real MCP tool call made during the build (observability). */
+  invocations: StoredInvocation[];
 }
 
 // Module-level singleton map — survives across requests within one process.
@@ -82,9 +121,27 @@ export function createExecution(
     planning,
     createdAt: now,
     updatedAt: now,
+    trace: [],
+    invocations: [],
   };
   executions.set(id, record);
   return record;
+}
+
+/** Append an observability trace event to an execution (best-effort). */
+export function appendTraceEvent(executionId: string, event: StoredTraceEvent): void {
+  const record = executions.get(executionId);
+  if (!record) return;
+  record.trace.push(event);
+  record.updatedAt = new Date().toISOString();
+}
+
+/** Append a tool-invocation record to an execution (best-effort). */
+export function appendInvocation(executionId: string, invocation: StoredInvocation): void {
+  const record = executions.get(executionId);
+  if (!record) return;
+  record.invocations.push(invocation);
+  record.updatedAt = new Date().toISOString();
 }
 
 export function getExecution(id: string): ExecutionRecord | undefined {

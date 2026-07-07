@@ -144,6 +144,9 @@ export default function ExecutionsListPage() {
                       {exec.failed_step_count > 0 && (
                         <p className="text-red-500 text-xs mt-1">{exec.failed_step_count} failed</p>
                       )}
+                      {exec.invocation_count !== undefined && exec.invocation_count > 0 && (
+                        <p className="text-gray-400 text-xs mt-1">{exec.invocation_count} tool calls</p>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
                       {new Date(exec.created_at).toLocaleString()}
