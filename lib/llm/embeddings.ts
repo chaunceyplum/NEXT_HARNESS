@@ -9,7 +9,7 @@
  * otherwise falls back to Bedrock Titan embeddings.
  */
 
-import { embedMany } from 'ai';
+import { embedMany, type EmbeddingModel } from 'ai';
 import { openai } from '@ai-sdk/openai';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 
@@ -26,33 +26,57 @@ function getBedrockClient() {
   return bedrockClient;
 }
 
+let warnedAboutDefault = false;
+
 function resolveEmbeddingProvider(): 'openai' | 'bedrock' {
   const configured = process.env.EMBEDDING_PROVIDER as 'openai' | 'bedrock' | undefined;
   if (configured) return configured;
-  return process.env.OPENAI_API_KEY ? 'openai' : 'bedrock';
+  if (process.env.OPENAI_API_KEY) return 'openai';
+
+  // Silent fallback to Bedrock when nothing was configured explicitly —
+  // this only works if AWS credentials are available (env vars, shared
+  // config, or an instance/task role) *and* Bedrock model access for the
+  // Titan embedding model has been granted in this account/region. Warn
+  // once so a resulting auth failure isn't a total surprise.
+  if (!warnedAboutDefault) {
+    warnedAboutDefault = true;
+    console.warn(
+      '[embeddings] No EMBEDDING_PROVIDER or OPENAI_API_KEY set — defaulting to Bedrock Titan embeddings. ' +
+        'Set EMBEDDING_PROVIDER=openai (+ OPENAI_API_KEY) if that is not what you intended, or confirm AWS ' +
+        'credentials and Bedrock model access are configured for this environment.'
+    );
+  }
+  return 'bedrock';
 }
 
-function resolveEmbeddingModel() {
+function resolveEmbeddingModel(): { provider: 'openai' | 'bedrock'; modelId: string; model: EmbeddingModel } {
   const provider = resolveEmbeddingProvider();
   if (provider === 'openai') {
     const modelId = process.env.EMBEDDING_MODEL_ID || 'text-embedding-3-small';
-    return openai.textEmbeddingModel(modelId);
+    return { provider, modelId, model: openai.textEmbeddingModel(modelId) };
   }
   const modelId = process.env.EMBEDDING_MODEL_ID || 'amazon.titan-embed-text-v2:0';
-  return getBedrockClient().textEmbeddingModel(modelId);
+  return { provider, modelId, model: getBedrockClient().textEmbeddingModel(modelId) };
 }
 
 /** Embed a batch of strings, in order. */
 export async function embedTexts(values: string[]): Promise<number[][]> {
   if (values.length === 0) return [];
-  const { embeddings } = await embedMany({
-    model: resolveEmbeddingModel(),
-    values,
-    // Bedrock's Titan embedding models don't batch server-side; cap
-    // concurrency so a ~300-tool catalog doesn't fire 300 simultaneous calls.
-    maxParallelCalls: 8,
-  });
-  return embeddings;
+  const { provider, modelId, model } = resolveEmbeddingModel();
+  try {
+    const { embeddings } = await embedMany({
+      model,
+      values,
+      // Bedrock's Titan embedding models don't batch server-side; cap
+      // concurrency so a ~300-tool catalog doesn't fire 300 simultaneous calls.
+      maxParallelCalls: 8,
+    });
+    return embeddings;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const region = provider === 'bedrock' ? ` region=${process.env.AWS_REGION || '(unset)'}` : '';
+    throw new Error(`embedding provider=${provider} model=${modelId}${region}: ${message}`, { cause: err });
+  }
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
