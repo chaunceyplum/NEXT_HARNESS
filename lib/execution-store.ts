@@ -79,6 +79,19 @@ export function getExecution(id: string): ExecutionRecord | undefined {
   return executions.get(id);
 }
 
+/**
+ * List all known executions, most recently created first.
+ *
+ * Subject to the same process-local caveat as the rest of this store (see
+ * file header) — this only reflects executions created in the current
+ * process since it last started.
+ */
+export function listExecutions(): ExecutionRecord[] {
+  return Array.from(executions.values()).sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+}
+
 export function updateStep(
   executionId: string,
   stepId: string,

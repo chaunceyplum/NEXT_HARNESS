@@ -103,9 +103,14 @@ export default function ExecutionPage() {
               Execution ID: <code className="bg-gray-100 px-2 py-1 rounded">{id}</code>
             </p>
           </div>
-          <Link href="/" className="text-blue-600 hover:text-blue-700 font-medium text-sm">
-            ← New Build
-          </Link>
+          <div className="flex items-center gap-4 flex-shrink-0">
+            <Link href="/executions" className="text-blue-600 hover:text-blue-700 font-medium text-sm">
+              ← All Executions
+            </Link>
+            <Link href="/" className="text-blue-600 hover:text-blue-700 font-medium text-sm">
+              + New Build
+            </Link>
+          </div>
         </div>
 
         {error && (
