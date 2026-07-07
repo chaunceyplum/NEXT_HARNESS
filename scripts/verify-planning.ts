@@ -157,6 +157,70 @@ assertModules(
   ['ajo_activation', 'launch']
 );
 
+// (g) reporting-goal-only ask, zero real segments: "improve our reporting"
+// with no segments/events/destinations at all. cjaModule is included
+// purely via profile.analyticsFocused (not hasSegments), so
+// cjaModule.build() runs with segments = []. Regression fixture for the
+// semantic-review finding: the resulting cja_segment step must NOT
+// reference the literal 'engaged_visitors' — that segment was never
+// created anywhere in the plan since aepModule no longer synthesizes it.
+const reportingGoalOnly = baseConfig({ website_domain: 'example.com', goals: ['improve_reporting'] });
+assertModules(
+  'Fixture G: reporting-goal-only (goals: [improve_reporting], zero segments/events/destinations)',
+  reportingGoalOnly,
+  ['rag', 'cja'],
+  ['aep', 'launch', 'ajo_activation', 'ajo_offers']
+);
+{
+  const plan = planUseCase(reportingGoalOnly);
+  const cjaSegmentStep = plan.steps.find((s) => s.id === 'cja_segment');
+  console.log(`\nFixture G cja_segment step:`, cjaSegmentStep ? cjaSegmentStep.args.name : '(not found)');
+  if (!cjaSegmentStep) {
+    console.error('  FAIL: expected a cja_segment step to exist for this fixture.');
+    failures++;
+  } else if (String(cjaSegmentStep.args.name).includes('engaged_visitors')) {
+    console.error(`  FAIL: cja_segment step references orphaned 'engaged_visitors' segment name (args.name=${cjaSegmentStep.args.name}), but no real AEP segment exists in config.segments.`);
+    failures++;
+  } else {
+    console.log("  PASS: cja_segment step does not reference the orphaned 'engaged_visitors' segment name.");
+  }
+
+  const aepSegmentSteps = plan.steps.filter((s) => s.id.startsWith('aep_segment_'));
+  if (aepSegmentSteps.length !== 0) {
+    console.error('  FAIL: expected zero aep_segment_* steps for this fixture (aep module is not even included).');
+    failures++;
+  } else {
+    console.log('  PASS: no AEP segment step exists to be orphaned-referenced.');
+  }
+}
+
+// (h) personalization/web-destination ask, zero real segments: reproduces
+// the same orphaned-reference pattern for ajoOffersModule, which is
+// included via a "web" destination or personalization placement rather
+// than via hasSegments. The resulting ajo_offer step's eligibility_rules
+// must not gate on a segment name that was never created.
+const personalizationNoSegments = baseConfig({ website_domain: 'example.com', destinations: ['web'] });
+assertModules(
+  'Fixture H: personalization/web-destination-only (zero segments/events)',
+  personalizationNoSegments,
+  ['rag', 'ajo_offers'],
+  ['aep', 'launch', 'cja', 'ajo_activation']
+);
+{
+  const plan = planUseCase(personalizationNoSegments);
+  const offerStep = plan.steps.find((s) => s.id === 'ajo_offer_0');
+  console.log(`\nFixture H ajo_offer_0 eligibility_rules:`, offerStep ? JSON.stringify(offerStep.args.eligibility_rules) : '(not found)');
+  if (!offerStep) {
+    console.error('  FAIL: expected an ajo_offer_0 step to exist for this fixture.');
+    failures++;
+  } else if (JSON.stringify(offerStep.args.eligibility_rules).includes('engaged_visitors')) {
+    console.error(`  FAIL: ajo_offer_0 eligibility_rules references orphaned 'engaged_visitors' segment name, but no real AEP segment exists in config.segments.`);
+    failures++;
+  } else {
+    console.log("  PASS: ajo_offer_0 eligibility_rules does not reference the orphaned 'engaged_visitors' segment name.");
+  }
+}
+
 // ── FEAT-003: LLM synthesis prompt scope-gating ─────────────────────────────
 //
 // We cannot make a live Anthropic call in this sandbox (no ANTHROPIC_API_KEY),

@@ -533,7 +533,15 @@ const cjaModule: CapabilityModule = {
     const vertical = config.business_vertical || 'general';
     const domain = config.website_domain || 'example.com';
     const segments = Array.isArray(config.segments) ? config.segments : [];
-    const primarySegmentName = segments[0]?.name || 'engaged_visitors';
+    // NOTE: this used to fall back to the literal string 'engaged_visitors'
+    // when there was no real segment to mirror — a leftover from the same
+    // "empty means yes" pattern removed from aepModule.build() above. Since
+    // aepModule no longer synthesizes that segment, the fallback pointed at
+    // a segment that was never actually created anywhere in the plan. Now
+    // this is undefined when there's no real segment, and the naming/label
+    // below reflects a standalone reporting segment instead of falsely
+    // claiming to mirror one.
+    const primarySegmentName: string | undefined = segments[0]?.name;
     const steps: PlannedStep[] = [];
 
     const dataViewStepId = 'cja_data_views';
@@ -548,13 +556,17 @@ const cjaModule: CapabilityModule = {
 
     steps.push({
       id: 'cja_segment',
-      label: 'Mirror primary segment in CJA for reporting',
+      label: primarySegmentName ? 'Mirror primary segment in CJA for reporting' : 'Create a baseline CJA reporting segment',
       tool: 'cja_create_segment',
       category: 'cja',
       critical: false,
       args: {
-        name: `${primarySegmentName}_cja_${ctx.runToken}`,
-        description: `CJA reporting segment mirroring AEP segment for ${vertical}`,
+        name: primarySegmentName
+          ? `${primarySegmentName}_cja_${ctx.runToken}`
+          : `${slug(vertical)}_reporting_segment_cja_${ctx.runToken}`,
+        description: primarySegmentName
+          ? `CJA reporting segment mirroring AEP segment for ${vertical}`
+          : `Baseline CJA reporting segment for ${vertical} — no AEP segment exists to mirror.`,
         definition: {
           func: 'segment',
           version: [1, 0, 0],
@@ -685,7 +697,14 @@ const ajoOffersModule: CapabilityModule = {
     const placements: string[] = Array.isArray(config.personalization_placements) && config.personalization_placements.length > 0
       ? config.personalization_placements
       : ['hero_banner'];
-    const primarySegmentName = (Array.isArray(config.segments) && config.segments[0]?.name) || 'engaged_visitors';
+    // NOTE: this used to fall back to the literal string 'engaged_visitors'
+    // when config.segments was empty — the same leftover pattern fixed in
+    // cjaModule.build() above. That segment was never created anywhere in
+    // the plan once aepModule stopped synthesizing it, so an offer's
+    // eligibility_rules could reference a nonexistent segment. Now the
+    // `segments` field is omitted entirely from eligibility_rules when
+    // there's no real segment, instead of gating on one that doesn't exist.
+    const primarySegmentName: string | undefined = Array.isArray(config.segments) ? config.segments[0]?.name : undefined;
 
     return placements.map((placement, idx) => ({
       id: `ajo_offer_${idx}`,
@@ -700,7 +719,7 @@ const ajoOffersModule: CapabilityModule = {
           html: `<div>Personalized ${vertical} content for ${domain} — ${placement}</div>`,
           fallback_text: `Welcome to ${domain}`,
         },
-        eligibility_rules: { segments: [primarySegmentName] },
+        eligibility_rules: primarySegmentName ? { segments: [primarySegmentName] } : {},
       },
     }));
   },
