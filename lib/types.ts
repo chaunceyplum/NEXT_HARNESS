@@ -87,11 +87,51 @@ export interface BuildRequest {
   config_overrides?: Partial<SolutionConfig>;
 }
 
+// ============================================================================
+// Planning Transparency Types
+//
+// The build plan is dynamic per use case (lib/plan-builder.ts's capability
+// modules + optional LLM refinement in lib/llm-planner.ts) rather than one
+// fixed workflow every time. These types surface *why* a given plan looks
+// the way it does: which modules were considered, which were included or
+// skipped and why, what order they ran in, and whether an LLM reordered
+// them or the deterministic heuristic was used (including why the LLM path
+// was skipped/fell back, when applicable).
+// ============================================================================
+
+export type PlanningMode = 'llm' | 'heuristic';
+
+export interface ModulePlanSummary {
+  id: string;
+  label: string;
+  included: boolean;
+  reason: string;
+  step_count: number;
+}
+
+export interface UseCaseProfile {
+  activation_focused: boolean;
+  analytics_focused: boolean;
+  personalization_focused: boolean;
+  needs_data_collection: boolean;
+  summary: string;
+}
+
+export interface PlanningInfo {
+  planning_mode: PlanningMode;
+  use_case: UseCaseProfile;
+  modules: ModulePlanSummary[];
+  module_order: string[];
+  llm_reasoning?: string;
+  llm_fallback_reason?: string;
+}
+
 export interface BuildResponse {
   execution_id: string;
   status: ExecutionStatus;
   message: string;
   step_count: number;
+  planning: PlanningInfo;
 }
 
 export interface StatusResponse {
@@ -101,6 +141,7 @@ export interface StatusResponse {
   current_step: string | null;
   steps: StepResponse[];
   error?: string;
+  planning?: PlanningInfo;
 }
 
 export interface ExecutionSummary {
@@ -113,6 +154,7 @@ export interface ExecutionSummary {
   step_count: number;
   completed_step_count: number;
   failed_step_count: number;
+  planning_mode?: PlanningMode;
   created_at: string;
   updated_at: string;
 }

@@ -10,7 +10,7 @@
  */
 
 import { getExecution, computeProgress, currentStepLabel } from '@/lib/execution-store';
-import { StatusResponse, StepResponse, ApiError } from '@/lib/types';
+import { StatusResponse, StepResponse, PlanningInfo, ApiError } from '@/lib/types';
 
 export async function GET(
   request: Request,
@@ -55,6 +55,17 @@ export async function GET(
       completedAt: s.completedAt,
     }));
 
+    const planning: PlanningInfo | undefined = record.planning
+      ? {
+          planning_mode: record.planning.planningMode,
+          use_case: record.planning.useCase as PlanningInfo['use_case'],
+          modules: record.planning.modules as PlanningInfo['modules'],
+          module_order: record.planning.moduleOrder,
+          llm_reasoning: record.planning.llmReasoning,
+          llm_fallback_reason: record.planning.llmFallbackReason,
+        }
+      : undefined;
+
     const response: StatusResponse = {
       execution_id: record.id,
       status: record.status,
@@ -62,6 +73,7 @@ export async function GET(
       current_step: currentStepLabel(record),
       steps,
       error: record.error,
+      planning,
     };
 
     return Response.json(response, { status: 200 });

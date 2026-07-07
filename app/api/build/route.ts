@@ -3,11 +3,18 @@
  *
  * Accepts a user description and starts a harness-driven build:
  * 1. Calls MCP planner_parse_natural_language to create a SolutionConfig.
- * 2. Builds an ordered plan of real, already-working MCP tool calls
- *    (RAG search, AEP schema/dataset/segments, CJA data view/segment/metric,
- *    AJO journey/activation) — see lib/plan-builder.ts.
+ * 2. Plans the build dynamically per use case (lib/plan-builder.ts's
+ *    capability modules, optionally refined by an LLM via
+ *    lib/llm-planner.ts) — NOT one fixed workflow every time. Which
+ *    modules (RAG/AEP/Launch/CJA/AJO activation/AJO offers) run, and in
+ *    what order, depends on the actual SolutionConfig: an activation-heavy
+ *    use case orders AJO earlier, an analytics-only use case may skip AJO
+ *    entirely, a personalization use case pulls in AJO offers instead of
+ *    (or alongside) journeys, etc.
  * 3. Starts executing that plan (lib/execution-runner.ts) and returns an
- *    execution_id immediately for status polling.
+ *    execution_id immediately for status polling, along with a `planning`
+ *    block explaining which modules were included/skipped and why, and
+ *    whether an LLM or the deterministic heuristic decided the order.
  *
  * NOTE ON EXECUTION MODEL:
  * There is no MCP orchestrator tool. msb_execute_solution exists in the MCP
@@ -22,10 +29,10 @@
 
 import { randomUUID } from 'crypto';
 import { callMcpTool } from '@/lib/mcp-client';
-import { buildStepPlan } from '@/lib/plan-builder';
+import { planUseCaseAsync } from '@/lib/llm-planner';
 import { runPlan } from '@/lib/execution-runner';
-import { createExecution } from '@/lib/execution-store';
-import { BuildRequest, BuildResponse, ApiError } from '@/lib/types';
+import { createExecution, ExecutionPlanningInfo } from '@/lib/execution-store';
+import { BuildRequest, BuildResponse, PlanningInfo, ApiError } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -151,8 +158,14 @@ export async function POST(request: Request): Promise<Response> {
       confidence: solutionConfig.confidence_score,
     });
 
-    // Step 2: Build the step plan (real MCP tool calls against AEP/CJA/AJO/RAG)
-    const steps = buildStepPlan(solutionConfig);
+    // Step 2: Plan the build dynamically for this specific use case.
+    // planUseCaseAsync always resolves (never throws) — with an LLM-refined
+    // module order if ANTHROPIC_API_KEY is set and the call succeeds and
+    // validates, otherwise the deterministic heuristic order. Either way
+    // the *set* of modules that ran is always the heuristic's applicability
+    // decision — the LLM can only reorder, never invent new tool calls.
+    const plan = await planUseCaseAsync(solutionConfig);
+    const { steps } = plan;
 
     if (steps.length === 0) {
       return Response.json(
@@ -164,12 +177,50 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
+    console.log('[BUILD] Use-case plan:', {
+      planningMode: plan.planningMode,
+      useCaseSummary: plan.useCase.summary,
+      includedModules: plan.modules.filter((m) => m.included).map((m) => m.id),
+      skippedModules: plan.modules.filter((m) => !m.included).map((m) => m.id),
+      llmFallbackReason: plan.llmFallbackReason,
+    });
+
+    const planningInfo: PlanningInfo = {
+      planning_mode: plan.planningMode,
+      use_case: {
+        activation_focused: plan.useCase.activationFocused,
+        analytics_focused: plan.useCase.analyticsFocused,
+        personalization_focused: plan.useCase.personalizationFocused,
+        needs_data_collection: plan.useCase.needsDataCollection,
+        summary: plan.useCase.summary,
+      },
+      modules: plan.modules.map((m) => ({
+        id: m.id,
+        label: m.label,
+        included: m.included,
+        reason: m.reason,
+        step_count: m.stepCount,
+      })),
+      module_order: plan.modules.filter((m) => m.included).map((m) => m.id),
+      llm_reasoning: plan.llmReasoning,
+      llm_fallback_reason: plan.llmFallbackReason,
+    };
+
+    const storedPlanning: ExecutionPlanningInfo = {
+      planningMode: plan.planningMode,
+      useCase: planningInfo.use_case,
+      modules: planningInfo.modules,
+      moduleOrder: planningInfo.module_order,
+      llmReasoning: plan.llmReasoning,
+      llmFallbackReason: plan.llmFallbackReason,
+    };
+
     // Step 3: Register the execution and start running it.
     // The runner executes sequentially and updates the in-memory store as it
     // goes; we do not await it here so the request can return immediately
     // and the client can poll /api/executions/:id/status.
     const executionId = randomUUID();
-    createExecution(executionId, description, solutionConfig, steps);
+    createExecution(executionId, description, solutionConfig, steps, storedPlanning);
 
     runPlan(executionId, steps).catch((err) => {
       // Defensive: runPlan already handles per-step errors internally, but
@@ -183,8 +234,9 @@ export async function POST(request: Request): Promise<Response> {
     const response: BuildResponse = {
       execution_id: executionId,
       status: 'running',
-      message: `Build started with ${steps.length} steps against AEP/CJA/AJO/RAG tools.`,
+      message: `Build started with ${steps.length} steps (${planningInfo.module_order.join(' -> ')}), planned via ${plan.planningMode === 'llm' ? 'LLM-refined' : 'heuristic'} use-case analysis.`,
       step_count: steps.length,
+      planning: planningInfo,
     };
 
     return Response.json(response, { status: 201 });
