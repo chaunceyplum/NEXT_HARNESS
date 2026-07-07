@@ -1,22 +1,31 @@
 /**
  * POST /api/build
- * 
- * Accepts a user description and orchestrates the build process:
- * 1. Calls MCP planner to create SolutionConfig
- * 2. Calls MCP orchestrator to start execution
- * 3. Returns execution_id for status polling
+ *
+ * Accepts a user description and starts a harness-driven build:
+ * 1. Calls MCP planner_parse_natural_language to create a SolutionConfig.
+ * 2. Builds an ordered plan of real, already-working MCP tool calls
+ *    (RAG search, AEP schema/dataset/segments, CJA data view/segment/metric,
+ *    AJO journey/activation) — see lib/plan-builder.ts.
+ * 3. Starts executing that plan (lib/execution-runner.ts) and returns an
+ *    execution_id immediately for status polling.
+ *
+ * NOTE ON EXECUTION MODEL:
+ * There is no MCP orchestrator tool. msb_execute_solution exists in the MCP
+ * but (a) cannot be safely invoked over JSON-RPC because the dispatcher's
+ * generic string-to-JSON auto-parsing collides with its own manual
+ * json.loads() of config_json, and (b) is bound by the Lambda's 30s
+ * timeout, which a 9-phase build cannot complete within regardless. Per
+ * explicit instruction, the MCP is not being modified — so "execute
+ * solution" now lives in the harness itself, calling individual AEP / CJA /
+ * AJO / RAG tools directly.
  */
 
+import { randomUUID } from 'crypto';
 import { callMcpTool } from '@/lib/mcp-client';
-import {
-  BuildRequest,
-  BuildResponse,
-  PlannerParseResponse,
-  OrchestratorExecuteResponse,
-  ApiError,
-  MCPError,
-  ValidationError,
-} from '@/lib/types';
+import { buildStepPlan } from '@/lib/plan-builder';
+import { runPlan } from '@/lib/execution-runner';
+import { createExecution } from '@/lib/execution-store';
+import { BuildRequest, BuildResponse, ApiError } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -26,10 +35,7 @@ export async function POST(request: Request): Promise<Response> {
       body = await request.json();
     } catch {
       return Response.json(
-        {
-          error: 'Invalid JSON in request body',
-          code: 'INVALID_JSON',
-        } as ApiError,
+        { error: 'Invalid JSON in request body', code: 'INVALID_JSON' } as ApiError,
         { status: 400 }
       );
     }
@@ -40,26 +46,19 @@ export async function POST(request: Request): Promise<Response> {
         {
           error: 'Missing or invalid "description" field',
           code: 'VALIDATION_ERROR',
-          details: {
-            required: ['description'],
-            received: body,
-          },
+          details: { required: ['description'], received: body },
         } as ApiError,
         { status: 400 }
       );
     }
 
-    // Trim and validate description length
     const description = body.description.trim();
     if (description.length < 10) {
       return Response.json(
         {
           error: 'Description must be at least 10 characters',
           code: 'VALIDATION_ERROR',
-          details: {
-            minLength: 10,
-            received: description.length,
-          },
+          details: { minLength: 10, received: description.length },
         } as ApiError,
         { status: 400 }
       );
@@ -70,21 +69,16 @@ export async function POST(request: Request): Promise<Response> {
         {
           error: 'Description must be less than 5000 characters',
           code: 'VALIDATION_ERROR',
-          details: {
-            maxLength: 5000,
-            received: description.length,
-          },
+          details: { maxLength: 5000, received: description.length },
         } as ApiError,
         { status: 400 }
       );
     }
 
-    console.log('[BUILD] Starting build process for description:', description.substring(0, 50) + '...');
+    console.log('[BUILD] Starting build for description:', description.substring(0, 50) + '...');
 
     // Step 1: Call MCP planner
-    console.log('[BUILD] Calling planner_parse_natural_language...');
-    let planResponse: PlannerParseResponse;
-
+    let planResponse: any;
     try {
       planResponse = await callMcpTool('planner_parse_natural_language', {
         user_input: description,
@@ -100,12 +94,11 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    // Validate planner response
-    if (!planResponse) {
-      console.error('[BUILD] Planner returned null/undefined');
+    if (!planResponse || typeof planResponse !== 'object') {
+      console.error('[BUILD] Planner returned invalid response:', planResponse);
       return Response.json(
         {
-          error: 'Planner returned null or undefined response',
+          error: 'Planner returned null, undefined, or non-object response',
           code: 'INVALID_RESPONSE',
           details: { received: planResponse },
         } as ApiError,
@@ -113,9 +106,8 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    // Check response structure - could be nested differently
-    let solutionConfig = planResponse.solution_config || planResponse;
-    
+    const solutionConfig = planResponse.solution_config || planResponse;
+
     if (!solutionConfig || typeof solutionConfig !== 'object') {
       console.error('[BUILD] Invalid response structure:', planResponse);
       return Response.json(
@@ -131,18 +123,17 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    // Verify solution_config has required fields
     const missingFields: string[] = [];
     if (!solutionConfig.website_domain) missingFields.push('website_domain');
     if (!solutionConfig.business_vertical) missingFields.push('business_vertical');
-    
+
     if (missingFields.length > 0) {
       console.error('[BUILD] Missing required config fields:', missingFields, 'Config:', solutionConfig);
       return Response.json(
         {
           error: `Planner response missing required fields (${missingFields.join(', ')})`,
           code: 'INVALID_RESPONSE',
-          details: { 
+          details: {
             missingFields,
             availableFields: Object.keys(solutionConfig),
             received: solutionConfig,
@@ -160,50 +151,40 @@ export async function POST(request: Request): Promise<Response> {
       confidence: solutionConfig.confidence_score,
     });
 
-    // Step 2: Call MCP orchestrator
-    console.log('[BUILD] Calling orchestrator_execute...');
-    let orchestratorResponse: OrchestratorExecuteResponse;
+    // Step 2: Build the step plan (real MCP tool calls against AEP/CJA/AJO/RAG)
+    const steps = buildStepPlan(solutionConfig);
 
-    try {
-      orchestratorResponse = await callMcpTool('orchestrator_execute', {
-        solution_config: solutionConfig,
-        skip_validation: false,
-        dry_run: false,
-      });
-    } catch (error) {
-      console.error('[BUILD] Orchestrator error:', error);
+    if (steps.length === 0) {
       return Response.json(
         {
-          error: `Orchestrator failed: ${error instanceof Error ? error.message : String(error)}`,
-          code: 'ORCHESTRATOR_ERROR',
+          error: 'Planner produced a config with no actionable steps',
+          code: 'EMPTY_PLAN',
         } as ApiError,
         { status: 500 }
       );
     }
 
-    // Validate orchestrator response
-    if (!orchestratorResponse || !orchestratorResponse.execution_id) {
-      console.error('[BUILD] Invalid orchestrator response:', orchestratorResponse);
-      return Response.json(
-        {
-          error: 'Orchestrator returned invalid response',
-          code: 'INVALID_RESPONSE',
-        } as ApiError,
-        { status: 500 }
-      );
-    }
+    // Step 3: Register the execution and start running it.
+    // The runner executes sequentially and updates the in-memory store as it
+    // goes; we do not await it here so the request can return immediately
+    // and the client can poll /api/executions/:id/status.
+    const executionId = randomUUID();
+    createExecution(executionId, description, solutionConfig, steps);
 
-    console.log('[BUILD] Build started successfully:', {
-      executionId: orchestratorResponse.execution_id,
-      status: orchestratorResponse.status,
-      estimatedDuration: orchestratorResponse.estimated_duration_seconds,
+    runPlan(executionId, steps).catch((err) => {
+      // Defensive: runPlan already handles per-step errors internally, but
+      // guard against anything unexpected escaping it so it doesn't crash
+      // the process or become an unhandled rejection.
+      console.error(`[BUILD] Unexpected error running plan for ${executionId}:`, err);
     });
 
-    // Return success response
+    console.log('[BUILD] Execution started:', { executionId, stepCount: steps.length });
+
     const response: BuildResponse = {
-      execution_id: orchestratorResponse.execution_id,
-      status: orchestratorResponse.status,
-      message: orchestratorResponse.message,
+      execution_id: executionId,
+      status: 'running',
+      message: `Build started with ${steps.length} steps against AEP/CJA/AJO/RAG tools.`,
+      step_count: steps.length,
     };
 
     return Response.json(response, { status: 201 });
