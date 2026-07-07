@@ -83,17 +83,37 @@ function systemPrompt(allowFullBuild: boolean): string {
   ].join('\n');
 }
 
+/**
+ * Every external call in this function (MCP HTTP calls, the embedding
+ * provider, the chat model provider) can plausibly fail with the same
+ * generic error (e.g. a bare "Forbidden"), and by default that failure is
+ * indistinguishable once it reaches the API route's catch block. This
+ * tags the error with which stage produced it so a 403/auth failure can
+ * actually be traced to "MCP endpoint", "embedding provider", or "chat
+ * model provider" instead of just "Forbidden".
+ */
+async function stage<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`[${label}] ${message}`, { cause: err });
+  }
+}
+
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const { userInput, modelKey, allowFullBuild = false, maxSteps = 10, toolShortlistSize = 12 } = opts;
 
-  const catalog = await getMcpToolCatalog();
+  const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
 
   const alwaysOn = ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name));
-  const shortlisted = await shortlistTools(userInput, {
-    k: toolShortlistSize,
-    exclude: [...alwaysOn, FULL_BUILD_TOOL],
-  });
+  const shortlisted = await stage('tool-shortlisting embedding call', () =>
+    shortlistTools(userInput, {
+      k: toolShortlistSize,
+      exclude: [...alwaysOn, FULL_BUILD_TOOL],
+    })
+  );
 
   const selectedNames = new Set<string>([...alwaysOn, ...shortlisted]);
   if (allowFullBuild && catalogByName.has(FULL_BUILD_TOOL)) {
@@ -105,14 +125,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     .filter((d): d is McpToolDefinition => Boolean(d));
 
   const tools = buildAiTools(selectedDefs);
+  const resolvedModelKey = modelKey || getDefaultModelKey();
 
-  const result = await generateText({
-    model: resolveModel(modelKey || getDefaultModelKey()),
-    system: systemPrompt(allowFullBuild),
-    prompt: userInput,
-    tools,
-    stopWhen: stepCountIs(maxSteps),
-  });
+  const result = await stage(`chat model call (${resolvedModelKey})`, () =>
+    generateText({
+      model: resolveModel(resolvedModelKey),
+      system: systemPrompt(allowFullBuild),
+      prompt: userInput,
+      tools,
+      stopWhen: stepCountIs(maxSteps),
+    })
+  );
 
   const steps: AgentStepTrace[] = result.steps.map((step, i) => ({
     stepNumber: i,

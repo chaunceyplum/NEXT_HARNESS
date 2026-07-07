@@ -38,6 +38,22 @@ MCP_ENDPOINT_URL=https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp
 Error: MCP_ENDPOINT_URL is not set. Please configure it in .env.local
 ```
 
+### `MCP_API_KEY` / `MCP_AUTH_TOKEN` (required if your API Gateway stage enforces auth)
+
+`lib/mcp-client.ts` sends no auth header unless one of these is set. A bare
+`403 Forbidden` with no JSON error body (surfaces as `[MCP tool catalog
+(tools/list)] HTTP 403: Forbidden` after the agent's error-tagging) is the
+standard AWS API Gateway response when a required API key is missing —
+that's the first thing to check if you hit it.
+
+```bash
+# If your API Gateway stage has a usage plan / API key requirement:
+MCP_API_KEY=<your-api-gateway-key>       # sent as x-api-key
+
+# If it's fronted by a Lambda authorizer expecting a bearer token instead:
+MCP_AUTH_TOKEN=<your-token>              # sent as Authorization: Bearer <token>
+```
+
 ---
 
 ## LLM Provider Variables (agent — lib/llm/)

@@ -7,6 +7,27 @@
 
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT_URL;
 
+/**
+ * A bare "Forbidden" with no JSON error body is the standard response from
+ * an AWS API Gateway stage that requires an API key (x-api-key) or a
+ * resource policy that rejects unauthenticated requests — this client used
+ * to send neither. Set MCP_API_KEY if your API Gateway stage has a usage
+ * plan / API key requirement, or MCP_AUTH_TOKEN if it's fronted by a
+ * Lambda authorizer expecting a bearer token instead.
+ */
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (process.env.MCP_API_KEY) headers['x-api-key'] = process.env.MCP_API_KEY;
+  if (process.env.MCP_AUTH_TOKEN) headers['Authorization'] = `Bearer ${process.env.MCP_AUTH_TOKEN}`;
+  return headers;
+}
+
+async function describeError(response: Response): Promise<string> {
+  const bodyText = await response.text().catch(() => '');
+  const bodyPreview = bodyText ? ` — ${bodyText.slice(0, 300)}` : '';
+  return `HTTP ${response.status}: ${response.statusText}${bodyPreview}`;
+}
+
 export interface MCPRequest {
   jsonrpc: string;
   id: string;
@@ -61,14 +82,13 @@ export async function callMcpTool(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders(),
       },
       body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      throw new Error(
-        `HTTP ${response.status}: ${response.statusText}`
-      );
+      throw new Error(await describeError(response));
     }
 
     const result: MCPResponse = await response.json();
@@ -150,12 +170,13 @@ export async function listMcpTools(): Promise<unknown> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders(),
       },
       body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      throw new Error(await describeError(response));
     }
 
     const result: MCPResponse = await response.json();
