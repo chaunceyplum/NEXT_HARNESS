@@ -1,0 +1,24 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Environment setup and baseline verification for the existing Next.js harness project before making any planning-logic changes. Confirms npm install works under OPEN_INTERNET and that the current codebase (pre-fix) type-checks and lints cleanly, establishing a known-good baseline to diff against.",
+  "status": "completed",
+  "steps": [
+    "In /projects/sandbox/NEXT_HARNESS, ensure node v22 is active (source /opt/toolchains/.nvm/nvm.sh && nvm use 22, or confirm `node -v` already reports v22.x).",
+    "Run `npm install` to populate node_modules (none exist yet in this checkout).",
+    "Run `npm run build` and confirm it completes successfully (this runs `next build`, which type-checks all .ts/.tsx files per tsconfig.json).",
+    "Run `npm run lint` and note any pre-existing warnings/errors (informational only - do not fix unrelated lint issues as part of this task).",
+    "Record the baseline results (pass/fail for build and lint) in this feature's findings field so later features can confirm they didn't regress the baseline."
+  ],
+  "acceptance_criteria": [
+    "`npm install` completes without error.",
+    "`npm run build` completes successfully with exit code 0.",
+    "Baseline build/lint results are recorded in findings for comparison after later features."
+  ],
+  "verification": [
+    "Run `npm run build` in /projects/sandbox/NEXT_HARNESS and confirm exit code 0.",
+    "Run `npm run lint` and record output (pass/fail is informational, not a blocker for this feature)."
+  ],
+  "blocked_reason": null,
+  "findings": "Baseline established successfully. node v22.22.3 / npm v11.4.2 active via nvm. npm install: succeeded, added 434 packages, 2 moderate severity vulnerabilities reported by npm audit (pre-existing, not addressed - out of scope for this feature). npm run build: SUCCESS, exit code 0. Next.js 16.2.10 (Turbopack) compiled successfully, TypeScript check passed in ~1.8s, all routes (/, /_not-found, /api/build, /api/executions, /api/executions/[id]/artifacts, /api/executions/[id]/status, /api/executions/[id]/trace, /executions, /executions/[id]) built without error. npm run lint: 54 pre-existing problems (54 errors, 0 warnings), all pre-existing and unrelated to the upcoming scope-gating work: 1 react-hooks/set-state-in-effect warning-style issue in app/executions/page.tsx (calling setState directly in useEffect), 7 react/no-unescaped-entities errors in app/page.tsx (unescaped quotes/apostrophes in JSX text), and 46 @typescript-eslint/no-explicit-any errors spread across lib/execution-runner.ts, lib/execution-store.ts, lib/llm-planner.ts, lib/mcp-client.ts, lib/observability.ts, lib/plan-builder.ts, and lib/types.ts. None of these lint errors are new regressions introduced by this feature (this feature made no source changes) and none block the build. This is a known-good baseline: build passes cleanly, lint has the above pre-existing errors. Later features (FEAT-002 modifying lib/plan-builder.ts scope-gating logic, FEAT-003) should re-run npm run build and confirm it still exits 0, and should compare npm run lint output against this exact list to confirm no NEW lint errors were introduced (the 54 existing ones may remain)."
+}

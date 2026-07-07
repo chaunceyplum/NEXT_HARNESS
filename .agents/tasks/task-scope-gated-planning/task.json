@@ -1,0 +1,7 @@
+{
+  "task_id": "task-scope-gated-planning",
+  "task_description": "Fix the harness's build planner so that a narrowly-scoped request (e.g. 'build me a schema in AEP') produces a plan containing only the modules/tools genuinely implied by the request, instead of cascading into Adobe Launch (data collection), CJA (analytics), and AJO (activation/personalization) via synthetic defaults or 'empty means yes' fallback logic in lib/plan-builder.ts's capability-module gating, and via overly-broad regex keyword matching in lib/intent-extractor.ts. Also strengthen the LLM synthesis prompt (lib/llm-planner.ts) to respect the same narrow-scope principle when an Anthropic API key is configured.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

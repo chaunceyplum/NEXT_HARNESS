@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-003",
+  "type": "fix",
+  "description": "Harden the LLM synthesis path (lib/llm-planner.ts's buildSynthesisPrompt, and lib/tool-catalog.ts's validateSynthesizedSteps) so that when ANTHROPIC_API_KEY IS configured (not the case in this sandbox, but is in real deployments), the LLM-synthesized plan also respects narrow scope and doesn't pull in unrelated CJA/AJO/Launch tools for a schema-only ask. Depends on FEAT-002 (heuristic path fixed first, since its module-gating concepts inform what 'narrow scope' means here). This cannot be verified live in this sandbox (no ANTHROPIC_API_KEY present) - verification is via prompt-text review, and by unit-testing the pure validateSynthesizedSteps() function with a synthetic 'over-scoped' plan payload.",
+  "status": "pending",
+  "steps": [
+    "In lib/llm-planner.ts's buildSynthesisPrompt(), strengthen the 'Design rules' section: add an explicit instruction such as 'Do NOT include CJA (cja_*), AJO (msb_create_ajo_*, msb_activate_ajo_campaign), or Adobe Launch/Reactor (reactor_*) tools unless the request explicitly asks for reporting/analytics dashboards (CJA), outbound campaigns/journeys/personalization content (AJO), or client-side event tracking/instrumentation (Launch). A request that only asks for a schema, dataset, or segment in AEP should produce ONLY aep_* (and optionally search_adobe_knowledge) tool calls.' Keep the existing 'DIFFERENT requests must produce DIFFERENT plans' language intact alongside this addition.",
+    "Consider adding a concrete negative example to the prompt (e.g. 'Example: for the request \"build me a schema in AEP\", the correct plan is 1-2 steps: adobe_create_schema and optionally adobe_create_dataset. Do NOT add reactor_create_property, cja_list_data_views, or msb_create_ajo_journey for this request.') to make the desired behavior unambiguous to the model.",
+    "Decide whether lib/tool-catalog.ts's validateSynthesizedSteps() should add a soft category-scope check (e.g. warn/log if a synthesized plan mixes categories that seem disconnected from the request) -- given validateSynthesizedSteps() has no access to the raw description today, a strict enforcement here is not feasible without threading the description through; if adding such a check is impractical without a larger refactor, DO NOT force it in - instead document in a code comment near validateSynthesizedSteps() why category-scope enforcement lives in the prompt (buildSynthesisPrompt) rather than in validation, and confirm this is an acceptable tradeoff given the fallback-to-heuristic safety net already in place (any consistently over-scoped LLM output would need a human to notice via the 'reasoning' field surfaced in PlanningInfo, not a hard rejection).",
+    "Add a small script or extend scripts/verify-planning.ts to unit-test validateSynthesizedSteps() directly (no network call) with two payloads: one narrowly-scoped (schema-only tools) which should validate OK, and one that mixes in unrelated categories which should ALSO still validate OK (since validateSynthesizedSteps() intentionally only checks catalog-membership/required-params, not category scope) -- the point of this test is to document/confirm current validation behavior, not to add new rejection logic, unless step 3 concluded scope enforcement belongs in validation.",
+    "Run `npm run build` to confirm the prompt-string change and any script changes type-check cleanly."
+  ],
+  "acceptance_criteria": [
+    "buildSynthesisPrompt() in lib/llm-planner.ts contains explicit language instructing the model to exclude cja_*/msb_create_ajo_*/msb_activate_ajo_campaign/reactor_* tools unless the request explicitly signals reporting, activation/personalization, or data-collection needs respectively.",
+    "The rationale for where scope enforcement lives (prompt vs. validation) is documented in a code comment.",
+    "`npm run build` passes with exit code 0 after the change."
+  ],
+  "verification": [
+    "Run `npm run build` and confirm exit code 0.",
+    "Read the updated buildSynthesisPrompt() output (e.g. by calling it directly in a quick script with a sample config/description and printing the resulting prompt string) and visually confirm the new scope-limiting instruction appears in the rendered prompt text.",
+    "If scripts/verify-planning.ts was extended with validateSynthesizedSteps() unit checks, run it and confirm both payloads behave as documented."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
