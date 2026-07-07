@@ -29,7 +29,7 @@
 
 import { randomUUID } from 'crypto';
 import { callMcpTool } from '@/lib/mcp-client';
-import { planUseCaseAsync } from '@/lib/llm-planner';
+import { planBuildAsync } from '@/lib/llm-planner';
 import { runPlan } from '@/lib/execution-runner';
 import { createExecution, ExecutionPlanningInfo } from '@/lib/execution-store';
 import { createTracer } from '@/lib/observability';
@@ -159,13 +159,15 @@ export async function POST(request: Request): Promise<Response> {
       confidence: solutionConfig.confidence_score,
     });
 
-    // Step 2: Plan the build dynamically for this specific use case.
-    // planUseCaseAsync always resolves (never throws) — with an LLM-refined
-    // module order if ANTHROPIC_API_KEY is set and the call succeeds and
-    // validates, otherwise the deterministic heuristic order. Either way
-    // the *set* of modules that ran is always the heuristic's applicability
-    // decision — the LLM can only reorder, never invent new tool calls.
-    const plan = await planUseCaseAsync(solutionConfig);
+    // Step 2: Plan the build DYNAMICALLY for this specific request.
+    // planBuildAsync (a) enriches the regex-collapsed config with intent
+    // read from the RAW description, then (b) if ANTHROPIC_API_KEY is set,
+    // asks an LLM to synthesize a request-specific tool plan validated
+    // against the tool catalog, else (c) falls back to the deterministic
+    // capability-module heuristic run against the enriched config. It
+    // always resolves. Different requests now produce different plans —
+    // different tools, counts, and arguments — not one fixed template.
+    const plan = await planBuildAsync(description, solutionConfig);
     const { steps } = plan;
 
     if (steps.length === 0) {
@@ -178,42 +180,64 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    console.log('[BUILD] Use-case plan:', {
+    const orderPreview =
+      plan.planningMode === 'llm_synthesized'
+        ? steps.map((s) => s.tool).join(' -> ')
+        : (plan.moduleOrder ?? []).join(' -> ');
+
+    console.log('[BUILD] Plan:', {
       planningMode: plan.planningMode,
       useCaseSummary: plan.useCase.summary,
-      includedModules: plan.modules.filter((m) => m.included).map((m) => m.id),
-      skippedModules: plan.modules.filter((m) => !m.included).map((m) => m.id),
-      llmFallbackReason: plan.llmFallbackReason,
+      intentNotes: plan.intentNotes,
+      stepCount: steps.length,
+      tools: steps.map((s) => s.tool),
+      fallbackReason: plan.fallbackReason,
     });
+
+    const use_case = {
+      activation_focused: plan.useCase.activationFocused,
+      analytics_focused: plan.useCase.analyticsFocused,
+      personalization_focused: plan.useCase.personalizationFocused,
+      needs_data_collection: plan.useCase.needsDataCollection,
+      summary: plan.useCase.summary,
+    };
+
+    const synthesizedSteps =
+      plan.planningMode === 'llm_synthesized'
+        ? steps.map((s) => ({ id: s.id, label: s.label, tool: s.tool, category: s.category }))
+        : undefined;
+
+    const modules =
+      plan.planningMode === 'heuristic'
+        ? (plan.modules ?? []).map((m) => ({
+            id: m.id,
+            label: m.label,
+            included: m.included,
+            reason: m.reason,
+            step_count: m.stepCount,
+          }))
+        : undefined;
 
     const planningInfo: PlanningInfo = {
       planning_mode: plan.planningMode,
-      use_case: {
-        activation_focused: plan.useCase.activationFocused,
-        analytics_focused: plan.useCase.analyticsFocused,
-        personalization_focused: plan.useCase.personalizationFocused,
-        needs_data_collection: plan.useCase.needsDataCollection,
-        summary: plan.useCase.summary,
-      },
-      modules: plan.modules.map((m) => ({
-        id: m.id,
-        label: m.label,
-        included: m.included,
-        reason: m.reason,
-        step_count: m.stepCount,
-      })),
-      module_order: plan.modules.filter((m) => m.included).map((m) => m.id),
-      llm_reasoning: plan.llmReasoning,
-      llm_fallback_reason: plan.llmFallbackReason,
+      use_case,
+      intent_notes: plan.intentNotes,
+      modules,
+      module_order: plan.moduleOrder,
+      reasoning: plan.reasoning,
+      synthesized_steps: synthesizedSteps,
+      fallback_reason: plan.fallbackReason,
     };
 
     const storedPlanning: ExecutionPlanningInfo = {
       planningMode: plan.planningMode,
-      useCase: planningInfo.use_case,
-      modules: planningInfo.modules,
-      moduleOrder: planningInfo.module_order,
-      llmReasoning: plan.llmReasoning,
-      llmFallbackReason: plan.llmFallbackReason,
+      useCase: use_case,
+      intentNotes: plan.intentNotes,
+      modules,
+      moduleOrder: plan.moduleOrder,
+      reasoning: plan.reasoning,
+      synthesizedSteps,
+      fallbackReason: plan.fallbackReason,
     };
 
     // Step 3: Register the execution and start running it.
@@ -233,13 +257,14 @@ export async function POST(request: Request): Promise<Response> {
         stepCount: steps.length,
       },
     });
-    tracer.event('planning.decided', `Planned via ${plan.planningMode} analysis: ${planningInfo.module_order.join(' -> ')}`, {
+    tracer.event('planning.decided', `Planned via ${plan.planningMode}: ${orderPreview}`, {
       data: {
         planningMode: plan.planningMode,
         useCaseSummary: plan.useCase.summary,
-        moduleOrder: planningInfo.module_order,
-        skippedModules: plan.modules.filter((m) => !m.included).map((m) => m.id),
-        llmFallbackReason: plan.llmFallbackReason,
+        intentNotes: plan.intentNotes,
+        tools: steps.map((s) => s.tool),
+        reasoning: plan.reasoning,
+        fallbackReason: plan.fallbackReason,
       },
     });
 
@@ -255,7 +280,7 @@ export async function POST(request: Request): Promise<Response> {
     const response: BuildResponse = {
       execution_id: executionId,
       status: 'running',
-      message: `Build started with ${steps.length} steps (${planningInfo.module_order.join(' -> ')}), planned via ${plan.planningMode === 'llm' ? 'LLM-refined' : 'heuristic'} use-case analysis.`,
+      message: `Build started with ${steps.length} steps, planned via ${plan.planningMode === 'llm_synthesized' ? 'LLM synthesis from your request' : 'the deterministic heuristic'}.`,
       step_count: steps.length,
       planning: planningInfo,
     };

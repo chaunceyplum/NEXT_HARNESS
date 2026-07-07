@@ -59,10 +59,12 @@ export async function GET(
       ? {
           planning_mode: record.planning.planningMode,
           use_case: record.planning.useCase as PlanningInfo['use_case'],
+          intent_notes: record.planning.intentNotes,
           modules: record.planning.modules as PlanningInfo['modules'],
           module_order: record.planning.moduleOrder,
-          llm_reasoning: record.planning.llmReasoning,
-          llm_fallback_reason: record.planning.llmFallbackReason,
+          reasoning: record.planning.reasoning,
+          synthesized_steps: record.planning.synthesizedSteps as PlanningInfo['synthesized_steps'],
+          fallback_reason: record.planning.fallbackReason,
         }
       : undefined;
 

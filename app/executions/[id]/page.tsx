@@ -245,60 +245,102 @@ export default function ExecutionPage() {
 }
 
 function PlanningPanel({ planning }: { planning: PlanningInfo }) {
-  const included = planning.modules.filter((m) => m.included);
-  const skipped = planning.modules.filter((m) => !m.included);
+  const isSynthesized = planning.planning_mode === 'llm_synthesized';
+  const modules = planning.modules ?? [];
+  const included = modules.filter((m) => m.included);
+  const skipped = modules.filter((m) => !m.included);
+  const moduleOrder = planning.module_order ?? [];
+  const synthesized = planning.synthesized_steps ?? [];
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold text-gray-900">Build Plan (why this order)</h2>
+        <h2 className="text-xl font-bold text-gray-900">Build Plan (how it was decided)</h2>
         <span
           className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
-            planning.planning_mode === 'llm' ? 'bg-violet-100 text-violet-800' : 'bg-gray-100 text-gray-700'
+            isSynthesized ? 'bg-violet-100 text-violet-800' : 'bg-gray-100 text-gray-700'
           }`}
         >
-          {planning.planning_mode === 'llm' ? '✨ LLM-refined' : 'Heuristic'}
+          {isSynthesized ? '✨ LLM-synthesized' : 'Heuristic'}
         </span>
       </div>
 
-      <p className="text-sm text-gray-600 mb-4">
+      <p className="text-sm text-gray-600 mb-3">
         <span className="font-semibold">Use case:</span> {planning.use_case.summary}
       </p>
 
-      {planning.llm_reasoning && (
-        <div className="bg-violet-50 border border-violet-200 rounded-lg p-3 mb-4">
-          <p className="text-xs text-violet-500 font-bold uppercase mb-1">LLM Reasoning</p>
-          <p className="text-sm text-violet-900">{planning.llm_reasoning}</p>
+      {planning.intent_notes && planning.intent_notes.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs text-gray-500 font-bold uppercase mb-1">Intent detected from your request</p>
+          <div className="flex flex-wrap gap-1">
+            {planning.intent_notes.map((n) => (
+              <span key={n} className="px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full text-xs border border-amber-200">
+                {n.replace(/_/g, ' ')}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 
-      {planning.llm_fallback_reason && (
+      {planning.reasoning && (
+        <div className="bg-violet-50 border border-violet-200 rounded-lg p-3 mb-4">
+          <p className="text-xs text-violet-500 font-bold uppercase mb-1">Why this plan (model reasoning)</p>
+          <p className="text-sm text-violet-900">{planning.reasoning}</p>
+        </div>
+      )}
+
+      {planning.fallback_reason && (
         <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
           <p className="text-xs text-gray-500 font-bold uppercase mb-1">Fell back to heuristic</p>
-          <p className="text-sm text-gray-700">{planning.llm_fallback_reason}</p>
+          <p className="text-sm text-gray-700">{planning.fallback_reason}</p>
         </div>
       )}
 
-      <div className="mb-3">
-        <p className="text-xs text-gray-500 font-bold uppercase mb-2">
-          Module order ({included.length} included)
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          {planning.module_order.map((id, i) => {
-            const mod = included.find((m) => m.id === id);
-            return (
-              <div key={id} className="flex items-center gap-2">
-                <span className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold border border-indigo-200">
-                  {i + 1}. {mod?.label || id} ({mod?.step_count ?? 0} steps)
+      {/* Synthesized mode: the ordered tool plan the model designed */}
+      {isSynthesized && synthesized.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs text-gray-500 font-bold uppercase mb-2">
+            Synthesized tool plan ({synthesized.length} steps)
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {synthesized.map((s, i) => (
+              <div key={s.id} className="flex items-center gap-2">
+                <span
+                  className="px-3 py-1 bg-violet-50 text-violet-700 rounded-full text-xs font-bold border border-violet-200"
+                  title={s.label}
+                >
+                  {i + 1}. {s.tool}
                 </span>
-                {i < planning.module_order.length - 1 && <span className="text-gray-300">→</span>}
+                {i < synthesized.length - 1 && <span className="text-gray-300">→</span>}
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
-      {skipped.length > 0 && (
+      {/* Heuristic mode: the capability modules considered */}
+      {!isSynthesized && moduleOrder.length > 0 && (
+        <div className="mb-3">
+          <p className="text-xs text-gray-500 font-bold uppercase mb-2">
+            Module order ({included.length} included)
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {moduleOrder.map((id, i) => {
+              const mod = included.find((m) => m.id === id);
+              return (
+                <div key={id} className="flex items-center gap-2">
+                  <span className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-xs font-bold border border-indigo-200">
+                    {i + 1}. {mod?.label || id} ({mod?.step_count ?? 0} steps)
+                  </span>
+                  {i < moduleOrder.length - 1 && <span className="text-gray-300">→</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {!isSynthesized && skipped.length > 0 && (
         <div className="mt-4">
           <p className="text-xs text-gray-500 font-bold uppercase mb-2">Skipped modules</p>
           <ul className="space-y-1">
