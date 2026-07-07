@@ -101,23 +101,55 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Validate planner response
-    if (!planResponse || !planResponse.solution_config) {
-      console.error('[BUILD] Invalid planner response:', planResponse);
+    if (!planResponse) {
+      console.error('[BUILD] Planner returned null/undefined');
       return Response.json(
         {
-          error: 'Planner returned invalid response',
+          error: 'Planner returned null or undefined response',
           code: 'INVALID_RESPONSE',
+          details: { received: planResponse },
+        } as ApiError,
+        { status: 500 }
+      );
+    }
+
+    // Check response structure - could be nested differently
+    let solutionConfig = planResponse.solution_config || planResponse;
+    
+    if (!solutionConfig || typeof solutionConfig !== 'object') {
+      console.error('[BUILD] Invalid response structure:', planResponse);
+      return Response.json(
+        {
+          error: 'Planner returned invalid response structure',
+          code: 'INVALID_RESPONSE',
+          details: {
+            received: planResponse,
+            expectedStructure: 'Object with solution_config field',
+          },
+        } as ApiError,
+        { status: 500 }
+      );
+    }
+
+    // Verify solution_config has required fields
+    if (!solutionConfig.website_domain && !solutionConfig.business_vertical) {
+      console.error('[BUILD] Missing required config fields:', solutionConfig);
+      return Response.json(
+        {
+          error: 'Planner response missing required fields (website_domain, business_vertical)',
+          code: 'INVALID_RESPONSE',
+          details: { received: Object.keys(solutionConfig) },
         } as ApiError,
         { status: 500 }
       );
     }
 
     console.log('[BUILD] Planner response:', {
-      domain: planResponse.solution_config.website_domain,
-      vertical: planResponse.solution_config.business_vertical,
-      eventsCount: planResponse.solution_config.events.length,
-      segmentsCount: planResponse.solution_config.segments.length,
-      confidence: planResponse.solution_config.confidence_score,
+      domain: solutionConfig.website_domain,
+      vertical: solutionConfig.business_vertical,
+      eventsCount: solutionConfig.events?.length || 0,
+      segmentsCount: solutionConfig.segments?.length || 0,
+      confidence: solutionConfig.confidence_score,
     });
 
     // Step 2: Call MCP orchestrator
@@ -126,7 +158,7 @@ export async function POST(request: Request): Promise<Response> {
 
     try {
       orchestratorResponse = await callMcpTool('orchestrator_execute', {
-        solution_config: planResponse.solution_config,
+        solution_config: solutionConfig,
         skip_validation: false,
         dry_run: false,
       });
