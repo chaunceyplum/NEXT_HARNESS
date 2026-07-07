@@ -13,18 +13,18 @@ export interface MCPRequest {
   method: string;
   params: {
     name: string;
-    arguments: Record<string, any>;
+    arguments: Record<string, unknown>;
   };
 }
 
-export interface MCPResponse<T = any> {
+export interface MCPResponse<T = unknown> {
   jsonrpc: string;
   id: string;
   result?: T;
   error?: {
     code: number;
     message: string;
-    data?: Record<string, any>;
+    data?: Record<string, unknown>;
   };
 }
 
@@ -36,8 +36,8 @@ export interface MCPResponse<T = any> {
  */
 export async function callMcpTool(
   toolName: string,
-  args: Record<string, any>
-): Promise<any> {
+  args: Record<string, unknown>
+): Promise<unknown> {
   if (!MCP_ENDPOINT) {
     throw new Error(
       'MCP_ENDPOINT_URL is not set. Please configure it in .env.local'
@@ -108,21 +108,17 @@ export async function callMcpTool(
  * parses it so callers get the real tool output directly, instead of the
  * raw MCP envelope.
  */
-function unwrapToolResult(raw: any): any {
-  if (
-    raw &&
-    typeof raw === 'object' &&
-    Array.isArray(raw.content) &&
-    raw.content.length > 0 &&
-    raw.content[0]?.type === 'text' &&
-    typeof raw.content[0]?.text === 'string'
-  ) {
-    const text = raw.content[0].text;
-    try {
-      return JSON.parse(text);
-    } catch {
-      // Not JSON (e.g. plain string tool output) — return as-is
-      return text;
+function unwrapToolResult(raw: unknown): unknown {
+  if (raw && typeof raw === 'object' && Array.isArray((raw as { content?: unknown }).content)) {
+    const content = (raw as { content: Array<{ type?: string; text?: string }> }).content;
+    if (content.length > 0 && content[0]?.type === 'text' && typeof content[0]?.text === 'string') {
+      const text = content[0].text;
+      try {
+        return JSON.parse(text);
+      } catch {
+        // Not JSON (e.g. plain string tool output) — return as-is
+        return text;
+      }
     }
   }
 
@@ -133,7 +129,7 @@ function unwrapToolResult(raw: any): any {
 /**
  * List all available MCP tools
  */
-export async function listMcpTools(): Promise<any> {
+export async function listMcpTools(): Promise<unknown> {
   if (!MCP_ENDPOINT) {
     throw new Error(
       'MCP_ENDPOINT_URL is not set. Please configure it in .env.local'

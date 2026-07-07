@@ -1,4 +1,21 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is the web harness for an Adobe Experience Cloud MCP server (schemas,
+segments, CJA, AJO, Reactor/Launch, AWS, Databricks, Snowflake, and a
+solutions-architecture knowledge base — ~300 tools total).
+
+`POST /api/build` runs a dynamic agent (`lib/llm/agent.ts`) rather than a
+fixed pipeline: it semantically shortlists the handful of MCP tools relevant
+to your request (`lib/llm/tool-retrieval.ts`), then lets an LLM call them in
+a loop until the task is done. The model is swappable per request across
+Anthropic, Bedrock, or OpenAI (`lib/llm/model-registry.ts`) — pick cheap vs.
+expensive, or switch providers, without code changes. The full end-to-end,
+9-phase martech build tool (`msb_execute_solution`) is only offered to the
+agent when a request explicitly opts into it (`allowFullBuild`), since it
+has real side effects across GitHub/Netlify/Adobe/AWS.
+
+See `ENVIRONMENT_VARIABLES.md` for the required `MCP_ENDPOINT_URL` and the
+LLM provider variables that control which models are available.
+
+This project was bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
 

@@ -1,212 +1,114 @@
 /**
  * POST /api/build
- * 
- * Accepts a user description and orchestrates the build process:
- * 1. Calls MCP planner to create SolutionConfig
- * 2. Calls MCP orchestrator to start execution
- * 3. Returns execution_id for status polling
+ *
+ * Runs the dynamic agent (lib/llm/agent.ts) against a user description:
+ *  1. Shortlists relevant MCP tools via semantic search over the tool catalog
+ *  2. Lets the selected LLM (provider/model chosen per-request) call tools
+ *     in a loop until it's done, instead of forcing every request through a
+ *     fixed planner -> full-build pipeline
+ *  3. Returns the step-by-step trace, plus an execution_id if the agent
+ *     kicked off an async build (msb_execute_solution)
  */
 
-import { callMcpTool } from '@/lib/mcp-client';
-import {
-  BuildRequest,
-  BuildResponse,
-  PlannerParseResponse,
-  OrchestratorExecuteResponse,
-  ApiError,
-  MCPError,
-  ValidationError,
-} from '@/lib/types';
+import { runAgent } from '@/lib/llm/agent';
+import { getModelRegistry } from '@/lib/llm/model-registry';
+import { ApiError, BuildRequest, BuildResponse } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    // Parse request body
     let body: BuildRequest;
     try {
       body = await request.json();
     } catch {
       return Response.json(
-        {
-          error: 'Invalid JSON in request body',
-          code: 'INVALID_JSON',
-        } as ApiError,
+        { error: 'Invalid JSON in request body', code: 'INVALID_JSON' } as ApiError,
         { status: 400 }
       );
     }
 
-    // Validate required fields
     if (!body.description || typeof body.description !== 'string') {
       return Response.json(
         {
           error: 'Missing or invalid "description" field',
           code: 'VALIDATION_ERROR',
-          details: {
-            required: ['description'],
-            received: body,
-          },
+          details: { required: ['description'] },
         } as ApiError,
         { status: 400 }
       );
     }
 
-    // Trim and validate description length
     const description = body.description.trim();
     if (description.length < 10) {
       return Response.json(
         {
           error: 'Description must be at least 10 characters',
           code: 'VALIDATION_ERROR',
-          details: {
-            minLength: 10,
-            received: description.length,
-          },
+          details: { minLength: 10, received: description.length },
         } as ApiError,
         { status: 400 }
       );
     }
-
     if (description.length > 5000) {
       return Response.json(
         {
           error: 'Description must be less than 5000 characters',
           code: 'VALIDATION_ERROR',
-          details: {
-            maxLength: 5000,
-            received: description.length,
-          },
+          details: { maxLength: 5000, received: description.length },
         } as ApiError,
         { status: 400 }
       );
     }
 
-    console.log('[BUILD] Starting build process for description:', description.substring(0, 50) + '...');
+    if (body.model) {
+      const known = getModelRegistry().some((entry) => entry.key === body.model);
+      if (!known) {
+        return Response.json(
+          {
+            error: `Unknown model "${body.model}"`,
+            code: 'VALIDATION_ERROR',
+            details: { available: getModelRegistry().map((entry) => entry.key) },
+          } as ApiError,
+          { status: 400 }
+        );
+      }
+    }
 
-    // Step 1: Call MCP planner
-    console.log('[BUILD] Calling planner_parse_natural_language...');
-    let planResponse: PlannerParseResponse;
+    console.log('[BUILD] Running agent for:', description.slice(0, 80));
 
+    let agentResult;
     try {
-      planResponse = await callMcpTool('planner_parse_natural_language', {
-        user_input: description,
+      agentResult = await runAgent({
+        userInput: description,
+        modelKey: body.model,
+        allowFullBuild: body.allowFullBuild === true,
       });
     } catch (error) {
-      console.error('[BUILD] Planner error:', error);
+      console.error('[BUILD] Agent run failed:', error);
       return Response.json(
         {
-          error: `Planner failed: ${error instanceof Error ? error.message : String(error)}`,
-          code: 'PLANNER_ERROR',
+          error: `Agent run failed: ${error instanceof Error ? error.message : String(error)}`,
+          code: 'AGENT_ERROR',
         } as ApiError,
         { status: 500 }
       );
     }
 
-    // Validate planner response
-    if (!planResponse) {
-      console.error('[BUILD] Planner returned null/undefined');
-      return Response.json(
-        {
-          error: 'Planner returned null or undefined response',
-          code: 'INVALID_RESPONSE',
-          details: { received: planResponse },
-        } as ApiError,
-        { status: 500 }
-      );
-    }
-
-    // Check response structure - could be nested differently
-    let solutionConfig = planResponse.solution_config || planResponse;
-    
-    if (!solutionConfig || typeof solutionConfig !== 'object') {
-      console.error('[BUILD] Invalid response structure:', planResponse);
-      return Response.json(
-        {
-          error: 'Planner returned invalid response structure',
-          code: 'INVALID_RESPONSE',
-          details: {
-            received: planResponse,
-            expectedStructure: 'Object with solution_config field',
-          },
-        } as ApiError,
-        { status: 500 }
-      );
-    }
-
-    // Verify solution_config has required fields
-    const missingFields: string[] = [];
-    if (!solutionConfig.website_domain) missingFields.push('website_domain');
-    if (!solutionConfig.business_vertical) missingFields.push('business_vertical');
-    
-    if (missingFields.length > 0) {
-      console.error('[BUILD] Missing required config fields:', missingFields, 'Config:', solutionConfig);
-      return Response.json(
-        {
-          error: `Planner response missing required fields (${missingFields.join(', ')})`,
-          code: 'INVALID_RESPONSE',
-          details: { 
-            missingFields,
-            availableFields: Object.keys(solutionConfig),
-            received: solutionConfig,
-          },
-        } as ApiError,
-        { status: 500 }
-      );
-    }
-
-    console.log('[BUILD] Planner response:', {
-      domain: solutionConfig.website_domain,
-      vertical: solutionConfig.business_vertical,
-      eventsCount: solutionConfig.events?.length || 0,
-      segmentsCount: solutionConfig.segments?.length || 0,
-      confidence: solutionConfig.confidence_score,
+    console.log('[BUILD] Agent finished:', {
+      steps: agentResult.steps.length,
+      toolsConsidered: agentResult.toolsConsidered,
+      executionId: agentResult.executionId,
+      finishReason: agentResult.finishReason,
     });
 
-    // Step 2: Call MCP orchestrator
-    console.log('[BUILD] Calling orchestrator_execute...');
-    let orchestratorResponse: OrchestratorExecuteResponse;
-
-    try {
-      orchestratorResponse = await callMcpTool('orchestrator_execute', {
-        solution_config: solutionConfig,
-        skip_validation: false,
-        dry_run: false,
-      });
-    } catch (error) {
-      console.error('[BUILD] Orchestrator error:', error);
-      return Response.json(
-        {
-          error: `Orchestrator failed: ${error instanceof Error ? error.message : String(error)}`,
-          code: 'ORCHESTRATOR_ERROR',
-        } as ApiError,
-        { status: 500 }
-      );
-    }
-
-    // Validate orchestrator response
-    if (!orchestratorResponse || !orchestratorResponse.execution_id) {
-      console.error('[BUILD] Invalid orchestrator response:', orchestratorResponse);
-      return Response.json(
-        {
-          error: 'Orchestrator returned invalid response',
-          code: 'INVALID_RESPONSE',
-        } as ApiError,
-        { status: 500 }
-      );
-    }
-
-    console.log('[BUILD] Build started successfully:', {
-      executionId: orchestratorResponse.execution_id,
-      status: orchestratorResponse.status,
-      estimatedDuration: orchestratorResponse.estimated_duration_seconds,
-    });
-
-    // Return success response
     const response: BuildResponse = {
-      execution_id: orchestratorResponse.execution_id,
-      status: orchestratorResponse.status,
-      message: orchestratorResponse.message,
+      finalText: agentResult.finalText,
+      steps: agentResult.steps,
+      toolsConsidered: agentResult.toolsConsidered,
+      executionId: agentResult.executionId,
+      finishReason: agentResult.finishReason,
     };
 
-    return Response.json(response, { status: 201 });
+    return Response.json(response, { status: 200 });
   } catch (error) {
     console.error('[BUILD] Unexpected error:', error);
     return Response.json(

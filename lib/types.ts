@@ -3,7 +3,52 @@
  */
 
 // ============================================================================
-// Planner Types
+// Agent Types (dynamic orchestration — see lib/llm/agent.ts)
+// ============================================================================
+
+export interface AgentToolCallDTO {
+  toolName: string;
+  input: unknown;
+}
+
+export interface AgentToolResultDTO {
+  toolName: string;
+  output: unknown;
+}
+
+export interface AgentStepDTO {
+  stepNumber: number;
+  text: string;
+  toolCalls: AgentToolCallDTO[];
+  toolResults: AgentToolResultDTO[];
+}
+
+export interface BuildRequest {
+  description: string;
+  /** Model registry key, e.g. "anthropic:sonnet". Omit to use the server default. */
+  model?: string;
+  /** Must be explicitly true to let the agent reach for the full end-to-end build tool. */
+  allowFullBuild?: boolean;
+}
+
+export interface BuildResponse {
+  finalText: string;
+  steps: AgentStepDTO[];
+  toolsConsidered: string[];
+  /** Present only if a tool in the run (typically msb_execute_solution) kicked off an async execution. */
+  executionId?: string;
+  finishReason: string;
+}
+
+export interface ModelOption {
+  key: string;
+  label: string;
+  tier: 'cheap' | 'balanced' | 'expensive';
+}
+
+// ============================================================================
+// Planner Types (planner_parse_natural_language is still a real MCP tool the
+// agent may call — kept for callers that want to work with its output directly)
 // ============================================================================
 
 export interface EventDefinition {
@@ -39,109 +84,49 @@ export interface SolutionConfig {
   goals: string[];
   success_metrics: string[];
   confidence_score: number;
-  extraction_metadata?: Record<string, any>;
+  extraction_metadata?: Record<string, unknown>;
 }
 
 export interface PlannerParseResponse {
   solution_config: SolutionConfig;
   report?: {
-    extracted_entities: Record<string, any>;
+    extracted_entities: Record<string, unknown>;
     validation_result: {
       warnings: string[];
       suggestions: string[];
     };
-    enrichment_applied: Record<string, any>;
+    enrichment_applied: Record<string, unknown>;
   };
 }
 
 // ============================================================================
-// Orchestrator Types
+// msb_execute_solution execution tracking
+//
+// NOTE: msb_get_execution_status's real response shape hasn't been verified
+// against a live execution — these fields are the best guess based on the
+// tool's stated purpose. Treat unknown fields as `unknown` rather than
+// assuming a rigid shape, and tighten this once you've seen a real response.
 // ============================================================================
 
-export interface OrchestratorExecuteResponse {
+export interface ExecutionStatus {
   execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  phase: string;
-  estimated_duration_seconds: number;
-  message: string;
-}
-
-export interface OrchestratorStatusResponse {
-  execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  current_phase: string;
-  phase_number: number;
-  total_phases: number;
-  progress: number; // 0.0 to 1.0
-  estimated_time_remaining_seconds: number;
-  logs: string[];
+  status?: string;
+  current_phase?: string;
+  phase_number?: number;
+  total_phases?: number;
+  progress?: number;
+  logs?: string[];
   error?: string;
-  artifacts?: string[];
+  [key: string]: unknown;
 }
 
 export interface Artifact {
-  type: 'sql' | 'json' | 'javascript' | 'terraform' | 'text' | 'yaml';
-  filename: string;
-  content: string;
-  size_bytes: number;
-  generated_at: string;
-}
-
-export interface OrchestratorArtifactsResponse {
-  artifacts: Artifact[];
-  summary: {
-    total_artifacts: number;
-    total_size_bytes: number;
-  };
-}
-
-// ============================================================================
-// Execution Types
-// ============================================================================
-
-export interface Execution {
-  id: string;
-  user_id?: string;
-  description: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  phase?: string;
-  progress: number;
-  solution_config?: SolutionConfig;
-  error_message?: string;
-  created_at: string;
-  started_at?: string;
-  completed_at?: string;
-  updated_at: string;
-}
-
-export interface BuildRequest {
-  description: string;
-  business_vertical?: string;
-  url?: string;
-  config_overrides?: Partial<SolutionConfig>;
-}
-
-export interface BuildResponse {
-  execution_id: string;
-  status: string;
-  message: string;
-}
-
-export interface StatusResponse {
-  execution_id: string;
-  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED';
-  current_phase: string;
-  phase_number: number;
-  total_phases: number;
-  progress: number;
-  logs: string[];
-  error?: string;
-}
-
-export interface ArtifactsResponse {
-  artifacts: Artifact[];
-  total_artifacts: number;
-  total_size_bytes: number;
+  type?: string;
+  filename?: string;
+  content?: string;
+  size_bytes?: number;
+  generated_at?: string;
+  [key: string]: unknown;
 }
 
 // ============================================================================
@@ -151,14 +136,14 @@ export interface ArtifactsResponse {
 export interface ApiError {
   error: string;
   code?: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
 }
 
 export class MCPError extends Error {
   constructor(
     message: string,
     public code: string = 'MCP_ERROR',
-    public details?: Record<string, any>
+    public details?: Record<string, unknown>
   ) {
     super(message);
     this.name = 'MCPError';
@@ -166,23 +151,8 @@ export class MCPError extends Error {
 }
 
 export class ValidationError extends Error {
-  constructor(message: string, public details?: Record<string, any>) {
+  constructor(message: string, public details?: Record<string, unknown>) {
     super(message);
     this.name = 'ValidationError';
   }
-}
-
-// ============================================================================
-// UI State Types
-// ============================================================================
-
-export interface ExecutionState {
-  id: string;
-  description: string;
-  status: 'idle' | 'loading' | 'running' | 'completed' | 'error';
-  progress: number;
-  currentPhase: string;
-  logs: string[];
-  error?: string;
-  artifacts?: Artifact[];
 }

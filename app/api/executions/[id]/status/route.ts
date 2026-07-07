@@ -1,16 +1,18 @@
 /**
  * GET /api/executions/:id/status
- * 
- * Polls the orchestrator for execution status
- * Called frequently (every 2-5 seconds) from the frontend
+ *
+ * Polls msb_get_execution_status for a build kicked off via
+ * msb_execute_solution. Only reachable when the agent actually returned an
+ * execution_id (i.e. a full end-to-end build was explicitly allowed and
+ * triggered) — most agent runs resolve inline and never hit this route.
+ *
+ * The exact response shape of msb_get_execution_status hasn't been verified
+ * against a live execution, so this passes the raw result through rather
+ * than assuming a rigid structure.
  */
 
 import { callMcpTool } from '@/lib/mcp-client';
-import {
-  StatusResponse,
-  OrchestratorStatusResponse,
-  ApiError,
-} from '@/lib/types';
+import { ApiError, ExecutionStatus } from '@/lib/types';
 
 export async function GET(
   request: Request,
@@ -19,103 +21,50 @@ export async function GET(
   try {
     const { id } = await params;
 
-    // Validate execution ID format
     if (!id || typeof id !== 'string' || id.trim().length === 0) {
       return Response.json(
-        {
-          error: 'Invalid execution ID',
-          code: 'VALIDATION_ERROR',
-          details: { received: id },
-        } as ApiError,
+        { error: 'Invalid execution ID', code: 'VALIDATION_ERROR', details: { received: id } } as ApiError,
         { status: 400 }
       );
     }
 
     const executionId = id.trim();
-
     console.log('[STATUS] Polling status for execution:', executionId);
 
-    // Call orchestrator to get status
-    let orchestratorStatus: OrchestratorStatusResponse;
-
+    let raw: unknown;
     try {
-      orchestratorStatus = await callMcpTool('orchestrator_get_status', {
-        execution_id: executionId,
-      });
+      raw = await callMcpTool('msb_get_execution_status', { execution_id: executionId });
     } catch (error) {
-      console.error('[STATUS] Orchestrator error:', error);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[STATUS] msb_get_execution_status error:', message);
 
-      // Check if it's a "not found" error
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      if (errorMessage.includes('not found') || errorMessage.includes('NOT_FOUND')) {
+      if (message.toLowerCase().includes('not found')) {
         return Response.json(
-          {
-            error: `Execution not found: ${executionId}`,
-            code: 'NOT_FOUND',
-          } as ApiError,
+          { error: `Execution not found: ${executionId}`, code: 'NOT_FOUND' } as ApiError,
           { status: 404 }
         );
       }
 
       return Response.json(
-        {
-          error: `Failed to get status: ${errorMessage}`,
-          code: 'ORCHESTRATOR_ERROR',
-        } as ApiError,
+        { error: `Failed to get status: ${message}`, code: 'MCP_ERROR' } as ApiError,
         { status: 500 }
       );
     }
 
-    // Validate orchestrator response
-    if (!orchestratorStatus) {
-      console.error('[STATUS] Invalid orchestrator response:', orchestratorStatus);
+    if (!raw || typeof raw !== 'object') {
+      console.error('[STATUS] Unexpected response from msb_get_execution_status:', raw);
       return Response.json(
-        {
-          error: 'Orchestrator returned invalid response',
-          code: 'INVALID_RESPONSE',
-        } as ApiError,
+        { error: 'msb_get_execution_status returned an unexpected response', code: 'INVALID_RESPONSE', details: { received: raw } } as ApiError,
         { status: 500 }
       );
     }
 
-    // Log status for debugging
-    if (orchestratorStatus.status === 'COMPLETED' || orchestratorStatus.status === 'FAILED') {
-      console.log('[STATUS] Execution finished:', {
-        executionId: orchestratorStatus.execution_id,
-        status: orchestratorStatus.status,
-        phase: orchestratorStatus.current_phase,
-        error: orchestratorStatus.error,
-      });
-    } else {
-      console.log('[STATUS] Execution running:', {
-        executionId: orchestratorStatus.execution_id,
-        status: orchestratorStatus.status,
-        phase: orchestratorStatus.current_phase,
-        progress: orchestratorStatus.progress,
-        phaseNumber: orchestratorStatus.phase_number,
-      });
-    }
-
-    // Format response
-    const response: StatusResponse = {
-      execution_id: orchestratorStatus.execution_id,
-      status: orchestratorStatus.status,
-      current_phase: orchestratorStatus.current_phase,
-      phase_number: orchestratorStatus.phase_number,
-      total_phases: orchestratorStatus.total_phases,
-      progress: orchestratorStatus.progress,
-      logs: orchestratorStatus.logs || [],
-      error: orchestratorStatus.error,
-    };
-
-    return Response.json(response, { status: 200 });
+    const status: ExecutionStatus = { execution_id: executionId, ...(raw as Record<string, unknown>) };
+    return Response.json(status, { status: 200 });
   } catch (error) {
     console.error('[STATUS] Unexpected error:', error);
     return Response.json(
-      {
-        error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`,
-        code: 'INTERNAL_ERROR',
-      } as ApiError,
+      { error: `Internal server error: ${error instanceof Error ? error.message : String(error)}`, code: 'INTERNAL_ERROR' } as ApiError,
       { status: 500 }
     );
   }

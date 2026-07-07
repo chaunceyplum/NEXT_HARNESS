@@ -1,5 +1,16 @@
 # Documentation Index: Complete Harness Setup Guide
 
+> **⚠️ Superseded.** Everything below describes the original fixed
+> planner→orchestrator pipeline, which called tools that don't exist on the
+> real MCP (`orchestrator_*`) and, once fixed to the real `msb_execute_solution`,
+> would still route every request through one monolithic full-build tool
+> regardless of scope. The harness now runs a dynamic, provider-agnostic
+> agent instead — start with `lib/llm/agent.ts` (the tool-call loop),
+> `lib/llm/tool-retrieval.ts` (semantic tool shortlisting), and
+> `lib/llm/model-registry.ts` (swappable Anthropic/Bedrock/OpenAI models,
+> configured via `ENVIRONMENT_VARIABLES.md`'s "LLM Provider Variables"
+> section). The docs below are kept for historical context only.
+
 ## Overview
 
 This directory contains comprehensive documentation for building an MCP Harness—a web application that automates MarTech solution deployment.

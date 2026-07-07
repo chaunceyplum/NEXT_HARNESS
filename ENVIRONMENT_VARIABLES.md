@@ -40,6 +40,77 @@ Error: MCP_ENDPOINT_URL is not set. Please configure it in .env.local
 
 ---
 
+## LLM Provider Variables (agent — lib/llm/)
+
+The `/api/build` route no longer runs a fixed planner→orchestrator pipeline.
+It runs an agent (lib/llm/agent.ts) that shortlists relevant MCP tools and
+lets an LLM decide which ones to call. The model is swappable per request —
+these variables control which providers/models are available to pick from.
+
+### `ANTHROPIC_API_KEY` (required for the built-in Anthropic entries)
+
+Used by the `anthropic:haiku` / `anthropic:sonnet` / `anthropic:opus`
+registry entries (lib/llm/model-registry.ts), which are included by default.
+
+### `DEFAULT_MODEL` (optional)
+
+Registry key used when a build request doesn't specify `model`. Defaults to
+`anthropic:sonnet`. Example: `DEFAULT_MODEL=anthropic:haiku` to default to
+the cheapest option.
+
+### Bedrock entries (optional)
+
+Set any of these to add a Bedrock-backed option to the model picker. Bedrock
+model IDs are account/region-specific — confirm yours with:
+```bash
+aws bedrock list-foundation-models --query 'modelSummaries[].modelId'
+```
+
+```bash
+BEDROCK_CHEAP_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0
+BEDROCK_BALANCED_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
+BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0
+# Optional friendlier labels shown in the UI:
+BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 3.5
+
+# Credentials: if unset, falls back to the default AWS credential provider
+# chain (env vars, shared config, instance/task role, SSO).
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...   # only if using temporary credentials
+```
+
+### OpenAI entries (optional)
+
+```bash
+OPENAI_API_KEY=sk-...
+OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
+OPENAI_BALANCED_MODEL_ID=gpt-4o
+```
+
+### `MODEL_REGISTRY_JSON` (optional escape hatch)
+
+Add arbitrary extra entries (more Bedrock foundation models — Llama, Nova,
+Mistral — or anything else) without touching code:
+```bash
+MODEL_REGISTRY_JSON='[{"key":"bedrock:llama","label":"Llama 3.1 70B (Bedrock)","provider":"bedrock","modelId":"meta.llama3-1-70b-instruct-v1:0","tier":"cheap"}]'
+```
+
+### Tool-shortlisting embeddings (optional)
+
+The agent embeds the MCP tool catalog once per process to semantically
+shortlist relevant tools per request (lib/llm/tool-retrieval.ts). Uses
+OpenAI if `OPENAI_API_KEY` is set, otherwise falls back to Bedrock Titan
+embeddings.
+
+```bash
+EMBEDDING_PROVIDER=openai        # or "bedrock" — auto-detected if unset
+EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model id
+```
+
+---
+
 ## Optional Variables
 
 ### `NEXT_PUBLIC_API_URL` (OPTIONAL)
@@ -253,6 +324,14 @@ Then load with: `next build --env-file=.env.production`
 | Variable | Required | Type | Example |
 |----------|----------|------|---------|
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
+| `ANTHROPIC_API_KEY` | For Anthropic entries | string | `sk-ant-...` |
+| `DEFAULT_MODEL` | ❌ No | string | `anthropic:sonnet` |
+| `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-3-5-haiku-20241022-v1:0` |
+| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | For Bedrock entries | string | — |
+| `OPENAI_API_KEY` | For OpenAI entries | string | `sk-...` |
+| `OPENAI_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `gpt-4o-mini` |
+| `MODEL_REGISTRY_JSON` | ❌ No | JSON array | see LLM Provider Variables section |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL_ID` | ❌ No | string | `openai` / `text-embedding-3-small` |
 | `NEXT_PUBLIC_API_URL` | ❌ No | URL | `https://harness.example.com` |
 
 ---
