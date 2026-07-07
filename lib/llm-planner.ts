@@ -31,7 +31,7 @@
  */
 
 import { SolutionConfig } from './types';
-import { PlannedStep, planUseCase, classifyUseCase, UseCaseProfile, ModulePlanSummary } from './plan-builder';
+import { PlannedStep, planUseCase, classifyUseCase, makeRunToken, UseCaseProfile, ModulePlanSummary } from './plan-builder';
 import { enrichConfigFromDescription } from './intent-extractor';
 import { catalogForPrompt, validateSynthesizedSteps, ValidatedStep } from './tool-catalog';
 
@@ -65,7 +65,8 @@ export interface PlanBuildResult {
  */
 export async function planBuildAsync(
   description: string,
-  config: SolutionConfig
+  config: SolutionConfig,
+  runToken: string = makeRunToken()
 ): Promise<PlanBuildResult> {
   // Always enrich the config from the raw description first — this benefits
   // both the synthesis prompt and the heuristic fallback.
@@ -73,7 +74,7 @@ export async function planBuildAsync(
   const intentNotes = intent.notes;
 
   const heuristic = (): PlanBuildResult => {
-    const plan = planUseCase(enrichedConfig);
+    const plan = planUseCase(enrichedConfig, runToken);
     return {
       steps: plan.steps,
       planningMode: 'heuristic',
@@ -91,7 +92,7 @@ export async function planBuildAsync(
   }
 
   try {
-    const result = await synthesizePlan(description, enrichedConfig, apiKey);
+    const result = await synthesizePlan(description, enrichedConfig, apiKey, runToken);
     if (result.error || !result.steps) {
       return { ...heuristic(), fallbackReason: result.error || 'Synthesis returned no steps.' };
     }
@@ -133,10 +134,11 @@ interface SynthesisResult {
 async function synthesizePlan(
   description: string,
   config: SolutionConfig,
-  apiKey: string
+  apiKey: string,
+  runToken: string
 ): Promise<SynthesisResult> {
   const model = process.env.ANTHROPIC_MODEL || DEFAULT_MODEL;
-  const prompt = buildSynthesisPrompt(description, config);
+  const prompt = buildSynthesisPrompt(description, config, runToken);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
@@ -180,7 +182,7 @@ async function synthesizePlan(
   return { steps: validation.steps, reasoning: parsed.reasoning };
 }
 
-function buildSynthesisPrompt(description: string, config: SolutionConfig): string {
+function buildSynthesisPrompt(description: string, config: SolutionConfig, runToken: string): string {
   const events = (config.events || []).map((e: any) => (typeof e === 'string' ? e : e?.name));
   const segments = (config.segments || []).map((s: any) => s?.name);
 
@@ -209,6 +211,7 @@ Design rules:
 - Use "listRefs" (a map of arg -> array of "<stepId>.path" refs) for reactor_add_resources_to_library rule_ids / data_element_ids.
 - Every ref/listRef MUST point to an EARLIER step's id. Give each step a unique short id (e.g. "schema", "dataset", "seg_vip").
 - Supply every REQUIRED param, directly in "args" or via a ref. For object params (CJA "definition", AJO "entry_criteria"/"content") provide a reasonable JSON object.
+- IMPORTANT: created-resource NAMES/TITLES (schema title, dataset name, Launch property/library name, CJA segment/metric name, AJO journey/offer name) MUST end with the suffix "_${runToken}" so re-running this request does not collide with resources a previous run already created (Adobe rejects a duplicate schema title with a 400). Do NOT add this suffix to PQL expressions, delegate ids, or object-param contents — only to human-facing resource names.
 - Keep it realistic: between 3 and 30 steps. If knowledge grounding helps, start with a search_adobe_knowledge step.
 
 Respond with ONLY JSON, no prose or code fences:
