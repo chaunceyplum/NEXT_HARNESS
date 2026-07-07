@@ -69,7 +69,7 @@ export interface StepResponse {
   id: string;
   label: string;
   tool: string;
-  category: 'rag' | 'aep' | 'cja' | 'ajo';
+  category: 'rag' | 'aep' | 'launch' | 'cja' | 'ajo';
   critical: boolean;
   status: StepStatus;
   result?: any;

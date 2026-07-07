@@ -8,6 +8,7 @@ import { StatusResponse, StepResponse, ApiError } from '@/lib/types';
 const CATEGORY_LABELS: Record<string, string> = {
   rag: 'RAG',
   aep: 'AEP',
+  launch: 'LAUNCH',
   cja: 'CJA',
   ajo: 'AJO',
 };
@@ -15,6 +16,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 const CATEGORY_COLORS: Record<string, string> = {
   rag: 'bg-purple-100 text-purple-700',
   aep: 'bg-blue-100 text-blue-700',
+  launch: 'bg-pink-100 text-pink-700',
   cja: 'bg-teal-100 text-teal-700',
   ajo: 'bg-orange-100 text-orange-700',
 };

@@ -3,9 +3,10 @@
  *
  * Converts a planner-produced SolutionConfig into an ordered list of
  * individual MCP tool calls against tools that actually exist and work
- * today: AEP (schema/dataset/segment), CJA (data view/segment/calculated
- * metric), AJO (journey/offer/activation), and RAG (knowledge search for
- * grounding/context).
+ * today: AEP (schema/dataset/segment), Adobe Launch/Reactor (tag property,
+ * Web SDK, per-event data elements + rules, library build), CJA (data
+ * view/segment/calculated metric), AJO (journey/offer/activation), and RAG
+ * (knowledge search for grounding/context).
  *
  * This deliberately does NOT call msb_execute_solution / orchestrator_*.
  * Those require infra identifiers the planner cannot produce (client_name,
@@ -23,7 +24,7 @@ export interface PlannedStep {
   id: string;
   label: string;
   tool: string;
-  category: 'rag' | 'aep' | 'cja' | 'ajo';
+  category: 'rag' | 'aep' | 'launch' | 'cja' | 'ajo';
   critical: boolean;
   /** Static arguments known ahead of time. */
   args: Record<string, any>;
@@ -32,6 +33,15 @@ export interface PlannedStep {
    * Resolved once the referenced step has completed successfully.
    */
   refs?: Record<string, string>;
+  /**
+   * Dynamic *array* argument refs: maps an arg name to a list of
+   * `${stepId}.${resultPath}` refs. Each is resolved independently and any
+   * that fail to resolve (e.g. an optional upstream step failed/skipped)
+   * are silently dropped from the array rather than failing the step —
+   * used for "bundle whatever succeeded" calls like adding resources to a
+   * Launch library.
+   */
+  listRefs?: Record<string, string[]>;
 }
 
 function slug(input: string): string {
@@ -51,9 +61,15 @@ function slug(input: string): string {
  *  2. AEP foundation — one XDM schema, one dataset built on it, then one
  *     segment per planner-identified segment (schema/dataset are
  *     prerequisites for meaningful segmentation).
- *  3. CJA analytics — resolve a data view, then create one segment mirror
+ *  3. Adobe Launch (Reactor) — a tag property for the domain, the Web SDK
+ *     extension, and one data element + rule (trigger + action) per
+ *     planner-identified *event* (not a fixed template — a purchase event
+ *     gets a purchase rule, a form_fill event gets a form_fill rule, etc.),
+ *     bundled into a development library and built. This is the piece that
+ *     actually collects the data AEP/CJA/AJO downstream depend on.
+ *  4. CJA analytics — resolve a data view, then create one segment mirror
  *     and one calculated metric for reporting on the same audience.
- *  4. AJO activation — one journey per planner-identified segment (entry
+ *  5. AJO activation — one journey per planner-identified segment (entry
  *     criteria referencing the AEP segment created in step 2), then
  *     activate each journey.
  */
@@ -125,7 +141,178 @@ export function buildStepPlan(config: SolutionConfig): PlannedStep[] {
     });
   });
 
-  // ── 3. CJA analytics ───────────────────────────────────────────────────────
+  // ── 3. Adobe Launch (Reactor) — data collection instrumentation ───────────
+  // One tag property for the domain, one data element + one rule per
+  // planner-extracted event, bundled into a development library. Built on
+  // the individual reactor_* CRUD tools (all verified, working) rather than
+  // msb_generate_launch_config, whose registered wrapper passes
+  // (data_elements, rules, extensions) into a function that actually takes
+  // (eddl_schema, property_id) — a guaranteed TypeError, same class of bug
+  // as msb_execute_solution. Not used, per the "don't touch the MCP" /
+  // "only call what already works" constraint.
+  const propertyStepId = 'launch_property';
+  steps.push({
+    id: propertyStepId,
+    label: `Create Adobe Launch property for ${domain}`,
+    tool: 'reactor_create_property',
+    category: 'launch',
+    critical: false,
+    args: {
+      name: `${slug(domain)}_${vertical}`,
+      platform: 'web',
+      domains: [domain],
+    },
+  });
+
+  const extensionSearchStepId = 'launch_search_websdk';
+  steps.push({
+    id: extensionSearchStepId,
+    label: 'Look up the Web SDK extension package in the catalog',
+    tool: 'reactor_list_extension_packages',
+    category: 'launch',
+    critical: false,
+    args: { search: 'Adobe Experience Platform Web SDK', platform: 'web', limit: 5 },
+  });
+
+  const extensionInstallStepId = 'launch_install_websdk';
+  steps.push({
+    id: extensionInstallStepId,
+    label: 'Install Web SDK extension on the property',
+    tool: 'reactor_install_extension',
+    category: 'launch',
+    critical: false,
+    args: {},
+    refs: {
+      property_id: `${propertyStepId}.id`,
+      extension_package_id: `${extensionSearchStepId}.packages.0.id`,
+    },
+  });
+
+  // Events drive what gets instrumented — this is the "use-case aware" part:
+  // a finance signup flow gets a form_fill rule, an ecommerce site gets a
+  // purchase rule, etc., instead of one generic template regardless of input.
+  const eventList: any[] = Array.isArray(config.events) && config.events.length > 0
+    ? config.events
+    : [{ name: 'page_view', description: 'Default event — planner returned none' }];
+
+  const launchRuleStepIds: string[] = [];
+  const launchDataElementStepIds: string[] = [];
+
+  eventList.forEach((evt: any, idx: number) => {
+    const eventName: string = (typeof evt === 'string' ? evt : evt?.name) || `event_${idx}`;
+
+    const dataElementStepId = `launch_data_element_${idx}`;
+    launchDataElementStepIds.push(dataElementStepId);
+    steps.push({
+      id: dataElementStepId,
+      label: `Create data element for "${eventName}"`,
+      tool: 'reactor_create_data_element',
+      category: 'launch',
+      critical: false,
+      args: {
+        name: `${eventName} - event flag`,
+        delegate_descriptor_id: 'core::dataElements::javascript-variable',
+        settings: JSON.stringify({ path: `window.adobeDataLayer[0].event === '${eventName}'` }),
+      },
+      refs: { property_id: `${propertyStepId}.id` },
+    });
+
+    const ruleStepId = `launch_rule_${idx}`;
+    launchRuleStepIds.push(ruleStepId);
+    steps.push({
+      id: ruleStepId,
+      label: `Create rule: ${vertical} - ${eventName}`,
+      tool: 'reactor_create_rule',
+      category: 'launch',
+      critical: false,
+      args: { name: `${vertical} - ${eventName} tracking` },
+      refs: { property_id: `${propertyStepId}.id` },
+    });
+
+    steps.push({
+      id: `launch_rule_trigger_${idx}`,
+      label: `Add page-load trigger to "${eventName}" rule`,
+      tool: 'reactor_create_rule_component',
+      category: 'launch',
+      critical: false,
+      args: { name: 'Page Load Trigger', delegate_descriptor_id: 'core::events::dom-ready', order: 0 },
+      refs: { rule_id: `${ruleStepId}.id` },
+    });
+
+    steps.push({
+      id: `launch_rule_action_${idx}`,
+      label: `Add tracking action to "${eventName}" rule`,
+      tool: 'reactor_create_rule_component',
+      category: 'launch',
+      critical: false,
+      args: {
+        name: `Track ${eventName}`,
+        delegate_descriptor_id: 'core::actions::custom-code',
+        order: 1,
+        settings: JSON.stringify({
+          source: `// Starter action for "${eventName}" (${vertical}) — customize with your analytics/Web SDK call.\nif (window.adobeDataLayer && window.adobeDataLayer[0] && window.adobeDataLayer[0].event === '${eventName}') {\n  console.log('[${vertical}] tracked event: ${eventName}');\n}`,
+        }),
+      },
+      refs: { rule_id: `${ruleStepId}.id` },
+    });
+  });
+
+  const environmentStepId = 'launch_environment';
+  steps.push({
+    id: environmentStepId,
+    label: 'Create development publish environment',
+    tool: 'reactor_create_environment',
+    category: 'launch',
+    critical: false,
+    args: { name: 'Development', stage: 'development' },
+    refs: { property_id: `${propertyStepId}.id` },
+  });
+
+  const libraryStepId = 'launch_library';
+  steps.push({
+    id: libraryStepId,
+    label: `Create build library for ${domain}`,
+    tool: 'reactor_create_library',
+    category: 'launch',
+    critical: false,
+    args: { name: `${slug(domain)}_${vertical}_library` },
+    refs: {
+      property_id: `${propertyStepId}.id`,
+      environment_id: `${environmentStepId}.id`,
+    },
+  });
+
+  steps.push({
+    id: 'launch_add_resources',
+    label: 'Add rules and data elements to the library',
+    tool: 'reactor_add_resources_to_library',
+    category: 'launch',
+    critical: false,
+    args: {},
+    refs: { library_id: `${libraryStepId}.id` },
+    listRefs: {
+      rule_ids: launchRuleStepIds.map((id) => `${id}.id`),
+      data_element_ids: launchDataElementStepIds.map((id) => `${id}.id`),
+    },
+  });
+
+  steps.push({
+    id: 'launch_build',
+    label: 'Trigger a build for the library',
+    tool: 'reactor_build_library',
+    category: 'launch',
+    critical: false,
+    args: {},
+    refs: { library_id: `${libraryStepId}.id` },
+  });
+
+  // NOTE: deliberately stops at "build" — the library remains in
+  // 'development' state. Submitting/approving/publishing (reactor_transition_
+  // library) would push real config toward a live production property, which
+  // this harness does not do automatically; a human should review the build
+  // in the Reactor UI first.
+
+  // ── 4. CJA analytics ───────────────────────────────────────────────────────
   const dataViewStepId = 'cja_data_views';
   steps.push({
     id: dataViewStepId,
@@ -188,7 +375,7 @@ export function buildStepPlan(config: SolutionConfig): PlannedStep[] {
     refs: { data_view_id: `${dataViewStepId}.data_views.0.id` },
   });
 
-  // ── 4. AJO activation (only if an activation-style destination exists) ────
+  // ── 5. AJO activation (only if an activation-style destination exists) ────
   const wantsActivation = destinations.length === 0 || destinations.some((d: string) =>
     ['email', 'web', 'push', 'sms'].includes(String(d).toLowerCase())
   );

@@ -48,6 +48,20 @@ export async function runPlan(executionId: string, steps: PlannedStep[]): Promis
       }
     }
 
+    // Resolve dynamic *array* refs — unlike step.refs, individual entries
+    // that fail to resolve (e.g. an optional upstream step failed/skipped)
+    // are silently dropped rather than failing the whole step. This lets
+    // "bundle whatever succeeded" calls (e.g. adding rules/data elements to
+    // a Launch library) proceed with a partial set instead of aborting.
+    if (!refResolutionFailed && step.listRefs) {
+      for (const [argName, refs] of Object.entries(step.listRefs)) {
+        const resolved = refs
+          .map((ref) => resolveRef(ref, results))
+          .filter((v) => v !== undefined);
+        resolvedArgs[argName] = resolved;
+      }
+    }
+
     if (refResolutionFailed) {
       if (step.critical) {
         skipRemaining(executionId, steps, step.id);

@@ -20,7 +20,7 @@ interface ResourceEntry {
   step_id: string;
   label: string;
   tool: string;
-  category: 'rag' | 'aep' | 'cja' | 'ajo';
+  category: 'rag' | 'aep' | 'launch' | 'cja' | 'ajo';
   status: string;
   result: any;
 }
