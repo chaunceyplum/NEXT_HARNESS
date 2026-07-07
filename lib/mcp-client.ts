@@ -86,7 +86,7 @@ export async function callMcpTool(
       throw new Error('Invalid MCP response: no result field');
     }
 
-    return result.result;
+    return unwrapToolResult(result.result);
   } catch (error) {
     // Re-throw known errors
     if (error instanceof Error) {
@@ -95,6 +95,39 @@ export async function callMcpTool(
     // Wrap unknown errors
     throw new Error(`MCP call failed: ${String(error)}`);
   }
+}
+
+/**
+ * Unwrap the MCP tool response envelope.
+ *
+ * The Lambda handler returns tool results in the standard MCP format:
+ *   { content: [{ type: "text", text: "<json-encoded tool output>" }] }
+ *
+ * The actual tool payload (e.g. { solution_config: {...}, is_valid: true })
+ * is JSON-stringified inside content[0].text. This function extracts and
+ * parses it so callers get the real tool output directly, instead of the
+ * raw MCP envelope.
+ */
+function unwrapToolResult(raw: any): any {
+  if (
+    raw &&
+    typeof raw === 'object' &&
+    Array.isArray(raw.content) &&
+    raw.content.length > 0 &&
+    raw.content[0]?.type === 'text' &&
+    typeof raw.content[0]?.text === 'string'
+  ) {
+    const text = raw.content[0].text;
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Not JSON (e.g. plain string tool output) — return as-is
+      return text;
+    }
+  }
+
+  // Already unwrapped (or an unexpected shape) — return as-is
+  return raw;
 }
 
 /**
