@@ -14,6 +14,8 @@ export interface AgentToolCallDTO {
 export interface AgentToolResultDTO {
   toolName: string;
   output: unknown;
+  /** Present when this tool call failed (after exhausting its RAG-consulting retries, if any). */
+  error?: string;
 }
 
 export interface AgentStepDTO {
@@ -29,9 +31,13 @@ export interface BuildRequest {
   model?: string;
   /** Must be explicitly true to let the agent reach for the full end-to-end build tool. */
   allowFullBuild?: boolean;
+  /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
+  toolRetries?: number;
 }
 
 export interface BuildResponse {
+  /** Persisted run id — GET /api/runs/:runId to view this later, or replay it from /results. */
+  runId: string;
   finalText: string;
   steps: AgentStepDTO[];
   toolsConsidered: string[];
@@ -44,6 +50,33 @@ export interface ModelOption {
   key: string;
   label: string;
   tier: 'cheap' | 'balanced' | 'expensive';
+}
+
+// ============================================================================
+// Execution history / replay (lib/execution-store.ts)
+// ============================================================================
+
+export interface RunSummary {
+  id: string;
+  createdAt: string;
+  description: string;
+  model: string;
+  allowFullBuild: boolean;
+  status: 'completed' | 'failed';
+  durationMs: number;
+  toolsConsidered?: string[];
+  executionId?: string;
+}
+
+export interface ExecutionRecord extends RunSummary {
+  request: BuildRequest;
+  result?: BuildResponse;
+  error?: string;
+}
+
+export interface RunsListResponse {
+  runs: RunSummary[];
+  total: number;
 }
 
 // ============================================================================

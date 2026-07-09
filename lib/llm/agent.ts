@@ -45,7 +45,7 @@ export interface AgentStepTrace {
   stepNumber: number;
   text: string;
   toolCalls: Array<{ toolName: string; input: unknown }>;
-  toolResults: Array<{ toolName: string; output: unknown }>;
+  toolResults: Array<{ toolName: string; output: unknown; error?: string }>;
 }
 
 export interface AgentRunResult {
@@ -66,6 +66,8 @@ export interface RunAgentOptions {
   maxSteps?: number;
   /** How many tools the semantic shortlist pulls in, on top of the always-on set. */
   toolShortlistSize?: number;
+  /** Extra attempts per failed tool call, each preceded by a RAG lookup for context. 0 disables retrying. */
+  toolRetries?: number;
 }
 
 function systemPrompt(allowFullBuild: boolean): string {
@@ -102,7 +104,14 @@ async function stage<T>(label: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
-  const { userInput, modelKey, allowFullBuild = false, maxSteps = 10, toolShortlistSize = 12 } = opts;
+  const {
+    userInput,
+    modelKey,
+    allowFullBuild = false,
+    maxSteps = 10,
+    toolShortlistSize = 12,
+    toolRetries = 1,
+  } = opts;
 
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -124,7 +133,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     .map((name) => catalogByName.get(name))
     .filter((d): d is McpToolDefinition => Boolean(d));
 
-  const tools = buildAiTools(selectedDefs);
+  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
   const resolvedModelKey = modelKey || getDefaultModelKey();
 
   const result = await stage(`chat model call (${resolvedModelKey})`, () =>
@@ -137,12 +146,32 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     })
   );
 
-  const steps: AgentStepTrace[] = result.steps.map((step, i) => ({
-    stepNumber: i,
-    text: step.text,
-    toolCalls: step.toolCalls.map((c) => ({ toolName: c.toolName, input: c.input })),
-    toolResults: step.toolResults.map((r) => ({ toolName: r.toolName, output: r.output })),
-  }));
+  // Walk step.content directly rather than the toolResults convenience
+  // array — tool-error content parts (a failed tool call, including one
+  // that exhausted its RAG-consulting retries) are NOT included in
+  // step.toolResults, only in step.content, and we want failures visible
+  // in the trace too.
+  const steps: AgentStepTrace[] = result.steps.map((step, i) => {
+    const toolCalls: AgentStepTrace['toolCalls'] = [];
+    const toolResults: AgentStepTrace['toolResults'] = [];
+
+    for (const part of step.content) {
+      if (part.type === 'tool-call') {
+        toolCalls.push({ toolName: part.toolName, input: part.input });
+      } else if (part.type === 'tool-result') {
+        toolResults.push({ toolName: part.toolName, output: part.output });
+      } else if (part.type === 'tool-error') {
+        const errVal = (part as { error?: unknown }).error;
+        toolResults.push({
+          toolName: part.toolName,
+          output: undefined,
+          error: errVal instanceof Error ? errVal.message : String(errVal),
+        });
+      }
+    }
+
+    return { stepNumber: i, text: step.text, toolCalls, toolResults };
+  });
 
   // If any tool returned an execution_id (msb_execute_solution does), surface
   // it so the UI can offer to switch to the async status-polling view.

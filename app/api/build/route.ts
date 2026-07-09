@@ -11,8 +11,9 @@
  */
 
 import { runAgent } from '@/lib/llm/agent';
-import { getModelRegistry } from '@/lib/llm/model-registry';
-import { ApiError, BuildRequest, BuildResponse } from '@/lib/types';
+import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
+import { newRunId, saveExecution } from '@/lib/execution-store';
+import { ApiError, BuildRequest, BuildResponse, ExecutionRecord } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -75,25 +76,53 @@ export async function POST(request: Request): Promise<Response> {
 
     console.log('[BUILD] Running agent for:', description.slice(0, 80));
 
+    const runId = newRunId();
+    const startedAt = Date.now();
+    const createdAt = new Date(startedAt).toISOString();
+    const normalizedRequest: BuildRequest = {
+      description,
+      model: body.model,
+      allowFullBuild: body.allowFullBuild === true,
+      toolRetries: body.toolRetries,
+    };
+
     let agentResult;
     try {
       agentResult = await runAgent({
         userInput: description,
         modelKey: body.model,
-        allowFullBuild: body.allowFullBuild === true,
+        allowFullBuild: normalizedRequest.allowFullBuild,
+        toolRetries: body.toolRetries,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.error('[BUILD] Agent run failed:', error);
+
+      const failedRecord: ExecutionRecord = {
+        id: runId,
+        createdAt,
+        description,
+        model: body.model || getDefaultModelKey(),
+        allowFullBuild: normalizedRequest.allowFullBuild ?? false,
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        request: normalizedRequest,
+        error: message,
+      };
+      saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
+
       return Response.json(
         {
-          error: `Agent run failed: ${error instanceof Error ? error.message : String(error)}`,
+          error: `Agent run failed: ${message}`,
           code: 'AGENT_ERROR',
+          details: { runId },
         } as ApiError,
         { status: 500 }
       );
     }
 
     console.log('[BUILD] Agent finished:', {
+      runId,
       steps: agentResult.steps.length,
       toolsConsidered: agentResult.toolsConsidered,
       executionId: agentResult.executionId,
@@ -101,12 +130,28 @@ export async function POST(request: Request): Promise<Response> {
     });
 
     const response: BuildResponse = {
+      runId,
       finalText: agentResult.finalText,
       steps: agentResult.steps,
       toolsConsidered: agentResult.toolsConsidered,
       executionId: agentResult.executionId,
       finishReason: agentResult.finishReason,
     };
+
+    const completedRecord: ExecutionRecord = {
+      id: runId,
+      createdAt,
+      description,
+      model: body.model || getDefaultModelKey(),
+      allowFullBuild: normalizedRequest.allowFullBuild ?? false,
+      status: 'completed',
+      durationMs: Date.now() - startedAt,
+      toolsConsidered: agentResult.toolsConsidered,
+      executionId: agentResult.executionId,
+      request: normalizedRequest,
+      result: response,
+    };
+    saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
 
     return Response.json(response, { status: 200 });
   } catch (error) {

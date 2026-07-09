@@ -113,17 +113,43 @@ Mistral — or anything else) without touching code:
 MODEL_REGISTRY_JSON='[{"key":"bedrock:llama","label":"Llama 3.1 70B (Bedrock)","provider":"bedrock","modelId":"meta.llama3-1-70b-instruct-v1:0","tier":"cheap"}]'
 ```
 
-### Tool-shortlisting embeddings (optional)
+### Tool-shortlisting embeddings (optional — has a no-credentials fallback)
 
 The agent embeds the MCP tool catalog once per process to semantically
-shortlist relevant tools per request (lib/llm/tool-retrieval.ts). Uses
-OpenAI if `OPENAI_API_KEY` is set, otherwise falls back to Bedrock Titan
-embeddings.
+shortlist relevant tools per request (lib/llm/tool-retrieval.ts). This
+needs a *second* provider beyond your chat model — Anthropic has no
+embeddings API, so this always goes through OpenAI or Bedrock regardless
+of which chat model you pick. Uses OpenAI if `OPENAI_API_KEY` is set,
+otherwise falls back to Bedrock Titan embeddings.
+
+**If neither is configured (or the embedding call fails for any reason —
+missing AWS credentials, no Bedrock model access, etc.), tool-shortlisting
+automatically falls back to plain keyword matching instead of failing the
+whole request.** Less accurate than semantic search, but it means a
+Claude-only setup (just `ANTHROPIC_API_KEY`, nothing else) works end to
+end with zero extra credentials. Configure one of these to upgrade to
+semantic shortlisting:
 
 ```bash
 EMBEDDING_PROVIDER=openai        # or "bedrock" — auto-detected if unset
 EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model id
 ```
+
+---
+
+## Execution history / replay (lib/execution-store.ts)
+
+Every `/api/build` run (success or failure) is persisted so it can be
+listed and replayed from `/results`. Default storage is one JSON file per
+run under `.data/executions/` — zero setup, but reads every file in the
+directory to list, and won't survive an ephemeral/serverless filesystem.
+
+```bash
+EXECUTION_STORE_DIR=/path/to/data/executions   # default: <repo>/.data/executions
+```
+
+For heavy usage or a serverless deployment, swap `lib/execution-store.ts`'s
+file-backed implementation for a real table behind `DATABASE_URL` instead.
 
 ---
 
