@@ -113,7 +113,18 @@ but are not the default and are not required to run the harness.
 OPENAI_API_KEY=sk-...
 OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
 OPENAI_BALANCED_MODEL_ID=gpt-4o
+# OPENAI_BASE_URL=https://api.openai.com/v1   # override to point at any
+                                                # OpenAI-API-compatible gateway
 ```
+
+`OPENAI_BASE_URL` is optional and defaults to OpenAI's own API. Set it to
+point the `openai:*` entries at any OpenAI-compatible endpoint instead —
+e.g. a self-hosted gateway, or Bedrock's own OpenAI-compatible endpoint if
+you have one provisioned (`bedrock-mantle.<region>.api.aws/v1` with an
+`OPENAI_API_KEY` value in the `bedrock-api-key-...` format Bedrock issues
+for that route — note this is a separate access path from
+`AWS_BEARER_TOKEN_BEDROCK`/native Bedrock `InvokeModel`, with its own set
+of accessible models).
 
 ### `MODEL_REGISTRY_JSON` (optional escape hatch)
 

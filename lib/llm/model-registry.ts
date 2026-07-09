@@ -24,7 +24,7 @@
 
 import { anthropic } from '@ai-sdk/anthropic';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
-import { openai } from '@ai-sdk/openai';
+import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
 
 export type ModelTier = 'cheap' | 'balanced' | 'expensive';
@@ -58,6 +58,27 @@ function getBedrockClient() {
     });
   }
   return bedrockClient;
+}
+
+let openaiClient: ReturnType<typeof createOpenAI> | null = null;
+
+/**
+ * Lazy, and explicitly built (rather than using @ai-sdk/openai's bare
+ * default export) so OPENAI_BASE_URL is actually respected — the default
+ * export only ever talks to api.openai.com. A custom base URL is what lets
+ * this point at any OpenAI-API-compatible gateway, e.g. Bedrock's own
+ * OpenAI-compatible endpoint (bedrock-mantle.<region>.api.aws/v1, issued
+ * alongside a bedrock-api-key-... bearer token) for models your account
+ * has via that route but not via native Bedrock InvokeModel.
+ */
+function getOpenAiClient() {
+  if (!openaiClient) {
+    openaiClient = createOpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL,
+    });
+  }
+  return openaiClient;
 }
 
 /**
@@ -177,7 +198,7 @@ export function resolveModel(modelKey?: string): LanguageModel {
     case 'bedrock':
       return getBedrockClient()(entry.modelId);
     case 'openai':
-      return openai(entry.modelId);
+      return getOpenAiClient()(entry.modelId);
     default:
       throw new Error(`Unsupported provider "${entry.provider}" for model key "${entry.key}"`);
   }
