@@ -56,11 +56,18 @@ function getBedrockClient() {
   return bedrockClient;
 }
 
-/** Well-known, stable Claude-on-Bedrock model IDs, used unless overridden. */
+/**
+ * Confirmed live via `aws bedrock list-foundation-models --by-provider
+ * anthropic` against a real account (2026-07) — these map to the same
+ * current model family as the anthropic:* direct entries below, just with
+ * Bedrock's `anthropic.` id prefix. Still account/region-specific in
+ * general (see BEDROCK_*_MODEL_ID override below); the previous defaults
+ * here (claude-3-5-*) had been retired ("reached end of life") by AWS.
+ */
 const BEDROCK_DEFAULT_MODEL_IDS: Record<ModelTier, string> = {
-  cheap: 'anthropic.claude-3-5-haiku-20241022-v1:0',
-  balanced: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
-  expensive: 'anthropic.claude-3-opus-20240229-v1:0',
+  cheap: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+  balanced: 'anthropic.claude-sonnet-5',
+  expensive: 'anthropic.claude-opus-4-8',
 };
 
 function buildDefaultRegistry(): ModelRegistryEntry[] {

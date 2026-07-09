@@ -78,11 +78,11 @@ aws bedrock list-foundation-models --query 'modelSummaries[].modelId'
 ```
 
 ```bash
-BEDROCK_CHEAP_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0       # default shown
-BEDROCK_BALANCED_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0   # default shown
-BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0      # default shown
+BEDROCK_CHEAP_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0       # default shown
+BEDROCK_BALANCED_MODEL_ID=anthropic.claude-sonnet-5   # default shown
+BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-opus-4-8      # default shown
 # Optional friendlier labels shown in the UI:
-BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 3.5
+BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 4.5
 
 # Credentials: if unset, falls back to the default AWS credential provider
 # chain (env vars, shared config, instance/task role, SSO). Also requires
@@ -380,7 +380,7 @@ Then load with: `next build --env-file=.env.production`
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
 | `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
 | `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
-| `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-3-5-haiku-20241022-v1:0` |
+| `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | For Bedrock entries | string | — |
 | `OPENAI_API_KEY` | For OpenAI entries | string | `sk-...` |
 | `OPENAI_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `gpt-4o-mini` |
