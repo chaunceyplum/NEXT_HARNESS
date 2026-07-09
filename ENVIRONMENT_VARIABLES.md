@@ -150,16 +150,18 @@ EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
-listed and replayed from `/results`. Default storage is one JSON file per
-run under `.data/executions/` — zero setup, but reads every file in the
-directory to list, and won't survive an ephemeral/serverless filesystem.
+listed and replayed from `/results`. Storage is a `harness_agent_runs`
+table in the MCP server's own database, written via the `execute_sql` MCP
+tool (full read/write/DDL access) over the same `MCP_ENDPOINT_URL`
+connection already configured above — no separate database credentials or
+setup needed. The table (and its index) is created automatically on first
+use if it doesn't already exist.
 
-```bash
-EXECUTION_STORE_DIR=/path/to/data/executions   # default: <repo>/.data/executions
-```
-
-For heavy usage or a serverless deployment, swap `lib/execution-store.ts`'s
-file-backed implementation for a real table behind `DATABASE_URL` instead.
+This is a table dedicated to the harness, separate from the orchestrator's
+own `executions` / `execution_resources` / `tool_invocations` tables
+(applied by `msb_run_migration`) — those track `msb_execute_solution`'s
+internal phase state with a different schema and are owned by the Python
+backend.
 
 ---
 
