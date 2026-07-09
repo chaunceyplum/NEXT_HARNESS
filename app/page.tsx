@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { ApiError, BuildRequest, BuildResponse, ModelOption } from '@/lib/types';
+import AgentTrace from '@/components/AgentTrace';
 
 export default function Home() {
   const router = useRouter();
@@ -70,14 +72,22 @@ export default function Home() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
       <div className="max-w-3xl mx-auto">
         {/* Header */}
-        <div className="mb-12 pt-8 text-center sm:text-left">
-          <h1 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-            Autonomous MarTech Builder
-          </h1>
-          <p className="text-lg sm:text-xl text-gray-600 max-w-lg">
-            Describe what you want, and an agent will pick the right tools to do it —
-            no fixed pipeline, no full rebuild for a narrow ask.
-          </p>
+        <div className="mb-12 pt-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div className="text-center sm:text-left">
+            <h1 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
+              Autonomous MarTech Builder
+            </h1>
+            <p className="text-lg sm:text-xl text-gray-600 max-w-lg">
+              Describe what you want, and an agent will pick the right tools to do it —
+              no fixed pipeline, no full rebuild for a narrow ask.
+            </p>
+          </div>
+          <Link
+            href="/results"
+            className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
+          >
+            View past runs →
+          </Link>
         </div>
 
         {/* Main Card */}
@@ -165,45 +175,19 @@ export default function Home() {
 
         {/* Agent trace */}
         {result && (
-          <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8 mb-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900">Agent Trace</h2>
-              <span className="text-xs text-gray-500">
-                {result.toolsConsidered.length} tool(s) considered · finished: {result.finishReason}
-              </span>
-            </div>
-
-            <div className="text-xs text-gray-500">
-              Tools available this run: {result.toolsConsidered.join(', ') || 'none'}
-            </div>
-
-            <div className="space-y-3">
-              {result.steps.map((step) => (
-                <div key={step.stepNumber} className="border border-gray-200 rounded-lg p-4">
-                  <p className="text-xs font-semibold text-gray-500 mb-2">Step {step.stepNumber + 1}</p>
-                  {step.text && <p className="text-sm text-gray-800 mb-2 whitespace-pre-wrap">{step.text}</p>}
-                  {step.toolCalls.map((call, i) => (
-                    <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2 font-mono text-xs text-green-400 overflow-x-auto">
-                      <div className="text-blue-300">→ {call.toolName}</div>
-                      <pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(call.input, null, 2)}</pre>
-                    </div>
-                  ))}
-                  {step.toolResults.map((res, i) => (
-                    <div key={i} className="bg-gray-800 rounded-lg p-3 font-mono text-xs text-gray-300 overflow-x-auto">
-                      <div className="text-yellow-300">← {res.toolName} result</div>
-                      <pre className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto">
-                        {JSON.stringify(res.output, null, 2)}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-
-            <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded-lg">
-              <p className="text-green-800 font-medium">Final Answer</p>
-              <p className="text-green-900 text-sm mt-1 whitespace-pre-wrap">{result.finalText}</p>
-            </div>
+          <div className="mb-6">
+            <p className="text-xs text-gray-500 mb-2">
+              Run ID: <code className="bg-white px-2 py-0.5 rounded">{result.runId}</code> ·{' '}
+              <Link href={`/results/${result.runId}`} className="text-blue-600 hover:text-blue-700">
+                view in history
+              </Link>
+            </p>
+            <AgentTrace
+              steps={result.steps}
+              toolsConsidered={result.toolsConsidered}
+              finishReason={result.finishReason}
+              finalText={result.finalText}
+            />
           </div>
         )}
 

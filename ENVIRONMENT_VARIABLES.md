@@ -137,6 +137,22 @@ EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model
 
 ---
 
+## Execution history / replay (lib/execution-store.ts)
+
+Every `/api/build` run (success or failure) is persisted so it can be
+listed and replayed from `/results`. Default storage is one JSON file per
+run under `.data/executions/` — zero setup, but reads every file in the
+directory to list, and won't survive an ephemeral/serverless filesystem.
+
+```bash
+EXECUTION_STORE_DIR=/path/to/data/executions   # default: <repo>/.data/executions
+```
+
+For heavy usage or a serverless deployment, swap `lib/execution-store.ts`'s
+file-backed implementation for a real table behind `DATABASE_URL` instead.
+
+---
+
 ## Optional Variables
 
 ### `NEXT_PUBLIC_API_URL` (OPTIONAL)
