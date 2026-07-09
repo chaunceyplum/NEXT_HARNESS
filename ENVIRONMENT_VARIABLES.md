@@ -63,39 +63,49 @@ It runs an agent (lib/llm/agent.ts) that shortlists relevant MCP tools and
 lets an LLM decide which ones to call. The model is swappable per request —
 these variables control which providers/models are available to pick from.
 
-### `ANTHROPIC_API_KEY` (required for the built-in Anthropic entries)
+### Bedrock (default provider — no Anthropic API key needed)
 
-Used by the `anthropic:haiku` / `anthropic:sonnet` / `anthropic:opus`
-registry entries (lib/llm/model-registry.ts), which are included by default.
-
-### `DEFAULT_MODEL` (optional)
-
-Registry key used when a build request doesn't specify `model`. Defaults to
-`anthropic:sonnet`. Example: `DEFAULT_MODEL=anthropic:haiku` to default to
-the cheapest option.
-
-### Bedrock entries (optional)
-
-Set any of these to add a Bedrock-backed option to the model picker. Bedrock
-model IDs are account/region-specific — confirm yours with:
+`bedrock:cheap` / `bedrock:balanced` / `bedrock:expensive` are in the
+registry unconditionally, and `bedrock:balanced` is the default model
+(`DEFAULT_MODEL` below) — you only need AWS credentials, not an Anthropic
+API key, to run the harness. Ships with well-known, stable Claude-on-Bedrock
+model IDs; override per tier if your account needs different ones (some
+accounts require cross-region inference profile IDs instead, prefixed like
+`us.anthropic...` — that's the first thing to check if you get a "model not
+found" error with the defaults). Confirm what's available to you with:
 ```bash
 aws bedrock list-foundation-models --query 'modelSummaries[].modelId'
 ```
 
 ```bash
-BEDROCK_CHEAP_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0
-BEDROCK_BALANCED_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0
-BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0
+BEDROCK_CHEAP_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0       # default shown
+BEDROCK_BALANCED_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0   # default shown
+BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0      # default shown
 # Optional friendlier labels shown in the UI:
 BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 3.5
 
 # Credentials: if unset, falls back to the default AWS credential provider
-# chain (env vars, shared config, instance/task role, SSO).
+# chain (env vars, shared config, instance/task role, SSO). Also requires
+# model access granted in AWS Console -> Bedrock -> Model access (separate
+# from IAM, opt-in per model per region).
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_SESSION_TOKEN=...   # only if using temporary credentials
 ```
+
+### `DEFAULT_MODEL` (optional)
+
+Registry key used when a build request doesn't specify `model`. Defaults to
+`bedrock:balanced`. Example: `DEFAULT_MODEL=bedrock:cheap` to default to
+the cheapest option, or `DEFAULT_MODEL=anthropic:sonnet` to default to
+Anthropic direct instead.
+
+### `ANTHROPIC_API_KEY` (optional — only for the `anthropic:*` entries)
+
+Used by the `anthropic:haiku` / `anthropic:sonnet` / `anthropic:opus`
+registry entries, which are still available as an alternative to Bedrock
+but are not the default and are not required to run the harness.
 
 ### OpenAI entries (optional)
 
@@ -125,9 +135,9 @@ otherwise falls back to Bedrock Titan embeddings.
 **If neither is configured (or the embedding call fails for any reason —
 missing AWS credentials, no Bedrock model access, etc.), tool-shortlisting
 automatically falls back to plain keyword matching instead of failing the
-whole request.** Less accurate than semantic search, but it means a
-Claude-only setup (just `ANTHROPIC_API_KEY`, nothing else) works end to
-end with zero extra credentials. Configure one of these to upgrade to
+whole request.** Less accurate than semantic search, but it means the
+harness still runs with zero extra credentials beyond whatever's already
+configured for your chat model. Configure one of these to upgrade to
 semantic shortlisting:
 
 ```bash
@@ -366,8 +376,8 @@ Then load with: `next build --env-file=.env.production`
 | Variable | Required | Type | Example |
 |----------|----------|------|---------|
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
-| `ANTHROPIC_API_KEY` | For Anthropic entries | string | `sk-ant-...` |
-| `DEFAULT_MODEL` | ❌ No | string | `anthropic:sonnet` |
+| `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
+| `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
 | `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-3-5-haiku-20241022-v1:0` |
 | `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | For Bedrock entries | string | — |
 | `OPENAI_API_KEY` | For OpenAI entries | string | `sk-...` |

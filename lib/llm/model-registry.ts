@@ -2,18 +2,24 @@
  * Swappable LLM model registry.
  *
  * The agent (lib/llm/agent.ts) never hardcodes a provider or model. It asks
- * this registry to resolve a `model` key (e.g. "anthropic:sonnet") to an AI
+ * this registry to resolve a `model` key (e.g. "bedrock:balanced") to an AI
  * SDK LanguageModel. Callers (API routes, UI) pick the key per-request, so
- * you can switch between cheap/balanced/expensive, or between Anthropic
- * direct / Bedrock / OpenAI, without touching agent code.
+ * you can switch between cheap/balanced/expensive, or between Bedrock /
+ * Anthropic direct / OpenAI, without touching agent code.
  *
- * Anthropic entries use confirmed current model IDs. Bedrock and OpenAI
- * entries are intentionally environment-driven:
- *  - Bedrock model IDs are account/region-specific. Confirm yours with
- *    `aws bedrock list-foundation-models --query 'modelSummaries[].modelId'`
- *    and set BEDROCK_*_MODEL_ID below.
- *  - OpenAI model names change on their own release cadence; set
- *    OPENAI_*_MODEL_ID to whatever you want to use.
+ * Bedrock is the default provider (DEFAULT_MODEL below) — no Anthropic API
+ * key required. Bedrock entries ship with well-known, stable Claude-on-
+ * Bedrock model IDs so this works with just AWS credentials configured, but
+ * they're account/region-specific in general — confirm/override yours with
+ * `aws bedrock list-foundation-models --query 'modelSummaries[].modelId'`
+ * and BEDROCK_*_MODEL_ID (see ENVIRONMENT_VARIABLES.md). Some accounts
+ * require cross-region inference profile IDs instead (prefixed like
+ * `us.anthropic...`) — if you get a "model not found"/access error with the
+ * defaults below, that's the first thing to check.
+ *
+ * Anthropic-direct and OpenAI entries are still available (useful to A/B
+ * against Bedrock, or if you'd rather not route through AWS) but neither is
+ * the default and neither requires the other's credentials to be set.
  */
 
 import { anthropic } from '@ai-sdk/anthropic';
@@ -50,43 +56,53 @@ function getBedrockClient() {
   return bedrockClient;
 }
 
-function buildDefaultRegistry(): ModelRegistryEntry[] {
-  const entries: ModelRegistryEntry[] = [
-    {
-      key: 'anthropic:haiku',
-      label: 'Claude Haiku 4.5 (Anthropic — cheap)',
-      provider: 'anthropic',
-      modelId: 'claude-haiku-4-5-20251001',
-      tier: 'cheap',
-    },
-    {
-      key: 'anthropic:sonnet',
-      label: 'Claude Sonnet 5 (Anthropic — balanced)',
-      provider: 'anthropic',
-      modelId: 'claude-sonnet-5',
-      tier: 'balanced',
-    },
-    {
-      key: 'anthropic:opus',
-      label: 'Claude Opus 4.8 (Anthropic — expensive)',
-      provider: 'anthropic',
-      modelId: 'claude-opus-4-8',
-      tier: 'expensive',
-    },
-  ];
+/** Well-known, stable Claude-on-Bedrock model IDs, used unless overridden. */
+const BEDROCK_DEFAULT_MODEL_IDS: Record<ModelTier, string> = {
+  cheap: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+  balanced: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+  expensive: 'anthropic.claude-3-opus-20240229-v1:0',
+};
 
+function buildDefaultRegistry(): ModelRegistryEntry[] {
+  const entries: ModelRegistryEntry[] = [];
+
+  // Bedrock first and unconditional (default provider — no env vars
+  // required to appear, though BEDROCK_*_MODEL_ID overrides the model id
+  // per tier and AWS credentials are still required to actually call it).
   const bedrockTiers: Array<[ModelTier, string]> = [
     ['cheap', 'BEDROCK_CHEAP_MODEL_ID'],
     ['balanced', 'BEDROCK_BALANCED_MODEL_ID'],
     ['expensive', 'BEDROCK_EXPENSIVE_MODEL_ID'],
   ];
   for (const [tier, envVar] of bedrockTiers) {
-    const modelId = process.env[envVar];
-    if (modelId) {
-      const label = process.env[`${envVar}_LABEL`] || modelId;
-      entries.push({ key: `bedrock:${tier}`, label: `${label} (Bedrock — ${tier})`, provider: 'bedrock', modelId, tier });
-    }
+    const modelId = process.env[envVar] || BEDROCK_DEFAULT_MODEL_IDS[tier];
+    const label = process.env[`${envVar}_LABEL`] || modelId;
+    entries.push({ key: `bedrock:${tier}`, label: `${label} (Bedrock — ${tier})`, provider: 'bedrock', modelId, tier });
   }
+
+  entries.push(
+    {
+      key: 'anthropic:haiku',
+      label: 'Claude Haiku 4.5 (Anthropic direct — cheap)',
+      provider: 'anthropic',
+      modelId: 'claude-haiku-4-5-20251001',
+      tier: 'cheap',
+    },
+    {
+      key: 'anthropic:sonnet',
+      label: 'Claude Sonnet 5 (Anthropic direct — balanced)',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-5',
+      tier: 'balanced',
+    },
+    {
+      key: 'anthropic:opus',
+      label: 'Claude Opus 4.8 (Anthropic direct — expensive)',
+      provider: 'anthropic',
+      modelId: 'claude-opus-4-8',
+      tier: 'expensive',
+    }
+  );
 
   const openaiTiers: Array<[ModelTier, string]> = [
     ['cheap', 'OPENAI_CHEAP_MODEL_ID'],
@@ -126,7 +142,7 @@ export function getModelRegistry(): ModelRegistryEntry[] {
 }
 
 export function getDefaultModelKey(): string {
-  return process.env.DEFAULT_MODEL || 'anthropic:sonnet';
+  return process.env.DEFAULT_MODEL || 'bedrock:balanced';
 }
 
 export function getModelEntry(modelKey?: string): ModelRegistryEntry {
