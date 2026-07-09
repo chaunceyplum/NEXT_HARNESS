@@ -44,10 +44,14 @@ let bedrockClient: ReturnType<typeof createAmazonBedrock> | null = null;
 function getBedrockClient() {
   if (!bedrockClient) {
     bedrockClient = createAmazonBedrock({
-      region: process.env.AWS_REGION,
+      // Bedrock requires a region to build its endpoint URL even when using
+      // AWS_BEARER_TOKEN_BEDROCK auth (no SigV4 credentials needed) - falls
+      // back to us-east-1 if AWS_REGION isn't set, rather than throwing.
+      region: process.env.AWS_REGION || 'us-east-1',
       // If these are unset, @ai-sdk/amazon-bedrock falls back to the
       // default AWS credential provider chain (env vars, shared config,
-      // instance/task role, SSO, etc).
+      // instance/task role, SSO, etc) — or to AWS_BEARER_TOKEN_BEDROCK
+      // Bearer-token auth if that's set, which takes precedence over both.
       accessKeyId: process.env.AWS_ACCESS_KEY_ID,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
       sessionToken: process.env.AWS_SESSION_TOKEN,
