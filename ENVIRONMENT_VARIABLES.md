@@ -78,11 +78,11 @@ aws bedrock list-foundation-models --query 'modelSummaries[].modelId'
 ```
 
 ```bash
-BEDROCK_CHEAP_MODEL_ID=anthropic.claude-3-5-haiku-20241022-v1:0       # default shown
-BEDROCK_BALANCED_MODEL_ID=anthropic.claude-3-5-sonnet-20241022-v2:0   # default shown
-BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-3-opus-20240229-v1:0      # default shown
+BEDROCK_CHEAP_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0       # default shown
+BEDROCK_BALANCED_MODEL_ID=anthropic.claude-sonnet-5   # default shown
+BEDROCK_EXPENSIVE_MODEL_ID=anthropic.claude-opus-4-8      # default shown
 # Optional friendlier labels shown in the UI:
-BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 3.5
+BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 4.5
 
 # Credentials: if unset, falls back to the default AWS credential provider
 # chain (env vars, shared config, instance/task role, SSO). Also requires
@@ -150,16 +150,18 @@ EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
-listed and replayed from `/results`. Default storage is one JSON file per
-run under `.data/executions/` — zero setup, but reads every file in the
-directory to list, and won't survive an ephemeral/serverless filesystem.
+listed and replayed from `/results`. Storage is a `harness_agent_runs`
+table in the MCP server's own database, written via the `execute_sql` MCP
+tool (full read/write/DDL access) over the same `MCP_ENDPOINT_URL`
+connection already configured above — no separate database credentials or
+setup needed. The table (and its index) is created automatically on first
+use if it doesn't already exist.
 
-```bash
-EXECUTION_STORE_DIR=/path/to/data/executions   # default: <repo>/.data/executions
-```
-
-For heavy usage or a serverless deployment, swap `lib/execution-store.ts`'s
-file-backed implementation for a real table behind `DATABASE_URL` instead.
+This is a table dedicated to the harness, separate from the orchestrator's
+own `executions` / `execution_resources` / `tool_invocations` tables
+(applied by `msb_run_migration`) — those track `msb_execute_solution`'s
+internal phase state with a different schema and are owned by the Python
+backend.
 
 ---
 
@@ -378,7 +380,7 @@ Then load with: `next build --env-file=.env.production`
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
 | `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
 | `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
-| `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-3-5-haiku-20241022-v1:0` |
+| `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-haiku-4-5-20251001-v1:0` |
 | `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | For Bedrock entries | string | — |
 | `OPENAI_API_KEY` | For OpenAI entries | string | `sk-...` |
 | `OPENAI_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `gpt-4o-mini` |

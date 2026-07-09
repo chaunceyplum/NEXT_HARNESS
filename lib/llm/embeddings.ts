@@ -17,7 +17,10 @@ let bedrockClient: ReturnType<typeof createAmazonBedrock> | null = null;
 function getBedrockClient() {
   if (!bedrockClient) {
     bedrockClient = createAmazonBedrock({
-      region: process.env.AWS_REGION,
+      // Falls back to us-east-1 if AWS_REGION isn't set — Bedrock needs a
+      // region to build its endpoint URL regardless of auth method, and
+      // throws rather than defaulting on its own if none is resolvable.
+      region: process.env.AWS_REGION || 'us-east-1',
       accessKeyId: process.env.AWS_ACCESS_KEY_ID,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
       sessionToken: process.env.AWS_SESSION_TOKEN,
