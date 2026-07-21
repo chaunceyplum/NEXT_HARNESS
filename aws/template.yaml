@@ -1,0 +1,279 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  harness-agent-loop: the Step Functions Standard workflow that replaces
+  lib/llm/agent.ts's old in-process runAgent() loop. InitRun sets up the
+  run, AgentStep runs one model turn at a time, ExecTools runs the tool
+  calls the model proposed, RequestApproval parks the workflow on a human
+  decision via waitForTaskToken for gated tools, InjectRejection feeds a
+  rejection + feedback back to the model as a tool-result, and Finalize
+  closes the run out. All state beyond a small control envelope lives in
+  Postgres via the AEC_MCP execute_sql tool (lib/execution-store.ts) — see
+  aws/statemachine/harness-agent-loop.asl.json for why.
+  Build the Lambda bundles first: `npm run build:aws` (esbuild), then
+  `sam build && sam deploy --guided` from this directory.
+
+Parameters:
+  McpEndpointUrl:
+    Type: String
+    Description: Same MCP_ENDPOINT_URL the Next.js harness already uses.
+  McpApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional — only if the MCP API Gateway stage requires x-api-key.
+  McpAuthToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional — only if the MCP endpoint is fronted by a bearer-token authorizer.
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional — only needed if any run picks an anthropic:* model key.
+  OpenAiApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Optional — needed for openai:* model keys and/or EMBEDDING_PROVIDER=openai.
+  EmbeddingProvider:
+    Type: String
+    Default: ''
+    AllowedValues: ['', 'openai', 'bedrock']
+    Description: Optional — mirrors lib/llm/embeddings.ts's auto-detection if left blank.
+  EmbeddingModelId:
+    Type: String
+    Default: ''
+  GatedTools:
+    Type: String
+    Default: 'msb_execute_solution,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql'
+    Description: Comma-separated tool names that require human approval before ExecTools runs them (agent-step's GATED_TOOLS).
+  ToolRetries:
+    Type: String
+    Default: '1'
+    Description: Extra attempts per failed tool call, each preceded by a RAG lookup (exec-tools' TOOL_RETRIES).
+  HarnessApprovalsTopicArn:
+    Type: String
+    Default: ''
+    Description: Optional SNS topic ARN — request-approval publishes a notification here if set.
+
+Conditions:
+  HasApiKey: !Not [!Equals [!Ref McpApiKey, '']]
+  HasAuthToken: !Not [!Equals [!Ref McpAuthToken, '']]
+  HasAnthropicKey: !Not [!Equals [!Ref AnthropicApiKey, '']]
+  HasOpenAiKey: !Not [!Equals [!Ref OpenAiApiKey, '']]
+  HasEmbeddingProvider: !Not [!Equals [!Ref EmbeddingProvider, '']]
+  HasEmbeddingModelId: !Not [!Equals [!Ref EmbeddingModelId, '']]
+  HasApprovalsTopic: !Not [!Equals [!Ref HarnessApprovalsTopicArn, '']]
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]
+    MemorySize: 512
+
+Resources:
+  # ── Lambdas ──────────────────────────────────────────────────────────────
+  # Common env vars (MCP_ENDPOINT_URL/MCP_API_KEY/MCP_AUTH_TOKEN) are needed
+  # on every function — even InjectRejection/Finalize, which look like pure
+  # bookkeeping, still call loadRun/checkpointStep/finalizeRun, which call
+  # execute_sql over the same MCP HTTP endpoint as everything else.
+
+  InitRunFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/init-run/
+      Handler: index.handler
+      Timeout: 60
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+          OPENAI_API_KEY: !If [HasOpenAiKey, !Ref OpenAiApiKey, !Ref 'AWS::NoValue']
+          EMBEDDING_PROVIDER: !If [HasEmbeddingProvider, !Ref EmbeddingProvider, !Ref 'AWS::NoValue']
+          EMBEDDING_MODEL_ID: !If [HasEmbeddingModelId, !Ref EmbeddingModelId, !Ref 'AWS::NoValue']
+      Policies:
+        # Only needed if EMBEDDING_PROVIDER resolves to bedrock (the default
+        # fallback when neither EMBEDDING_PROVIDER nor OPENAI_API_KEY is
+        # set) — see lib/llm/embeddings.ts's resolveEmbeddingProvider().
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*'
+
+  AgentStepFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/agent-step/
+      Handler: index.handler
+      Timeout: 270 # stays under the ASL AgentStep Task's 300s TimeoutSeconds
+      MemorySize: 1024
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+          ANTHROPIC_API_KEY: !If [HasAnthropicKey, !Ref AnthropicApiKey, !Ref 'AWS::NoValue']
+          OPENAI_API_KEY: !If [HasOpenAiKey, !Ref OpenAiApiKey, !Ref 'AWS::NoValue']
+          GATED_TOOLS: !Ref GatedTools
+      Policies:
+        # Covers every bedrock:* model key resolveModel() can produce
+        # (lib/llm/model-registry.ts) — no static AWS credentials needed in
+        # the Lambda, this execution role IS the credential.
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/*'
+
+  ExecToolsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/exec-tools/
+      Handler: index.handler
+      Timeout: 590 # stays under the ASL ExecTools Task's 600s TimeoutSeconds
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+          TOOL_RETRIES: !Ref ToolRetries
+
+  RequestApprovalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/request-approval/
+      Handler: index.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+          HARNESS_APPROVALS_TOPIC_ARN: !If [HasApprovalsTopic, !Ref HarnessApprovalsTopicArn, !Ref 'AWS::NoValue']
+      Policies:
+        # CloudFormation can't conditionally omit one entry from a Policies
+        # list (Fn::If -> AWS::NoValue removes whole properties, not list
+        # items), so this is granted unconditionally, scoped to this
+        # account/region rather than to the one topic — the code itself is
+        # a no-op whenever HARNESS_APPROVALS_TOPIC_ARN is unset.
+        - Statement:
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:*'
+
+  InjectRejectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/inject-rejection/
+      Handler: index.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+
+  FinalizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/finalize/
+      Handler: index.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          MCP_ENDPOINT_URL: !Ref McpEndpointUrl
+          MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
+          MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
+
+  # ── State machine ────────────────────────────────────────────────────────
+
+  HarnessAgentLoopRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLoopLambdas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt InitRunFunction.Arn
+                  - !GetAtt AgentStepFunction.Arn
+                  - !GetAtt ExecToolsFunction.Arn
+                  - !GetAtt RequestApprovalFunction.Arn
+                  - !GetAtt InjectRejectionFunction.Arn
+                  - !GetAtt FinalizeFunction.Arn
+
+  HarnessAgentLoopStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: harness-agent-loop
+      Type: STANDARD
+      DefinitionUri: statemachine/harness-agent-loop.asl.json
+      DefinitionSubstitutions:
+        InitRunArn: !GetAtt InitRunFunction.Arn
+        AgentStepArn: !GetAtt AgentStepFunction.Arn
+        ExecToolsArn: !GetAtt ExecToolsFunction.Arn
+        RequestApprovalArn: !GetAtt RequestApprovalFunction.Arn
+        InjectRejectionArn: !GetAtt InjectRejectionFunction.Arn
+        FinalizeArn: !GetAtt FinalizeFunction.Arn
+      Role: !GetAtt HarnessAgentLoopRole.Arn
+
+  # ── Next.js control-plane policy (§8) ─────────────────────────────────────
+  # Attach this to whatever IAM principal the Next.js app runs as (an IAM
+  # user + access key if it's hosted off-AWS, e.g. Vercel; an instance/task
+  # role if it moves onto AWS later). SendTaskSuccess/SendTaskFailure don't
+  # support resource-level ARNs — token possession is the actual
+  # authorization, which is why loadApproval()'s task_token must never be
+  # returned by any read API (see lib/execution-store.ts).
+
+  NextJsControlPlanePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: harness-nextjs-control-plane
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource: !Ref HarnessAgentLoopStateMachine
+          - Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - states:DescribeExecution
+              - states:StopExecution
+            Resource: !Sub 'arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:harness-agent-loop:*'
+
+Outputs:
+  StateMachineArn:
+    Description: Set as HARNESS_STATE_MACHINE_ARN in the Next.js harness's .env.local
+    Value: !Ref HarnessAgentLoopStateMachine
+  NextJsControlPlanePolicyArn:
+    Description: Attach to the IAM user/role the Next.js app authenticates as
+    Value: !Ref NextJsControlPlanePolicy
+  InitRunFunctionArn:
+    Value: !GetAtt InitRunFunction.Arn
+  AgentStepFunctionArn:
+    Value: !GetAtt AgentStepFunction.Arn
+  ExecToolsFunctionArn:
+    Value: !GetAtt ExecToolsFunction.Arn
+  RequestApprovalFunctionArn:
+    Value: !GetAtt RequestApprovalFunction.Arn
+  InjectRejectionFunctionArn:
+    Value: !GetAtt InjectRejectionFunction.Arn
+  FinalizeFunctionArn:
+    Value: !GetAtt FinalizeFunction.Arn

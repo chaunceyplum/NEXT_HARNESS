@@ -1,0 +1,132 @@
+{
+  "Comment": "NEXT_HARNESS agentic loop: Step Functions owns iteration; each Lambda owns one step; Postgres (via AEC_MCP execute_sql, see lib/execution-store.ts) owns all large state — the envelope passed between states never exceeds a few small fields (Standard workflows cap inter-state payload at 256KB).",
+  "StartAt": "InitRun",
+  "States": {
+    "InitRun": {
+      "Type": "Task",
+      "Resource": "${InitRunArn}",
+      "Parameters": {
+        "runId.$": "$.runId",
+        "description.$": "$.description",
+        "modelKey.$": "$.modelKey",
+        "allowFullBuild.$": "$.allowFullBuild",
+        "maxSteps.$": "$.maxSteps",
+        "toolShortlistSize.$": "$.toolShortlistSize",
+        "toolRetries.$": "$.toolRetries",
+        "sfnExecutionArn.$": "$$.Execution.Id"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["StateStoreError", "Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "AgentStep"
+    },
+    "AgentStep": {
+      "Type": "Task",
+      "Resource": "${AgentStepArn}",
+      "TimeoutSeconds": 300,
+      "Retry": [
+        { "ErrorEquals": ["ModelProviderError"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 },
+        { "ErrorEquals": ["StateStoreError"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2 },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "States.Timeout"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "RouteStep"
+    },
+    "RouteStep": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.status", "StringEquals": "NEEDS_APPROVAL", "Next": "RequestApproval" },
+        { "Variable": "$.status", "StringEquals": "TOOL_CALLS", "Next": "ExecTools" },
+        { "Variable": "$.status", "StringEquals": "DONE", "Next": "Finalize" },
+        { "Variable": "$.status", "StringEquals": "MAX_STEPS", "Next": "Finalize" }
+      ],
+      "Default": "MarkFailed"
+    },
+    "RequestApproval": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${RequestApprovalArn}",
+        "Payload": {
+          "taskToken.$": "$$.Task.Token",
+          "runId.$": "$.runId",
+          "stepCount.$": "$.stepCount"
+        }
+      },
+      "HeartbeatSeconds": 172800,
+      "TimeoutSeconds": 172800,
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["HumanRejected"], "ResultPath": "$.error", "Next": "InjectRejection" },
+        { "ErrorEquals": ["States.Timeout"], "ResultPath": "$.error", "Next": "MarkExpired" },
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }
+      ],
+      "Next": "ExecTools"
+    },
+    "InjectRejection": {
+      "Type": "Task",
+      "Resource": "${InjectRejectionArn}",
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "AgentStep"
+    },
+    "ExecTools": {
+      "Type": "Task",
+      "Resource": "${ExecToolsArn}",
+      "TimeoutSeconds": 600,
+      "Retry": [
+        {
+          "ErrorEquals": ["StateStoreError", "Lambda.ServiceException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "MarkFailed" }],
+      "Next": "AgentStep"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "${FinalizeArn}",
+      "End": true
+    },
+    "MarkExpired": {
+      "Type": "Task",
+      "Resource": "${FinalizeArn}",
+      "Parameters": {
+        "runId.$": "$.runId",
+        "forceStatus": "REJECTED",
+        "note": "Approval expired (parked longer than 48h with no reviewer decision)"
+      },
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "${FinalizeArn}",
+      "Parameters": {
+        "runId.$": "$.runId",
+        "forceStatus": "FAILED",
+        "error.$": "$.error"
+      },
+      "End": true
+    }
+  }
+}

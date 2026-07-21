@@ -93,12 +93,18 @@ export interface BuildAiToolsOptions {
   maxRetries?: number;
 }
 
+export interface ExecuteMcpToolWithRetryOptions {
+  /** Extra retries after the first failed attempt, each preceded by a RAG lookup. 0 disables retrying. */
+  maxRetries: number;
+  /** Names of tools in this run's selected set — used to pick a plausible grounding tool for the RAG lookup. */
+  availableNames: Set<string>;
+}
+
 /**
- * Wrap a set of MCP tool definitions as an AI SDK ToolSet. Each tool's
- * `execute` calls straight through to the MCP server via callMcpTool — the
- * model only ever sees the schemas you hand it here, which is what makes
- * tool-shortlisting (lib/llm/tool-retrieval.ts) effective: pass a narrow
- * `defs` list and the model literally cannot call anything outside it.
+ * Calls one MCP tool with the RAG-consulting retry behavior, independent of
+ * the AI SDK tool wrapper below. Shared by the in-process agent loop
+ * (via buildAiTools) and the exec-tools Lambda (aws/lambdas/exec-tools),
+ * so both retry identically instead of the Lambda re-implementing this.
  *
  * On failure, before retrying, this consults the relevant knowledge-search
  * tool (query built from the tool name, its arguments, and the error) so
@@ -106,6 +112,72 @@ export interface BuildAiToolsOptions {
  * more to go on than "it errored." Retry history (including what the RAG
  * lookup found) rides along on the eventual result/error so it's visible
  * in the trace, not just to the model.
+ *
+ * RAG tools call themselves — never retry-with-RAG-lookup those, or a
+ * failing search would try to "ground itself" recursively.
+ */
+export async function executeMcpToolWithRetry(
+  toolName: string,
+  args: Record<string, unknown>,
+  opts: ExecuteMcpToolWithRetryOptions
+): Promise<unknown> {
+  const { maxRetries, availableNames } = opts;
+  const isRagTool = RAG_TOOLS.has(toolName);
+
+  if (isRagTool || maxRetries <= 0) {
+    return callMcpTool(toolName, args);
+  }
+
+  const attempts: RetryAttemptRecord[] = [];
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await callMcpTool(toolName, args);
+      if (attempts.length === 0) return result;
+      // Succeeded after retrying — attach retry history without
+      // disturbing the shape callers rely on (e.g. agent.ts reading
+      // output.execution_id directly off msb_execute_solution's result).
+      if (result && typeof result === 'object' && !Array.isArray(result)) {
+        return { ...(result as Record<string, unknown>), _retryHistory: attempts };
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+
+      if (attempt < maxRetries) {
+        const ragTool = pickRagTool(toolName, availableNames);
+        const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
+        if (ragTool) {
+          const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${JSON.stringify(args)}. What is the correct usage or known constraint here?`;
+          record.raggedBefore = { tool: ragTool, query };
+          try {
+            record.raggedBefore.findings = await callMcpTool(ragTool, { query });
+          } catch (ragErr) {
+            record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
+          }
+        }
+        attempts.push(record);
+      } else {
+        attempts.push({ attempt: attempt + 1, error: message });
+      }
+    }
+  }
+
+  const finalMessage = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(
+    `${toolName} failed after ${attempts.length} attempt(s): ${finalMessage}\n` +
+      `Retry history: ${JSON.stringify(attempts)}`
+  );
+}
+
+/**
+ * Wrap a set of MCP tool definitions as an AI SDK ToolSet. Each tool's
+ * `execute` calls straight through to executeMcpToolWithRetry — the model
+ * only ever sees the schemas you hand it here, which is what makes
+ * tool-shortlisting (lib/llm/tool-retrieval.ts) effective: pass a narrow
+ * `defs` list and the model literally cannot call anything outside it.
  */
 export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions = {}): ToolSet {
   const maxRetries = opts.maxRetries ?? 1;
@@ -113,65 +185,32 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
   const tools: ToolSet = {};
 
   for (const def of defs) {
-    const isRagTool = RAG_TOOLS.has(def.name);
-
     tools[def.name] = tool({
       description: def.description || `MCP tool: ${def.name}`,
       // MCP inputSchema is already JSON Schema; jsonSchema() takes it as-is
       // without requiring a hand-written Zod schema per tool.
       inputSchema: jsonSchema(def.inputSchema as never),
-      execute: async (input: unknown) => {
-        const args = (input as Record<string, unknown>) ?? {};
+      execute: async (input: unknown) =>
+        executeMcpToolWithRetry(def.name, (input as Record<string, unknown>) ?? {}, { maxRetries, availableNames }),
+    });
+  }
+  return tools;
+}
 
-        // RAG tools call themselves — never retry-with-RAG-lookup those,
-        // or a failing search would try to "ground itself" recursively.
-        if (isRagTool || maxRetries <= 0) {
-          return callMcpTool(def.name, args);
-        }
-
-        const attempts: RetryAttemptRecord[] = [];
-        let lastError: unknown;
-
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            const result = await callMcpTool(def.name, args);
-            if (attempts.length === 0) return result;
-            // Succeeded after retrying — attach retry history without
-            // disturbing the shape callers rely on (e.g. agent.ts reading
-            // output.execution_id directly off msb_execute_solution's result).
-            if (result && typeof result === 'object' && !Array.isArray(result)) {
-              return { ...(result as Record<string, unknown>), _retryHistory: attempts };
-            }
-            return result;
-          } catch (err) {
-            lastError = err;
-            const message = err instanceof Error ? err.message : String(err);
-
-            if (attempt < maxRetries) {
-              const ragTool = pickRagTool(def.name, availableNames);
-              const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
-              if (ragTool) {
-                const query = `Tool "${def.name}" failed with error: ${message}. Arguments used: ${JSON.stringify(args)}. What is the correct usage or known constraint here?`;
-                record.raggedBefore = { tool: ragTool, query };
-                try {
-                  record.raggedBefore.findings = await callMcpTool(ragTool, { query });
-                } catch (ragErr) {
-                  record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
-                }
-              }
-              attempts.push(record);
-            } else {
-              attempts.push({ attempt: attempt + 1, error: message });
-            }
-          }
-        }
-
-        const finalMessage = lastError instanceof Error ? lastError.message : String(lastError);
-        throw new Error(
-          `${def.name} failed after ${attempts.length} attempt(s): ${finalMessage}\n` +
-            `Retry history: ${JSON.stringify(attempts)}`
-        );
-      },
+/**
+ * Same tool definitions, but with NO execute function — used by the
+ * agent-step Lambda (aws/lambdas/agent-step). Without an execute function,
+ * generateText() stops after emitting tool-call parts instead of running
+ * them; the exec-tools Lambda runs them afterwards via
+ * executeMcpToolWithRetry. This is what lets Step Functions checkpoint
+ * between "model decided what to call" and "tools actually ran".
+ */
+export function buildToolStubs(defs: McpToolDefinition[]): ToolSet {
+  const tools: ToolSet = {};
+  for (const def of defs) {
+    tools[def.name] = tool({
+      description: def.description || `MCP tool: ${def.name}`,
+      inputSchema: jsonSchema(def.inputSchema as never),
     });
   }
   return tools;

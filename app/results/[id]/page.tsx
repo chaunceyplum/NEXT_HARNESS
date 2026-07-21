@@ -3,8 +3,12 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
+import { ApiError, ExecutionRecord, StartRunResponse } from '@/lib/types';
+import { statusBadgeClass } from '@/lib/status-badge';
 import AgentTrace from '@/components/AgentTrace';
+
+const IN_PROGRESS_STATUSES = new Set(['PENDING', 'RUNNING', 'AWAITING_APPROVAL']);
+const POLL_INTERVAL_MS = 3000;
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -17,17 +21,50 @@ export default function RunDetailPage() {
   const [replaying, setReplaying] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/runs/${id}`)
-      .then(async (res) => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function poll() {
+      try {
+        const res = await fetch(`/api/runs/${id}`);
+        if (cancelled) return;
+
         if (!res.ok) {
+          // A fresh Step-Functions run's harness_agent_runs row is created
+          // by InitRun, a second or so after StartExecution — treat a 404
+          // in the first few polls as "still starting up" rather than an
+          // error, since the client only ever gets here right after POST
+          // /api/build returned 202.
+          if (res.status === 404 && !record) {
+            timer = setTimeout(poll, POLL_INTERVAL_MS);
+            return;
+          }
           const errData: ApiError = await res.json().catch(() => ({ error: `HTTP ${res.status}` } as ApiError));
           throw new Error(errData.error || `HTTP ${res.status}`);
         }
-        return res.json();
-      })
-      .then((data: ExecutionRecord) => setRecord(data))
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load run'))
-      .finally(() => setLoading(false));
+
+        const data: ExecutionRecord = await res.json();
+        if (cancelled) return;
+        setRecord(data);
+        setError(null);
+        setLoading(false);
+
+        if (IN_PROGRESS_STATUSES.has(data.status)) {
+          timer = setTimeout(poll, POLL_INTERVAL_MS);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to load run');
+        setLoading(false);
+      }
+    }
+
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   async function handleReplay() {
@@ -46,12 +83,8 @@ export default function RunDetailPage() {
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
-      const data: BuildResponse = await res.json();
-      if (data.executionId) {
-        router.push(`/executions/${data.executionId}`);
-      } else {
-        router.push(`/results/${data.runId}`);
-      }
+      const data: StartRunResponse = await res.json();
+      router.push(`/results/${data.runId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Replay failed');
       setReplaying(false);
@@ -118,11 +151,12 @@ export default function RunDetailPage() {
                   <div>
                     <p className="text-gray-500 font-medium">Status</p>
                     <span
-                      className={`inline-block mt-1 px-2 py-0.5 rounded text-xs font-bold ${
-                        record.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                      }`}
+                      className={`inline-block mt-1 px-2 py-0.5 rounded text-xs font-bold ${statusBadgeClass(record.status)}`}
                     >
                       {record.status}
+                      {IN_PROGRESS_STATUSES.has(record.status) && (
+                        <span className="inline-block w-1.5 h-1.5 bg-current rounded-full ml-1.5 animate-pulse" />
+                      )}
                     </span>
                   </div>
                   <div>
@@ -138,10 +172,40 @@ export default function RunDetailPage() {
               <p className="text-xs text-gray-400 mt-4">{new Date(record.createdAt).toLocaleString()}</p>
             </div>
 
-            {record.status === 'failed' && (
+            {(record.status === 'failed' || record.status === 'FAILED') && (
               <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
                 <p className="text-red-800 font-medium">Run Error</p>
                 <p className="text-red-700 text-sm mt-2 font-mono whitespace-pre-wrap">{record.error}</p>
+              </div>
+            )}
+
+            {record.status === 'AWAITING_APPROVAL' && (
+              <div className="bg-purple-50 border-l-4 border-purple-500 p-4 rounded-lg">
+                <p className="text-purple-800 font-medium">Waiting on human approval</p>
+                <p className="text-purple-700 text-sm mt-1">
+                  The agent proposed a high-impact tool call and is parked until a reviewer approves or rejects it.{' '}
+                  <Link href="/approvals" className="underline font-medium">
+                    Review pending approvals →
+                  </Link>
+                </p>
+              </div>
+            )}
+
+            {record.status === 'REJECTED' && (
+              <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-lg">
+                <p className="text-amber-800 font-medium">Rejected</p>
+                <p className="text-amber-700 text-sm mt-1">
+                  A reviewer rejected a proposed action (or the approval expired) and the run ended here.
+                </p>
+              </div>
+            )}
+
+            {record.status === 'MAX_STEPS' && (
+              <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-lg">
+                <p className="text-amber-800 font-medium">Stopped — max steps reached</p>
+                <p className="text-amber-700 text-sm mt-1">
+                  The agent hit its step limit before finishing. Increase maxSteps and replay if it needed more room.
+                </p>
               </div>
             )}
 

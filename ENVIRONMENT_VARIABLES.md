@@ -54,6 +54,43 @@ MCP_API_KEY=<your-api-gateway-key>       # sent as x-api-key
 MCP_AUTH_TOKEN=<your-token>              # sent as Authorization: Bearer <token>
 ```
 
+### `HARNESS_STATE_MACHINE_ARN` (REQUIRED for the default async path)
+
+**What it is**: ARN of the `harness-agent-loop` Step Functions state machine
+(`aws/`) that now runs the agent loop. `POST /api/build` starts one
+execution of it and returns immediately (`202 { runId, status: 'PENDING' }`)
+instead of running `lib/llm/agent.ts`'s loop in-process — see
+`lib/step-functions-client.ts` and `aws/README.md` for how to deploy it.
+
+**Where to get it**: the `StateMachineArn` output of `sam deploy` in `aws/`.
+
+**Format**:
+```
+HARNESS_STATE_MACHINE_ARN=arn:aws:states:<region>:<account-id>:stateMachine:<stack-name>-harness-agent-loop
+```
+
+Wait — deployed name is `harness-agent-loop` regardless of stack name (see
+`aws/template.yaml`'s `HarnessAgentLoopStateMachine.Properties.Name`), so
+the ARN's last segment is literally `harness-agent-loop`, not stack-prefixed.
+
+**Used by**: `lib/step-functions-client.ts` (`StartExecution`,
+`SendTaskSuccess`, `SendTaskFailure`), using the same AWS credentials
+configured below for Bedrock — that IAM principal additionally needs the
+permissions in `aws/template.yaml`'s `NextJsControlPlanePolicy` (attach that
+managed policy directly, or copy its statements onto whatever IAM user/role
+this app authenticates as).
+
+**Bypass**: append `?sync=1` to a `POST /api/build` request to skip Step
+Functions entirely and run the whole agent loop in-process instead (the
+original behavior) — kept only for side-by-side comparison during the
+Step Functions cutover; doesn't require this variable at all.
+
+**What happens if missing** (default async path only):
+```
+Error: HARNESS_STATE_MACHINE_ARN is not set. Deploy aws/ (see aws/README.md)
+and set the StateMachineArn output in .env.local.
+```
+
 ---
 
 ## LLM Provider Variables (agent — lib/llm/)
@@ -378,6 +415,7 @@ Then load with: `next build --env-file=.env.production`
 | Variable | Required | Type | Example |
 |----------|----------|------|---------|
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
+| `HARNESS_STATE_MACHINE_ARN` | ✅ Yes (unless every request uses `?sync=1`) | ARN | `arn:aws:states:us-east-1:123456789012:stateMachine:harness-agent-loop` |
 | `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
 | `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
 | `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-haiku-4-5-20251001-v1:0` |

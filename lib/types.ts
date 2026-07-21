@@ -33,6 +33,10 @@ export interface BuildRequest {
   allowFullBuild?: boolean;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
   toolRetries?: number;
+  /** Tool-call round trips before the loop is forced to stop. Omit for the server default (10). */
+  maxSteps?: number;
+  /** How many tools the semantic shortlist pulls in, on top of the always-on set. Omit for the server default (12). */
+  toolShortlistSize?: number;
 }
 
 export interface BuildResponse {
@@ -44,6 +48,12 @@ export interface BuildResponse {
   /** Present only if a tool in the run (typically msb_execute_solution) kicked off an async execution. */
   executionId?: string;
   finishReason: string;
+}
+
+/** POST /api/build's response when it starts a Step Functions run (the default — see ?sync=1 for the old synchronous BuildResponse). */
+export interface StartRunResponse {
+  runId: string;
+  status: 'PENDING';
 }
 
 export interface ModelOption {
@@ -62,7 +72,14 @@ export interface RunSummary {
   description: string;
   model: string;
   allowFullBuild: boolean;
-  status: 'completed' | 'failed';
+  /**
+   * 'completed' | 'failed' from the old synchronous path, or one of
+   * RunLoopStatus's uppercase values for a Step-Functions-backed run
+   * (PENDING/RUNNING/AWAITING_APPROVAL/COMPLETED/FAILED/REJECTED/MAX_STEPS)
+   * — both live in the same harness_agent_runs.status column, so this is
+   * intentionally loose rather than a shared enum with RunLoopStatus.
+   */
+  status: string;
   durationMs: number;
   toolsConsidered?: string[];
   executionId?: string;
@@ -78,6 +95,62 @@ export interface RunsListResponse {
   runs: RunSummary[];
   total: number;
 }
+
+// ============================================================================
+// Step Functions agent-loop run state (lib/execution-store.ts loadRun/
+// checkpointStep) — the live, in-progress counterpart to ExecutionRecord
+// above, which only ever represents a *finished* run's replay-view shape.
+// ============================================================================
+
+export type RunLoopStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'AWAITING_APPROVAL'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'REJECTED'
+  | 'MAX_STEPS';
+
+export interface PendingToolCall {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+}
+
+/** Full live state for one in-progress or finished agent-loop run, as read by the Lambdas and the run-status API route. */
+export interface RunState {
+  id: string;
+  createdAt: string;
+  description: string;
+  model: string;
+  allowFullBuild: boolean;
+  status: RunLoopStatus;
+  /** AI SDK ModelMessage[] — persisted verbatim so it round-trips into the next generateText() call unchanged. */
+  messages: unknown[];
+  selectedTools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  stepCount: number;
+  /** Tool-call parts emitted by the last AgentStep, awaiting ExecTools (or an approval decision). */
+  pendingToolCalls: PendingToolCall[] | null;
+  msbExecutionId: string | null;
+}
+
+export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
+
+/** Never returned by any read API — task_token is a bearer credential (see infra README). Server-side use only. */
+export interface ApprovalRecord {
+  id: string;
+  runId: string;
+  taskToken: string;
+  gatedCalls: PendingToolCall[];
+  reasoning: string;
+  status: ApprovalStatus;
+  feedback?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+/** ApprovalRecord minus task_token — safe to return from GET /api/approvals. */
+export type ApprovalSummary = Omit<ApprovalRecord, 'taskToken'>;
 
 // ============================================================================
 // Planner Types (planner_parse_natural_language is still a real MCP tool the

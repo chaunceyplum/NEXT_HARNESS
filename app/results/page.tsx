@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { RunSummary, RunsListResponse } from '@/lib/types';
+import { statusBadgeClass } from '@/lib/status-badge';
 
 const PAGE_SIZE = 20;
 
@@ -82,9 +83,7 @@ export default function ResultsPage() {
                   </p>
                 </div>
                 <span
-                  className={`shrink-0 inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
-                    run.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}
+                  className={`shrink-0 inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${statusBadgeClass(run.status)}`}
                 >
                   {run.status}
                 </span>
