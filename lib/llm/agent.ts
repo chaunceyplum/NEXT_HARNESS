@@ -15,9 +15,10 @@
  * per-request based on the actual ask, not a hardcoded chain.
  */
 
+import { randomUUID } from 'crypto';
 import { generateText, stepCountIs } from 'ai';
 import { getDefaultModelKey, resolveModel } from './model-registry';
-import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog, StepFunctionToolError, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
 
 /**
@@ -45,7 +46,7 @@ export interface AgentStepTrace {
   stepNumber: number;
   text: string;
   toolCalls: Array<{ toolName: string; input: unknown }>;
-  toolResults: Array<{ toolName: string; output: unknown; error?: string }>;
+  toolResults: Array<{ toolName: string; output: unknown; error?: string; stepFunctionExecutionArn?: string }>;
 }
 
 export interface AgentRunResult {
@@ -68,6 +69,8 @@ export interface RunAgentOptions {
   toolShortlistSize?: number;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup for context. 0 disables retrying. */
   toolRetries?: number;
+  /** Groups this run's tool-call Step Functions executions together. Defaults to a fresh UUID. */
+  runId?: string;
 }
 
 function systemPrompt(allowFullBuild: boolean): string {
@@ -111,6 +114,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     maxSteps = 10,
     toolShortlistSize = 12,
     toolRetries = 1,
+    runId = randomUUID(),
   } = opts;
 
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
@@ -133,7 +137,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     .map((name) => catalogByName.get(name))
     .filter((d): d is McpToolDefinition => Boolean(d));
 
-  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
+  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries, runId });
   const resolvedModelKey = modelKey || getDefaultModelKey();
 
   const result = await stage(`chat model call (${resolvedModelKey})`, () =>
@@ -159,13 +163,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       if (part.type === 'tool-call') {
         toolCalls.push({ toolName: part.toolName, input: part.input });
       } else if (part.type === 'tool-result') {
-        toolResults.push({ toolName: part.toolName, output: part.output });
+        const output = part.output;
+        const stepFunctionExecutionArn =
+          output && typeof output === 'object' && !Array.isArray(output)
+            ? ((output as Record<string, unknown>)._stepFunctionExecutionArn as string | undefined)
+            : undefined;
+        toolResults.push({ toolName: part.toolName, output, stepFunctionExecutionArn });
       } else if (part.type === 'tool-error') {
         const errVal = (part as { error?: unknown }).error;
         toolResults.push({
           toolName: part.toolName,
           output: undefined,
           error: errVal instanceof Error ? errVal.message : String(errVal),
+          stepFunctionExecutionArn: errVal instanceof StepFunctionToolError ? errVal.executionArn : undefined,
         });
       }
     }
