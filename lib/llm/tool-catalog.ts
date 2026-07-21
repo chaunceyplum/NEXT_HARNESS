@@ -7,8 +7,7 @@
  * arbitrary MCP tools without us hand-writing a wrapper per tool.
  */
 
-import { listMcpTools } from '@/lib/mcp-client';
-import { runToolViaStepFunctions } from '@/lib/step-functions-client';
+import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
 export interface McpToolDefinition {
@@ -81,7 +80,6 @@ function pickRagTool(toolName: string, available: Set<string>): string | undefin
 export interface RetryAttemptRecord {
   attempt: number;
   error: string;
-  stepFunctionExecutionArn?: string;
   raggedBefore?: {
     tool: string;
     query: string;
@@ -90,44 +88,9 @@ export interface RetryAttemptRecord {
   };
 }
 
-/** Thrown when a tool call's Step Functions execution didn't succeed. Carries the executionArn so callers/UI can link to it. */
-export class StepFunctionToolError extends Error {
-  constructor(message: string, public executionArn: string) {
-    super(message);
-    this.name = 'StepFunctionToolError';
-  }
-}
-
-/**
- * Every MCP tool *call* (as opposed to the one-time tools/list catalog fetch
- * above) runs as its own Step Functions execution of the tool-executor state
- * machine (infra/step-functions/) rather than a bare HTTP call — see that
- * directory's README for why. Successful results carry the executionArn
- * alongside the tool's own output so the UI can link to the execution.
- */
-async function executeMcpTool(toolName: string, args: Record<string, unknown>, runId: string): Promise<unknown> {
-  const outcome = await runToolViaStepFunctions(toolName, args, { runId });
-
-  if (outcome.status === 'SUCCEEDED') {
-    const output = outcome.output;
-    if (output && typeof output === 'object' && !Array.isArray(output)) {
-      return { ...(output as Record<string, unknown>), _stepFunctionExecutionArn: outcome.executionArn };
-    }
-    return output;
-  }
-
-  const detail = [outcome.error, outcome.cause].filter(Boolean).join(': ');
-  throw new StepFunctionToolError(
-    `${toolName} failed via Step Functions execution ${outcome.executionArn} (${outcome.status}): ${detail || 'no error detail'}`,
-    outcome.executionArn
-  );
-}
-
 export interface BuildAiToolsOptions {
   /** Extra retries after the first failed attempt, each preceded by a RAG lookup. 0 disables retrying. */
   maxRetries?: number;
-  /** Groups this run's tool-call executions together in Step Functions execution names. Required. */
-  runId: string;
 }
 
 /**
@@ -144,9 +107,8 @@ export interface BuildAiToolsOptions {
  * lookup found) rides along on the eventual result/error so it's visible
  * in the trace, not just to the model.
  */
-export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions): ToolSet {
+export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions = {}): ToolSet {
   const maxRetries = opts.maxRetries ?? 1;
-  const { runId } = opts;
   const availableNames = new Set(defs.map((d) => d.name));
   const tools: ToolSet = {};
 
@@ -164,7 +126,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
         // RAG tools call themselves — never retry-with-RAG-lookup those,
         // or a failing search would try to "ground itself" recursively.
         if (isRagTool || maxRetries <= 0) {
-          return executeMcpTool(def.name, args, runId);
+          return callMcpTool(def.name, args);
         }
 
         const attempts: RetryAttemptRecord[] = [];
@@ -172,7 +134,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
 
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
-            const result = await executeMcpTool(def.name, args, runId);
+            const result = await callMcpTool(def.name, args);
             if (attempts.length === 0) return result;
             // Succeeded after retrying — attach retry history without
             // disturbing the shape callers rely on (e.g. agent.ts reading
@@ -184,23 +146,22 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
           } catch (err) {
             lastError = err;
             const message = err instanceof Error ? err.message : String(err);
-            const executionArn = err instanceof StepFunctionToolError ? err.executionArn : undefined;
 
             if (attempt < maxRetries) {
               const ragTool = pickRagTool(def.name, availableNames);
-              const record: RetryAttemptRecord = { attempt: attempt + 1, error: message, stepFunctionExecutionArn: executionArn };
+              const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
               if (ragTool) {
                 const query = `Tool "${def.name}" failed with error: ${message}. Arguments used: ${JSON.stringify(args)}. What is the correct usage or known constraint here?`;
                 record.raggedBefore = { tool: ragTool, query };
                 try {
-                  record.raggedBefore.findings = await executeMcpTool(ragTool, { query }, runId);
+                  record.raggedBefore.findings = await callMcpTool(ragTool, { query });
                 } catch (ragErr) {
                   record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
                 }
               }
               attempts.push(record);
             } else {
-              attempts.push({ attempt: attempt + 1, error: message, stepFunctionExecutionArn: executionArn });
+              attempts.push({ attempt: attempt + 1, error: message });
             }
           }
         }

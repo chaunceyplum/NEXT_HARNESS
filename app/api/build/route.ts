@@ -93,7 +93,6 @@ export async function POST(request: Request): Promise<Response> {
         modelKey: body.model,
         allowFullBuild: normalizedRequest.allowFullBuild,
         toolRetries: body.toolRetries,
-        runId,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

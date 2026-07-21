@@ -16,8 +16,6 @@ export interface AgentToolResultDTO {
   output: unknown;
   /** Present when this tool call failed (after exhausting its RAG-consulting retries, if any). */
   error?: string;
-  /** ARN of the Step Functions execution that ran this tool call (its final attempt) — see infra/step-functions/. */
-  stepFunctionExecutionArn?: string;
 }
 
 export interface AgentStepDTO {

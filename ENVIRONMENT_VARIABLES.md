@@ -54,36 +54,6 @@ MCP_API_KEY=<your-api-gateway-key>       # sent as x-api-key
 MCP_AUTH_TOKEN=<your-token>              # sent as Authorization: Bearer <token>
 ```
 
-### `TOOL_EXECUTOR_STATE_MACHINE_ARN` (REQUIRED)
-
-**What it is**: ARN of the Step Functions state machine (`infra/step-functions/`)
-that runs every MCP tool call the agent makes. Each tool call the agent
-decides to make becomes one execution of this state machine instead of a
-bare HTTP call from `lib/mcp-client.ts` — see `lib/step-functions-client.ts`
-and `lib/llm/tool-catalog.ts` for the caller side, and
-`infra/step-functions/README.md` for deploying it.
-
-**Where to get it**: the `StateMachineArn` output of `sam deploy` in
-`infra/step-functions/`.
-
-**Format**:
-```
-TOOL_EXECUTOR_STATE_MACHINE_ARN=arn:aws:states:<region>:<account-id>:stateMachine:<stack-name>-tool-executor
-```
-
-**Used by**: `lib/step-functions-client.ts` (`StartExecution` /
-`DescribeExecution` / `GetExecutionHistory` / `StopExecution`), using the
-same AWS credentials configured below for Bedrock — that IAM principal
-additionally needs `states:StartExecution`, `states:DescribeExecution`,
-`states:GetExecutionHistory`, and `states:StopExecution` on this state
-machine.
-
-**What happens if missing**:
-```
-Error: TOOL_EXECUTOR_STATE_MACHINE_ARN is not set. Deploy infra/step-functions/
-(see its README) and set the StateMachineArn output in .env.local.
-```
-
 ---
 
 ## LLM Provider Variables (agent — lib/llm/)
@@ -408,7 +378,6 @@ Then load with: `next build --env-file=.env.production`
 | Variable | Required | Type | Example |
 |----------|----------|------|---------|
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
-| `TOOL_EXECUTOR_STATE_MACHINE_ARN` | ✅ Yes | ARN | `arn:aws:states:us-east-1:123456789012:stateMachine:my-stack-tool-executor` |
 | `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
 | `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
 | `BEDROCK_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `anthropic.claude-haiku-4-5-20251001-v1:0` |

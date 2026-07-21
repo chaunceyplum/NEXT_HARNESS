@@ -1,6 +1,5 @@
 'use client';
 
-import { useState } from 'react';
 import { AgentStepDTO } from '@/lib/types';
 
 export interface AgentTraceProps {
@@ -8,68 +7,6 @@ export interface AgentTraceProps {
   toolsConsidered: string[];
   finishReason: string;
   finalText: string;
-}
-
-interface SfnHistoryEvent {
-  id: number;
-  timestamp: string;
-  type: string;
-  details?: unknown;
-}
-
-/** Expandable Step Functions execution history for one tool call — fetched on demand, not persisted. */
-function StepFunctionHistory({ executionArn }: { executionArn: string }) {
-  const [open, setOpen] = useState(false);
-  const [events, setEvents] = useState<SfnHistoryEvent[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function toggle() {
-    if (open) {
-      setOpen(false);
-      return;
-    }
-    setOpen(true);
-    if (events || loading) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/step-functions/history?executionArn=${encodeURIComponent(executionArn)}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      setEvents(data.events);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load execution history');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const shortArn = executionArn.split(':').slice(-2).join(':');
-
-  return (
-    <div className="mt-1">
-      <button
-        onClick={toggle}
-        className="text-xs text-indigo-300 hover:text-indigo-200 underline decoration-dotted"
-        title={executionArn}
-      >
-        {open ? '▾' : '▸'} Step Functions: {shortArn}
-      </button>
-      {open && (
-        <div className="mt-1 bg-black/30 rounded p-2 max-h-40 overflow-y-auto">
-          {loading && <p className="text-gray-400">Loading history…</p>}
-          {error && <p className="text-red-300">{error}</p>}
-          {events && events.length === 0 && <p className="text-gray-500">No events.</p>}
-          {events?.map((e) => (
-            <div key={e.id} className="text-[11px] text-gray-300">
-              <span className="text-gray-500">{e.timestamp}</span> {e.type}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
@@ -111,7 +48,6 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
                 <pre className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto">
                   {res.error ?? JSON.stringify(res.output, null, 2)}
                 </pre>
-                {res.stepFunctionExecutionArn && <StepFunctionHistory executionArn={res.stepFunctionExecutionArn} />}
               </div>
             ))}
           </div>

@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.12",
-    "@aws-sdk/client-sfn": "^3.700.0",
     "@ai-sdk/anthropic": "^4.0.8",
     "@ai-sdk/openai": "^4.0.8",
     "ai": "^7.0.16",
