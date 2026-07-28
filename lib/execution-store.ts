@@ -30,10 +30,21 @@
 
 import { randomUUID } from 'crypto';
 import { callMcpTool } from './mcp-client';
-import type { ApprovalRecord, ApprovalSummary, ExecutionRecord, PendingToolCall, RunState, RunSummary } from './types';
+import type {
+  ApprovalRecord,
+  ApprovalSummary,
+  CreateTicketRequest,
+  ExecutionRecord,
+  PendingToolCall,
+  RunState,
+  RunSummary,
+  Ticket,
+  TicketSummary,
+} from './types';
 
 const RUNS_TABLE = 'harness_agent_runs';
 const APPROVALS_TABLE = 'harness_approvals';
+const TICKETS_TABLE = 'harness_tickets';
 
 interface ExecuteSqlResult {
   sql: string;
@@ -120,6 +131,7 @@ function ensureSchema(): Promise<void> {
       await execSql(`ALTER TABLE ${RUNS_TABLE} ADD COLUMN IF NOT EXISTS msb_execution_id TEXT`);
       await execSql(`ALTER TABLE ${RUNS_TABLE} ADD COLUMN IF NOT EXISTS pending_tool_calls JSONB`);
       await execSql(`ALTER TABLE ${RUNS_TABLE} ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`);
+      await execSql(`ALTER TABLE ${RUNS_TABLE} ADD COLUMN IF NOT EXISTS autonomous BOOLEAN NOT NULL DEFAULT FALSE`);
       await execSql(`CREATE INDEX IF NOT EXISTS idx_harness_runs_status ON ${RUNS_TABLE} (status)`);
 
       await execSql(
@@ -138,6 +150,24 @@ function ensureSchema(): Promise<void> {
       await execSql(
         `CREATE INDEX IF NOT EXISTS idx_harness_approvals_pending ON ${APPROVALS_TABLE} (status) WHERE status = 'PENDING'`
       );
+
+      // A ticket's lifecycle IS its run's lifecycle (see the doc comment on
+      // Ticket in lib/types.ts) — no separate status column here, callers
+      // join against ${RUNS_TABLE}.status at read time (listTickets/getTicket).
+      await execSql(
+        `CREATE TABLE IF NOT EXISTS ${TICKETS_TABLE} (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          priority TEXT NOT NULL DEFAULT 'normal',
+          requester TEXT,
+          team TEXT,
+          tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+          due_at TIMESTAMPTZ,
+          run_id TEXT NOT NULL REFERENCES ${RUNS_TABLE}(id),
+          created_at TIMESTAMPTZ NOT NULL
+        )`.replace(/\s+/g, ' ')
+      );
+      await execSql(`CREATE INDEX IF NOT EXISTS idx_harness_tickets_created_at ON ${TICKETS_TABLE} (created_at DESC)`);
     })().catch((err) => {
       ensureSchemaPromise = null; // allow retry on next call
       throw err;
@@ -242,6 +272,7 @@ export interface CreateRunInit {
   description: string;
   model: string;
   allowFullBuild: boolean;
+  autonomous: boolean;
   selectedTools: RunState['selectedTools'];
   messages: unknown[];
   sfnExecutionArn?: string;
@@ -254,11 +285,11 @@ export async function createRun(init: CreateRunInit): Promise<void> {
 
   const sql = `
     INSERT INTO ${RUNS_TABLE}
-      (id, created_at, description, model, allow_full_build, status, duration_ms, request,
+      (id, created_at, description, model, allow_full_build, autonomous, status, duration_ms, request,
        messages, selected_tools, step_count, sfn_execution_arn, updated_at)
     VALUES
       (${sqlStr(init.id)}, ${sqlStr(now)}, ${sqlStr(init.description)}, ${sqlStr(init.model)},
-       ${sqlBool(init.allowFullBuild)}, ${sqlStr('RUNNING')}, ${sqlInt(0)}, ${sqlJson(request)},
+       ${sqlBool(init.allowFullBuild)}, ${sqlBool(init.autonomous)}, ${sqlStr('RUNNING')}, ${sqlInt(0)}, ${sqlJson(request)},
        ${sqlJson(init.messages)}, ${sqlJson(init.selectedTools)}, ${sqlInt(0)},
        ${sqlStrOrNull(init.sfnExecutionArn)}, ${sqlStr(now)})
   `.replace(/\s+/g, ' ');
@@ -278,6 +309,7 @@ export async function loadRun(runId: string): Promise<RunState> {
     description: row.description as string,
     model: row.model as string,
     allowFullBuild: row.allow_full_build as boolean,
+    autonomous: (row.autonomous as boolean | null) ?? false,
     status: row.status as RunState['status'],
     messages: (row.messages as unknown[] | null) ?? [],
     selectedTools: (row.selected_tools as RunState['selectedTools'] | null) ?? [],
@@ -412,4 +444,88 @@ export async function listPendingApprovals(): Promise<ApprovalSummary[]> {
      FROM ${APPROVALS_TABLE} WHERE status = 'PENDING' ORDER BY created_at ASC`.replace(/\s+/g, ' ')
   );
   return (result.rows ?? []).map(rowToApprovalSummary);
+}
+
+// ── Tickets ────────────────────────────────────────────────────────────
+//
+// A ticket's lifecycle IS its run's lifecycle (see the Ticket doc comment
+// in lib/types.ts) — every read here joins ${TICKETS_TABLE} against
+// ${RUNS_TABLE} for a live status/allow_full_build/autonomous instead of
+// duplicating those onto the ticket row, so there is nothing to keep in
+// sync as the run progresses.
+
+const TICKET_JOIN_COLUMNS = `
+  t.id, t.title, t.priority, t.requester, t.team, t.tags, t.due_at, t.created_at,
+  r.id AS run_id, r.status AS run_status, r.allow_full_build, r.autonomous, r.description, r.model
+`.replace(/\s+/g, ' ');
+
+function rowToTicketSummary(row: Record<string, unknown>): TicketSummary {
+  return {
+    id: row.id as string,
+    title: row.title as string,
+    priority: row.priority as TicketSummary['priority'],
+    requester: (row.requester as string | null) ?? undefined,
+    team: (row.team as string | null) ?? undefined,
+    tags: (row.tags as string[] | null) ?? [],
+    dueAt: row.due_at ? new Date(row.due_at as string).toISOString() : undefined,
+    createdAt: new Date(row.created_at as string).toISOString(),
+    runId: row.run_id as string,
+    allowFullBuild: row.allow_full_build as boolean,
+    autonomous: row.autonomous as boolean,
+    runStatus: row.run_status as string,
+  };
+}
+
+export interface CreateTicketInit extends CreateTicketRequest {
+  id: string;
+  runId: string;
+}
+
+export async function createTicket(init: CreateTicketInit): Promise<void> {
+  await ensureSchema();
+  const now = new Date().toISOString();
+  const sql = `
+    INSERT INTO ${TICKETS_TABLE} (id, title, priority, requester, team, tags, due_at, run_id, created_at)
+    VALUES (
+      ${sqlStr(init.id)}, ${sqlStr(init.title)}, ${sqlStr(init.priority ?? 'normal')},
+      ${sqlStrOrNull(init.requester)}, ${sqlStrOrNull(init.team)}, ${sqlJson(init.tags ?? [])},
+      ${init.dueAt ? sqlStr(init.dueAt) : 'NULL'}, ${sqlStr(init.runId)}, ${sqlStr(now)}
+    )
+  `.replace(/\s+/g, ' ');
+  await execSql(sql);
+}
+
+export async function getTicket(id: string): Promise<Ticket | null> {
+  await ensureSchema();
+  const result = await execSql(
+    `SELECT ${TICKET_JOIN_COLUMNS} FROM ${TICKETS_TABLE} t JOIN ${RUNS_TABLE} r ON r.id = t.run_id WHERE t.id = ${sqlStr(id)} LIMIT 1`
+  );
+  const row = result.rows?.[0];
+  if (!row) return null;
+  return { ...rowToTicketSummary(row), description: row.description as string, model: row.model as string };
+}
+
+export interface ListTicketsOptions {
+  limit?: number;
+  offset?: number;
+}
+
+/** Newest-first, paginated. */
+export async function listTickets(opts: ListTicketsOptions = {}): Promise<{ tickets: TicketSummary[]; total: number }> {
+  await ensureSchema();
+  const limit = opts.limit ?? 20;
+  const offset = opts.offset ?? 0;
+
+  const [listResult, countResult] = await Promise.all([
+    execSql(
+      `SELECT ${TICKET_JOIN_COLUMNS} FROM ${TICKETS_TABLE} t JOIN ${RUNS_TABLE} r ON r.id = t.run_id
+       ORDER BY t.created_at DESC LIMIT ${sqlInt(limit)} OFFSET ${sqlInt(offset)}`.replace(/\s+/g, ' ')
+    ),
+    execSql(`SELECT count(*) AS total FROM ${TICKETS_TABLE}`),
+  ]);
+
+  return {
+    tickets: (listResult.rows ?? []).map(rowToTicketSummary),
+    total: Number(countResult.rows?.[0]?.total ?? 0),
+  };
 }

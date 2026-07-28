@@ -22,7 +22,10 @@ import type { LoopEnvelope } from '../_shared/envelope';
  * High-impact tools that must not run without a human looking at the
  * proposed call first. The whole step is gated if ANY call in it is
  * gated — per-call splitting (approve some, run others immediately) is
- * intentionally not supported yet.
+ * intentionally not supported yet. A run with `autonomous: true` (set at
+ * launch — see lib/run-launcher.ts / a ticket's "autonomous" toggle) skips
+ * this check entirely regardless of GATED_TOOLS; that's a per-run opt-out,
+ * not a change to which tools are considered gated.
  */
 const GATED_TOOLS = new Set(
   (process.env.GATED_TOOLS ?? 'msb_execute_solution,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql')
@@ -75,7 +78,7 @@ export const handler = async (env: LoopEnvelope): Promise<LoopEnvelope> => {
     return { ...env, stepCount, status: 'MAX_STEPS' };
   }
 
-  const needsApproval = toolCalls.some((tc) => GATED_TOOLS.has(tc.toolName));
+  const needsApproval = !run.autonomous && toolCalls.some((tc) => GATED_TOOLS.has(tc.toolName));
   await asStateStoreError(() =>
     checkpointStep(env.runId, {
       newMessages,

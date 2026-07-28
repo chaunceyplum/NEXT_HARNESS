@@ -31,6 +31,8 @@ export interface BuildRequest {
   model?: string;
   /** Must be explicitly true to let the agent reach for the full end-to-end build tool. */
   allowFullBuild?: boolean;
+  /** Skips the human-approval gate for every tool call this run makes, regardless of GATED_TOOLS. Defaults to false. */
+  autonomous?: boolean;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
   toolRetries?: number;
   /** Tool-call round trips before the loop is forced to stop. Omit for the server default (10). */
@@ -124,6 +126,8 @@ export interface RunState {
   description: string;
   model: string;
   allowFullBuild: boolean;
+  /** Per-run opt-out of the approval gate (see agent-step's GATED_TOOLS check) — set from a ticket's "autonomous" toggle, or directly on a /api/build request. */
+  autonomous: boolean;
   status: RunLoopStatus;
   /** AI SDK ModelMessage[] — persisted verbatim so it round-trips into the next generateText() call unchanged. */
   messages: unknown[];
@@ -132,6 +136,70 @@ export interface RunState {
   /** Tool-call parts emitted by the last AgentStep, awaiting ExecTools (or an approval decision). */
   pendingToolCalls: PendingToolCall[] | null;
   msbExecutionId: string | null;
+}
+
+// ============================================================================
+// Tickets (lib/execution-store.ts createTicket/getTicket/listTickets) —
+// a durable, metadata-carrying wrapper around a run. Submitting a ticket
+// starts its run immediately (see lib/run-launcher.ts); there is no
+// separate queued/dispatch state — a ticket's lifecycle *is* its run's
+// lifecycle, joined live rather than duplicated into its own status column.
+// ============================================================================
+
+export type TicketPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+export interface CreateTicketRequest {
+  title: string;
+  description: string;
+  priority?: TicketPriority;
+  requester?: string;
+  team?: string;
+  tags?: string[];
+  /** ISO timestamp. Informational only — nothing currently acts on it. */
+  dueAt?: string;
+  model?: string;
+  allowFullBuild?: boolean;
+  /** Skips the approval gate for every tool call this ticket's run makes, regardless of GATED_TOOLS. */
+  autonomous?: boolean;
+}
+
+export interface TicketSummary {
+  id: string;
+  title: string;
+  priority: TicketPriority;
+  requester?: string;
+  team?: string;
+  tags: string[];
+  dueAt?: string;
+  createdAt: string;
+  runId: string;
+  allowFullBuild: boolean;
+  autonomous: boolean;
+  /** Joined live from harness_agent_runs.status at read time — see RunSummary.status for why this is a loose string. */
+  runStatus: string;
+}
+
+export interface Ticket extends TicketSummary {
+  description: string;
+  model: string;
+}
+
+export interface TicketsListResponse {
+  tickets: TicketSummary[];
+  total: number;
+}
+
+export interface CreateTicketResponse {
+  id: string;
+  runId: string;
+  status: 'PENDING';
+}
+
+/** GET /api/tickets/:id — the ticket plus its run's trace, same shape approach as GET /api/runs/:id. */
+export interface TicketDetailResponse {
+  ticket: Ticket;
+  result?: BuildResponse;
+  error?: string;
 }
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';

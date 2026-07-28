@@ -75,6 +75,12 @@ export default function Home() {
           </div>
           <div className="flex flex-col items-end gap-1">
             <Link
+              href="/tickets"
+              className="text-indigo-600 hover:text-indigo-700 font-medium text-sm whitespace-nowrap"
+            >
+              Submit a ticket →
+            </Link>
+            <Link
               href="/results"
               className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
             >

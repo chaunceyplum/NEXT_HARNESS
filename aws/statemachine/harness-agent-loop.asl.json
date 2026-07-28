@@ -10,6 +10,7 @@
         "description.$": "$.description",
         "modelKey.$": "$.modelKey",
         "allowFullBuild.$": "$.allowFullBuild",
+        "autonomous.$": "$.autonomous",
         "maxSteps.$": "$.maxSteps",
         "toolShortlistSize.$": "$.toolShortlistSize",
         "toolRetries.$": "$.toolRetries",

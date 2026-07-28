@@ -10,6 +10,9 @@
  * is derived from the run's message history while in progress, and from
  * the persisted result once finalize has run).
  *
+ * Validation + the actual StartExecution call live in lib/run-launcher.ts,
+ * shared with POST /api/tickets (a ticket is a BuildRequest plus metadata).
+ *
  * ?sync=1: the original synchronous path — runs the whole agent loop
  * in-process via lib/llm/agent.ts and returns the full BuildResponse
  * directly. Kept only for side-by-side comparison during the Step
@@ -18,9 +21,8 @@
  */
 
 import { runAgent } from '@/lib/llm/agent';
-import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
-import { startRun } from '@/lib/step-functions-client';
+import { validateLaunchInput, launchRun } from '@/lib/run-launcher';
 import { ApiError, BuildRequest, BuildResponse, ExecutionRecord, StartRunResponse } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
@@ -35,64 +37,20 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    if (!body.description || typeof body.description !== 'string') {
-      return Response.json(
-        {
-          error: 'Missing or invalid "description" field',
-          code: 'VALIDATION_ERROR',
-          details: { required: ['description'] },
-        } as ApiError,
-        { status: 400 }
-      );
+    const validationError = validateLaunchInput(body);
+    if (validationError) {
+      return Response.json(validationError.response, { status: validationError.status });
     }
-
-    const description = body.description.trim();
-    if (description.length < 10) {
-      return Response.json(
-        {
-          error: 'Description must be at least 10 characters',
-          code: 'VALIDATION_ERROR',
-          details: { minLength: 10, received: description.length },
-        } as ApiError,
-        { status: 400 }
-      );
-    }
-    if (description.length > 5000) {
-      return Response.json(
-        {
-          error: 'Description must be less than 5000 characters',
-          code: 'VALIDATION_ERROR',
-          details: { maxLength: 5000, received: description.length },
-        } as ApiError,
-        { status: 400 }
-      );
-    }
-
-    if (body.model) {
-      const known = getModelRegistry().some((entry) => entry.key === body.model);
-      if (!known) {
-        return Response.json(
-          {
-            error: `Unknown model "${body.model}"`,
-            code: 'VALIDATION_ERROR',
-            details: { available: getModelRegistry().map((entry) => entry.key) },
-          } as ApiError,
-          { status: 400 }
-        );
-      }
-    }
-
-    const runId = newRunId();
-    const modelKey = body.model || getDefaultModelKey();
-    const allowFullBuild = body.allowFullBuild === true;
-    const maxSteps = body.maxSteps ?? 10;
-    const toolShortlistSize = body.toolShortlistSize ?? 12;
-    const toolRetries = body.toolRetries ?? 1;
 
     const isSync = new URL(request.url).searchParams.get('sync') === '1';
 
     if (isSync) {
+      const description = body.description.trim();
+      const allowFullBuild = body.allowFullBuild === true;
+      const toolRetries = body.toolRetries ?? 1;
+
       console.log('[BUILD sync] Running agent for:', description.slice(0, 80));
+      const runId = newRunId();
       const startedAt = Date.now();
       const createdAt = new Date(startedAt).toISOString();
       const normalizedRequest: BuildRequest = { description, model: body.model, allowFullBuild, toolRetries };
@@ -113,7 +71,7 @@ export async function POST(request: Request): Promise<Response> {
           id: runId,
           createdAt,
           description,
-          model: modelKey,
+          model: body.model || 'unknown',
           allowFullBuild,
           status: 'failed',
           durationMs: Date.now() - startedAt,
@@ -141,7 +99,7 @@ export async function POST(request: Request): Promise<Response> {
         id: runId,
         createdAt,
         description,
-        model: modelKey,
+        model: body.model || 'unknown',
         allowFullBuild,
         status: 'completed',
         durationMs: Date.now() - startedAt,
@@ -157,13 +115,14 @@ export async function POST(request: Request): Promise<Response> {
 
     // Async path (default) — InitRun creates the harness_agent_runs row;
     // this route never touches Postgres or the model provider directly.
+    let runId: string;
     try {
-      await startRun({ runId, description, modelKey, allowFullBuild, maxSteps, toolShortlistSize, toolRetries });
+      ({ runId } = await launchRun(body));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[BUILD] StartExecution failed:', error);
       return Response.json(
-        { error: `Failed to start run: ${message}`, code: 'STEP_FUNCTIONS_ERROR', details: { runId } } as ApiError,
+        { error: `Failed to start run: ${message}`, code: 'STEP_FUNCTIONS_ERROR' } as ApiError,
         { status: 500 }
       );
     }

@@ -21,6 +21,8 @@ export interface InitRunInput {
   description: string;
   modelKey: string;
   allowFullBuild: boolean;
+  /** Skips the approval gate for every tool call this run makes, regardless of GATED_TOOLS — see agent-step. */
+  autonomous: boolean;
   maxSteps: number;
   toolShortlistSize: number;
   toolRetries: number;
@@ -29,7 +31,7 @@ export interface InitRunInput {
 }
 
 export const handler = async (event: InitRunInput): Promise<LoopEnvelope> => {
-  const { runId, description, modelKey, allowFullBuild, maxSteps, toolShortlistSize, sfnExecutionArn } = event;
+  const { runId, description, modelKey, allowFullBuild, autonomous, maxSteps, toolShortlistSize, sfnExecutionArn } = event;
 
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -58,6 +60,7 @@ export const handler = async (event: InitRunInput): Promise<LoopEnvelope> => {
         description,
         model: modelKey,
         allowFullBuild,
+        autonomous,
         selectedTools,
         messages: [{ role: 'user', content: description }],
         sfnExecutionArn,

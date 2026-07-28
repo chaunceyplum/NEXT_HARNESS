@@ -37,6 +37,7 @@ export interface StartRunInput {
   description: string;
   modelKey: string;
   allowFullBuild: boolean;
+  autonomous: boolean;
   maxSteps: number;
   toolShortlistSize: number;
   toolRetries: number;
