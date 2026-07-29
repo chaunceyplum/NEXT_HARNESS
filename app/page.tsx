@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ApiError, BuildRequest, ModelOption, StartRunResponse } from '@/lib/types';
+import { ApiError, BuildRequest, BuildResponse, ModelOption } from '@/lib/types';
+import AgentTrace from '@/components/AgentTrace';
 
 export default function Home() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export default function Home() {
   const [allowFullBuild, setAllowFullBuild] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<BuildResponse | null>(null);
 
   useEffect(() => {
     fetch('/api/models')
@@ -27,6 +29,7 @@ export default function Home() {
   async function handleBuild(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setResult(null);
     setLoading(true);
 
     try {
@@ -47,14 +50,20 @@ export default function Home() {
         throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
       }
 
-      // POST /api/build starts a Step Functions run and returns immediately
-      // (202 PENDING) — the run detail page polls for progress from there.
-      const data: StartRunResponse = await response.json();
-      router.push(`/results/${data.runId}`);
+      const data: BuildResponse = await response.json();
+
+      if (data.executionId) {
+        // A full end-to-end build was triggered — switch to the async status view.
+        router.push(`/executions/${data.executionId}`);
+        return;
+      }
+
+      setResult(data);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to start run';
+      const errorMessage = err instanceof Error ? err.message : 'Failed to run agent';
       setError(errorMessage);
       console.error('Build error:', err);
+    } finally {
       setLoading(false);
     }
   }
@@ -73,26 +82,12 @@ export default function Home() {
               no fixed pipeline, no full rebuild for a narrow ask.
             </p>
           </div>
-          <div className="flex flex-col items-end gap-1">
-            <Link
-              href="/tickets"
-              className="text-indigo-600 hover:text-indigo-700 font-medium text-sm whitespace-nowrap"
-            >
-              Submit a ticket →
-            </Link>
-            <Link
-              href="/results"
-              className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
-            >
-              View past runs →
-            </Link>
-            <Link
-              href="/approvals"
-              className="text-purple-600 hover:text-purple-700 font-medium text-sm whitespace-nowrap"
-            >
-              Pending approvals →
-            </Link>
-          </div>
+          <Link
+            href="/results"
+            className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
+          >
+            View past runs →
+          </Link>
         </div>
 
         {/* Main Card */}
@@ -168,7 +163,7 @@ export default function Home() {
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                    Starting run...
+                    Running agent...
                   </span>
                 ) : (
                   'Run'
@@ -177,6 +172,24 @@ export default function Home() {
             </div>
           </form>
         </div>
+
+        {/* Agent trace */}
+        {result && (
+          <div className="mb-6">
+            <p className="text-xs text-gray-500 mb-2">
+              Run ID: <code className="bg-white px-2 py-0.5 rounded">{result.runId}</code> ·{' '}
+              <Link href={`/results/${result.runId}`} className="text-blue-600 hover:text-blue-700">
+                view in history
+              </Link>
+            </p>
+            <AgentTrace
+              steps={result.steps}
+              toolsConsidered={result.toolsConsidered}
+              finishReason={result.finishReason}
+              finalText={result.finalText}
+            />
+          </div>
+        )}
 
         {/* Examples */}
         <div className="bg-white rounded-lg shadow p-6">

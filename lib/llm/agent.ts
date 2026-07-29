@@ -17,8 +17,7 @@
 
 import { generateText, stepCountIs } from 'ai';
 import { getDefaultModelKey, resolveModel } from './model-registry';
-import { getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
-import { buildAiTools } from './tool-execution';
+import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, FULL_BUILD_TOOL, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 
