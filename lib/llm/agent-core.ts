@@ -1,13 +1,6 @@
 /**
- * Shared agent building blocks used by both the in-process agent loop
- * (lib/llm/agent.ts, kept for the synchronous `?sync=1` cutover path) and
- * the Step Functions `agent-step`/`init-run` Lambdas (aws/lambdas/). Moved
- * here so neither side re-implements the system prompt or tool-set
- * invariants and drifts from the other.
- *
- * Rebuilt fresh on every call rather than persisted — a prompt fix or a
- * change to ALWAYS_ON_TOOLS applies to in-flight Step Functions runs on
- * next deploy without needing a migration.
+ * Shared agent building blocks — the system prompt and tool-set invariants
+ * lib/llm/agent.ts's runAgent() builds on.
  */
 
 /**
@@ -53,7 +46,6 @@ export function systemPrompt(allowFullBuild: boolean): string {
     '- Before proposing a change to existing code with msb_github_commit_code, first use github_list_directory and github_read_file to look at what is actually there. Never write a change to an existing file based on a guess about its current contents — read it first. For a brand-new file with no existing counterpart, this does not apply.',
     '- msb_github_commit_code\'s files are syntax-checked automatically before the commit is made (valid JSON where expected, no JS/TS/JSX parse errors) — this only catches "does it parse," not logic or type errors, and not whether it fits the rest of the codebase. If a commit is rejected for a syntax error, fix the reported issue and retry; do not resubmit the same content unchanged.',
     '- After acting, briefly explain what you did and why in your final answer.',
-    '- Some high-impact tools require human approval before execution. If a reviewer rejects a proposed action, the rejection and their feedback will appear as that tool call\'s result — revise your approach accordingly instead of re-proposing the identical call.',
   ].join('\n');
 }
 
@@ -80,70 +72,4 @@ export interface AgentStepTrace {
   text: string;
   toolCalls: Array<{ toolName: string; input: unknown }>;
   toolResults: Array<{ toolName: string; output: unknown; error?: string }>;
-}
-
-/**
- * Minimal shape this needs from an AI SDK ModelMessage — kept structural
- * (not `import type { ModelMessage } from 'ai'`) so this file has no
- * dependency on exact `ai` package content-part types, only on the specific
- * fields it reads.
- */
-interface TraceableMessage {
-  role: string;
-  content: string | Array<{ type: string; [key: string]: unknown }>;
-}
-
-/**
- * Reconstructs the old in-process agent's step-by-step trace shape from the
- * message history the Step Functions loop persists — one assistant message
- * (AgentStep's output) optionally followed by one tool message (ExecTools'
- * output) becomes one AgentStepTrace, so the existing AgentTrace UI
- * component renders a Step-Functions-backed run identically to a
- * synchronous one. Used by both the finalize Lambda (aws/lambdas/finalize)
- * and GET /api/runs/[id] (for in-progress runs, before finalize has run).
- */
-export function deriveTraceFromMessages(rawMessages: unknown[]): { steps: AgentStepTrace[]; finalText: string } {
-  const messages = rawMessages as TraceableMessage[];
-  const steps: AgentStepTrace[] = [];
-  let stepNumber = 0;
-  let finalText = '';
-
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg.role !== 'assistant') continue;
-
-    const parts = typeof msg.content === 'string' ? [{ type: 'text', text: msg.content }] : msg.content;
-
-    const toolCalls: AgentStepTrace['toolCalls'] = [];
-    let text = '';
-    for (const part of parts) {
-      if (part.type === 'text') text += (part as unknown as { text: string }).text;
-      else if (part.type === 'tool-call') {
-        const p = part as unknown as { toolName: string; input: unknown };
-        toolCalls.push({ toolName: p.toolName, input: p.input });
-      }
-    }
-
-    const toolResults: AgentStepTrace['toolResults'] = [];
-    const next = messages[i + 1];
-    if (next && next.role === 'tool' && Array.isArray(next.content)) {
-      for (const part of next.content) {
-        if (part.type !== 'tool-result') continue;
-        const toolName = (part as unknown as { toolName: string }).toolName;
-        const output = (part as unknown as { output: { type: string; value?: unknown } }).output;
-        if (output?.type === 'json' || output?.type === 'content') {
-          toolResults.push({ toolName, output: output.value });
-        } else if (output?.type === 'error-text' || output?.type === 'error-json') {
-          toolResults.push({ toolName, output: undefined, error: String(output.value) });
-        } else {
-          toolResults.push({ toolName, output });
-        }
-      }
-    }
-
-    steps.push({ stepNumber: stepNumber++, text, toolCalls, toolResults });
-    if (text) finalText = text;
-  }
-
-  return { steps, finalText };
 }

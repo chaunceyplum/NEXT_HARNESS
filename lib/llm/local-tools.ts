@@ -11,10 +11,10 @@
  *
  * Merged into the regular MCP tool catalog by getMcpToolCatalog()
  * (lib/llm/tool-catalog.ts) so everything downstream — tool-RAG shortlist
- * embeddings, ALWAYS_ON_TOOLS filtering, init-run's selection — treats
- * them exactly like an MCP tool. Only their *execution* differs (see
- * executeMcpToolWithRetry's isLocalTool check), which is why the schemas
- * live here rather than being tacked onto the MCP-fetching code path.
+ * embeddings, ALWAYS_ON_TOOLS filtering, tool selection in lib/llm/agent.ts
+ * — treats them exactly like an MCP tool. Only their *execution* differs
+ * (see executeMcpToolWithRetry's isLocalTool check), which is why the
+ * schemas live here rather than being tacked onto the MCP-fetching code path.
  */
 
 import type { McpToolDefinition } from './tool-catalog';
@@ -66,7 +66,7 @@ function requireGitHubToken(): string {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     throw new Error(
-      'GITHUB_TOKEN is not configured on this Lambda. Set it (a fine-grained PAT with read access to the target repo(s)) — see aws/README.md.'
+      'GITHUB_TOKEN is not configured. Set it in .env.local (a fine-grained PAT with read-only "Contents" access to the target repo(s)).'
     );
   }
   return token;
