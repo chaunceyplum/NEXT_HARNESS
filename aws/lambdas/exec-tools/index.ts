@@ -3,12 +3,14 @@
  * today's in-process behavior: buildAiTools' execute functions run one at a
  * time within a generateText step, not concurrently).
  *
- * Reuses executeMcpToolWithRetry (lib/llm/tool-catalog.ts) verbatim, so the
- * RAG-consulting retry behavior — the isRagTool no-retry guard, the
+ * Reuses executeMcpToolWithRetry (lib/llm/tool-execution.ts) verbatim, so
+ * the RAG-consulting retry behavior — the isRagTool no-retry guard, the
  * prefix-routed grounding lookup, the _retryHistory attachment on
  * success-after-retry, the retry-history-embedded exhaustion error — is
  * bit-for-bit the same code path the old in-process agent used, not a
- * reimplementation that could drift from it.
+ * reimplementation that could drift from it. Also where the
+ * msb_github_commit_code pre-commit syntax check (commit-validation.ts)
+ * actually runs — this Lambda is the only one that imports it.
  *
  * A tool failure here is deliberately NOT a state-machine failure: it's fed
  * back to the model as a tool-result error (type: 'error-text') so the next
@@ -19,7 +21,7 @@
  */
 
 import type { JSONValue, ModelMessage, ToolResultPart } from 'ai';
-import { executeMcpToolWithRetry } from '@/lib/llm/tool-catalog';
+import { executeMcpToolWithRetry } from '@/lib/llm/tool-execution';
 import { loadRun, checkpointStep } from '@/lib/execution-store';
 import { asStateStoreError } from '../_shared/errors';
 import type { LoopEnvelope } from '../_shared/envelope';

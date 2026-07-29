@@ -20,9 +20,10 @@ First `--guided` deploy asks for (all in `template.yaml`'s `Parameters`):
 - `McpApiKey` / `McpAuthToken` — only if the MCP API Gateway stage requires them
 - `AnthropicApiKey` / `OpenAiApiKey` — only for the model keys you actually use
 - `EmbeddingProvider` / `EmbeddingModelId` — only to override `lib/llm/embeddings.ts`'s auto-detection
-- `GatedTools` — comma-separated tool names requiring human approval (default covers `msb_execute_solution`, `msb_github_merge_pr`, `msb_netlify_trigger_deploy`, `execute_sql`)
+- `GatedTools` — comma-separated tool names requiring human approval (default covers `msb_execute_solution`, `msb_github_commit_code`, `msb_github_merge_pr`, `msb_netlify_trigger_deploy`, `execute_sql`)
 - `ToolRetries` — default `1`
 - `HarnessApprovalsTopicArn` — optional SNS topic for approval notifications
+- `GitHubToken` — a fine-grained GitHub PAT with **read-only "Contents" access** to whichever repo(s) you want the agent able to read (not the repo(s) it writes to necessarily — those are separate concerns; see below). Leave blank to leave `github_read_file`/`github_list_directory` non-functional (they'll fail with a clear "not configured" error rather than silently vanishing from the tool list).
 
 Take the `StateMachineArn` output and set it as `HARNESS_STATE_MACHINE_ARN`
 in the Next.js harness's `.env.local`. Attach the `NextJsControlPlanePolicyArn`
@@ -65,6 +66,49 @@ execution context).
    ```
    Confirm the run resumes and (on rejection) the model's next turn
    addresses the feedback rather than repeating the identical call.
+
+## Repo read access and the pre-commit check
+
+The MCP server's own GitHub tools (`msb_github_commit_code`,
+`msb_github_create_branch`, `msb_github_create_pr`, `msb_github_get_pr_status`,
+`msb_github_merge_pr`) are write/status-only — there's no read tool in that
+catalog, and that server isn't this repo's to modify. `lib/llm/local-tools.ts`
+closes that specific gap with two tools that bypass the MCP entirely and call
+GitHub's REST API directly:
+
+- `github_read_file(owner, repo, path, ref?)`
+- `github_list_directory(owner, repo, path?, ref?)`
+
+Both are always-on (`ALWAYS_ON_TOOLS` in `lib/llm/agent-core.ts`) and require
+`GitHubToken` above to be set on `ExecToolsFunction` — the only Lambda that
+actually executes tools (`agent-step` only proposes them as stubs). The
+system prompt tells the model to read a file before proposing a change to
+it, but this is a prompt instruction, not an enforced constraint — nothing
+currently blocks `msb_github_commit_code` from being called without a prior
+read.
+
+Separately, every `msb_github_commit_code` call is now gated (human approval
+required — see `GatedTools` above) **and** syntax-checked before the commit
+is attempted (`lib/llm/commit-validation.ts`, wired into `callTool` in
+`lib/llm/tool-catalog.ts`, so it runs on every retry attempt, not just once).
+Be precise about what that check is:
+
+- ✅ Valid JSON for `.json` files, no JS/TS/JSX parse errors for
+  `.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` files (via `ts.transpileModule`,
+  syntax diagnostics only).
+- ❌ **Not** a real build — it never checks out the target repo, installs
+  its dependencies, or runs its actual build/test/typecheck. A file can
+  pass this and still not compile against the rest of that codebase, use
+  the wrong import paths, violate its lint rules, or just be wrong.
+- ❌ No check at all for other extensions (`.css`, `.md`, `.html`, `.yaml`, …)
+  — nothing lightweight exists to validate those here, so they pass through
+  unvalidated rather than false-failing.
+
+If you need real build/test verification before a commit or before merge,
+that has to happen either in the target repo's own CI (required status
+checks on the PR, which `msb_github_merge_pr` being gated at least ensures
+a human sees before merging) or by giving the harness an actual sandboxed
+checkout — neither exists today.
 
 ## Known gotchas (see also the top-level migration notes)
 

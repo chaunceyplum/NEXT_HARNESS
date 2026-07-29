@@ -28,7 +28,10 @@ import type { LoopEnvelope } from '../_shared/envelope';
  * not a change to which tools are considered gated.
  */
 const GATED_TOOLS = new Set(
-  (process.env.GATED_TOOLS ?? 'msb_execute_solution,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql')
+  (
+    process.env.GATED_TOOLS ??
+    'msb_execute_solution,msb_github_commit_code,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql'
+  )
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)

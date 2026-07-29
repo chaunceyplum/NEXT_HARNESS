@@ -47,7 +47,7 @@ Parameters:
     Default: ''
   GatedTools:
     Type: String
-    Default: 'msb_execute_solution,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql'
+    Default: 'msb_execute_solution,msb_github_commit_code,msb_github_merge_pr,msb_netlify_trigger_deploy,execute_sql'
     Description: Comma-separated tool names that require human approval before ExecTools runs them (agent-step's GATED_TOOLS).
   ToolRetries:
     Type: String
@@ -57,6 +57,16 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional SNS topic ARN — request-approval publishes a notification here if set.
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >
+      Fine-grained GitHub PAT with read-only "Contents" access to whichever
+      repo(s) the agent should be able to read via github_read_file/
+      github_list_directory (lib/llm/local-tools.ts). Leave blank to disable
+      those two tools (calls will fail with a clear "not configured" error
+      rather than being silently unavailable).
 
 Conditions:
   HasApiKey: !Not [!Equals [!Ref McpApiKey, '']]
@@ -66,6 +76,7 @@ Conditions:
   HasEmbeddingProvider: !Not [!Equals [!Ref EmbeddingProvider, '']]
   HasEmbeddingModelId: !Not [!Equals [!Ref EmbeddingModelId, '']]
   HasApprovalsTopic: !Not [!Equals [!Ref HarnessApprovalsTopicArn, '']]
+  HasGitHubToken: !Not [!Equals [!Ref GitHubToken, '']]
 
 Globals:
   Function:
@@ -139,6 +150,10 @@ Resources:
           MCP_API_KEY: !If [HasApiKey, !Ref McpApiKey, !Ref 'AWS::NoValue']
           MCP_AUTH_TOKEN: !If [HasAuthToken, !Ref McpAuthToken, !Ref 'AWS::NoValue']
           TOOL_RETRIES: !Ref ToolRetries
+          # Only Lambda that actually executes tools (agent-step only
+          # proposes them as stubs) — so it's the only one that needs this
+          # for github_read_file/github_list_directory (lib/llm/local-tools.ts).
+          GITHUB_TOKEN: !If [HasGitHubToken, !Ref GitHubToken, !Ref 'AWS::NoValue']
 
   RequestApprovalFunction:
     Type: AWS::Serverless::Function
