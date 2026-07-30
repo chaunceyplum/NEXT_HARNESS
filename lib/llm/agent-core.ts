@@ -20,6 +20,13 @@ export const ALWAYS_ON_TOOLS = [
   // mention "read" or "file" still surfaces them.
   'github_read_file',
   'github_list_directory',
+  // The commit tool these two read tools exist to support (see the
+  // "read before proposing a change" rule below) — paired with them here
+  // for the same reason: a code-change request doesn't reliably embed
+  // close enough to this one tool's description to win a shortlist slot
+  // against the rest of the ~300-tool catalog, which previously left the
+  // agent able to read a repo but not write to it.
+  'msb_github_commit_code',
 ];
 
 /**
@@ -45,6 +52,7 @@ export function systemPrompt(allowFullBuild: boolean): string {
       : `- You do NOT have access to the full end-to-end build tool in this run. If the request genuinely requires a full multi-phase build, say so in your final answer and explain that the user needs to enable "allow full build" rather than trying to approximate it with other tools.`,
     '- Before proposing a change to existing code with msb_github_commit_code, first use github_list_directory and github_read_file to look at what is actually there. Never write a change to an existing file based on a guess about its current contents — read it first. For a brand-new file with no existing counterpart, this does not apply.',
     '- msb_github_commit_code\'s files are syntax-checked automatically before the commit is made (valid JSON where expected, no JS/TS/JSX parse errors) — this only catches "does it parse," not logic or type errors, and not whether it fits the rest of the codebase. If a commit is rejected for a syntax error, fix the reported issue and retry; do not resubmit the same content unchanged.',
+    '- If no available tool can do part of what was asked, say so plainly in your final answer rather than improvising a workaround through an unrelated tool (e.g. never use execute_sql or any other tool to fake the effect of a tool you don\'t have).',
     '- After acting, briefly explain what you did and why in your final answer.',
   ].join('\n');
 }
