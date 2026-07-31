@@ -33,6 +33,10 @@ export interface BuildRequest {
   allowFullBuild?: boolean;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
   toolRetries?: number;
+  /** Tool-call round trips before the loop is forced to stop. Omit for the server default (10). */
+  maxSteps?: number;
+  /** How many tools the semantic shortlist pulls in, on top of the always-on set. Omit for the server default (12). */
+  toolShortlistSize?: number;
 }
 
 export interface BuildResponse {
@@ -44,6 +48,12 @@ export interface BuildResponse {
   /** Present only if a tool in the run (typically msb_execute_solution) kicked off an async execution. */
   executionId?: string;
   finishReason: string;
+}
+
+/** POST /api/build's response — it starts a Step Functions run and returns immediately; poll GET /api/runs/:id for progress. */
+export interface StartRunResponse {
+  runId: string;
+  status: 'PENDING';
 }
 
 export interface ModelOption {
@@ -62,7 +72,14 @@ export interface RunSummary {
   description: string;
   model: string;
   allowFullBuild: boolean;
-  status: 'completed' | 'failed';
+  /**
+   * 'completed' | 'failed' from the ?sync=1 synchronous path, or one of
+   * RunLoopStatus's uppercase values for a Step-Functions-backed run
+   * (PENDING/RUNNING/COMPLETED/FAILED/MAX_STEPS) — both live in the same
+   * harness_agent_runs.status column, so this is intentionally loose
+   * rather than a shared enum with RunLoopStatus.
+   */
+  status: string;
   durationMs: number;
   toolsConsidered?: string[];
   executionId?: string;
@@ -77,6 +94,39 @@ export interface ExecutionRecord extends RunSummary {
 export interface RunsListResponse {
   runs: RunSummary[];
   total: number;
+}
+
+// ============================================================================
+// Step Functions agent-loop run state (lib/execution-store.ts loadRun/
+// checkpointStep) — the live, in-progress counterpart to ExecutionRecord
+// above, which only ever represents a *finished* run's replay-view shape.
+// No approval-gate states this round (see aws/README.md) — a run either
+// runs to completion, fails, or hits its step limit.
+// ============================================================================
+
+export type RunLoopStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'MAX_STEPS';
+
+export interface PendingToolCall {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+}
+
+/** Full live state for one in-progress or finished agent-loop run, as read by the Lambdas and the run-status API route. */
+export interface RunState {
+  id: string;
+  createdAt: string;
+  description: string;
+  model: string;
+  allowFullBuild: boolean;
+  status: RunLoopStatus;
+  /** AI SDK ModelMessage[] — persisted verbatim so it round-trips into the next generateText() call unchanged. */
+  messages: unknown[];
+  selectedTools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
+  stepCount: number;
+  /** Tool-call parts emitted by the last AgentStep, awaiting ExecTools. */
+  pendingToolCalls: PendingToolCall[] | null;
+  msbExecutionId: string | null;
 }
 
 // ============================================================================

@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // esbuild/SAM build output (aws/esbuild.mjs, aws/README.md) — bundled,
+    // not source; would otherwise get linted as if it were hand-written.
+    "aws/dist/**",
+    "aws/.aws-sam/**",
   ]),
 ]);
 
