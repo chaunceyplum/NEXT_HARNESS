@@ -68,6 +68,48 @@ read tool of its own.
 disappearing from the tool list — the agent will know to say so instead of
 guessing at file contents.
 
+### `HARNESS_STATE_MACHINE_ARN` (REQUIRED for the default async path)
+
+**What it is**: ARN of the `harness-agent-loop` Step Functions state machine
+(`aws/`) that runs the agent loop. `POST /api/build` starts one execution
+of it and returns immediately (`202 { runId, status: 'PENDING' }`) instead
+of running `lib/llm/agent.ts`'s loop in-process — see
+`lib/step-functions-client.ts` and `aws/README.md` for how to deploy it.
+This exists specifically because a multi-step agent run (several tool calls
+plus model round-trips) can easily exceed the request timeout most hosts
+enforce (Netlify: 10s default, up to 26s on paid plans) — Step Functions
+has no such ceiling.
+
+**Where to get it**: the `StateMachineArn` output of `sam deploy` in `aws/`.
+
+**Format**:
+```
+HARNESS_STATE_MACHINE_ARN=arn:aws:states:<region>:<account-id>:stateMachine:<stack-name>-harness-agent-loop
+```
+
+Wait — deployed name is `harness-agent-loop` regardless of stack name (see
+`aws/template.yaml`'s `HarnessAgentLoopStateMachine.Properties.Name`), so
+the ARN's last segment is literally `harness-agent-loop`, not stack-prefixed.
+
+**Used by**: `lib/step-functions-client.ts` (`StartExecution`), using the
+same AWS credentials configured below for Bedrock — that IAM principal
+additionally needs the permissions in `aws/template.yaml`'s
+`NextJsControlPlanePolicy` (attach that managed policy directly, or copy
+its statements onto whatever IAM user/role this app authenticates as, e.g.
+an IAM user + access key for a Netlify-hosted app).
+
+**Bypass**: append `?sync=1` to a `POST /api/build` request to skip Step
+Functions entirely and run the whole agent loop in-process instead — useful
+for local testing without a deployed state machine; doesn't require this
+variable at all, but is still subject to whatever request timeout your host
+enforces.
+
+**What happens if missing** (default async path only):
+```
+Error: HARNESS_STATE_MACHINE_ARN is not set. Deploy aws/ (see aws/README.md)
+and set the StateMachineArn output in .env.local.
+```
+
 ---
 
 ## LLM Provider Variables (agent — lib/llm/)
@@ -392,6 +434,7 @@ Then load with: `next build --env-file=.env.production`
 | Variable | Required | Type | Example |
 |----------|----------|------|---------|
 | `MCP_ENDPOINT_URL` | ✅ Yes | URL | `https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp` |
+| `HARNESS_STATE_MACHINE_ARN` | ✅ Yes (unless every request uses `?sync=1`) | ARN | `arn:aws:states:us-east-1:123456789012:stateMachine:harness-agent-loop` |
 | `GITHUB_TOKEN` | ❌ No | string | `github_pat_...` (enables github_read_file/github_list_directory) |
 | `ANTHROPIC_API_KEY` | Only for `anthropic:*` entries | string | `sk-ant-...` |
 | `DEFAULT_MODEL` | ❌ No | string | `bedrock:balanced` (default) |
