@@ -7,10 +7,10 @@ request can stay open; a multi-step agent run with several tool calls and
 model round-trips can easily exceed that).
 
 This is a trimmed build: no human-approval gate, no tickets, no autonomous
-mode. A run either completes, fails, or hits its step limit
-(`MAX_STEPS`). See `../SOLUTIONS_ARCHITECTURE.docx` for the full
-architecture writeup (state machine flow, what each Lambda does, why
-Postgres owns the large state).
+mode. A run either completes, fails, or hits its step limit (`MAX_STEPS`).
+A companion solutions-architecture document (state machine flow, what each
+Lambda does, why Postgres owns the large state) was shared separately —
+this README covers deploying it.
 
 ## Prerequisites
 
