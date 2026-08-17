@@ -82,6 +82,41 @@ const RAG_TOOLS = new Set([
   'knowledge_base_health',
 ]);
 
+/**
+ * Permission/ownership errors are permanent for the credential this process
+ * runs under — retrying, or consulting the knowledge base for "correct
+ * usage," cannot change who owns a resource. Matched against the raw error
+ * message since MCP surfaces the origin API's status code and error code
+ * there (e.g. `403: {"errorCode":"insufficient_access",...}`).
+ */
+const NON_RETRYABLE_ERROR_PATTERNS = [
+  /\b401\b/,
+  /\b403\b/,
+  /insufficient_access/i,
+  /forbidden/i,
+  /unauthorized/i,
+  /permission denied/i,
+];
+
+function isNonRetryableError(message: string): boolean {
+  return NON_RETRYABLE_ERROR_PATTERNS.some((re) => re.test(message));
+}
+
+/**
+ * Tool arguments embedded in a RAG lookup query so it's bounded regardless
+ * of payload size — e.g. a CJA project definition can be tens of KB, and
+ * that has no bearing on searching docs for "what's the correct usage."
+ * Without this cap, one large-payload tool call duplicates its entire
+ * argument set across the query, the findings, and the retry history.
+ */
+const MAX_ARGS_CHARS_IN_RAG_QUERY = 600;
+
+function summarizeArgsForRagQuery(args: Record<string, unknown>): string {
+  const json = JSON.stringify(args);
+  if (json.length <= MAX_ARGS_CHARS_IN_RAG_QUERY) return json;
+  return `${json.slice(0, MAX_ARGS_CHARS_IN_RAG_QUERY)}… (truncated, ${json.length} chars total)`;
+}
+
 /** Pick which knowledge base is most likely to explain a given tool's failure. */
 function pickRagTool(toolName: string, available: Set<string>): string | undefined {
   const candidates = toolName.startsWith('aws_')
@@ -159,11 +194,16 @@ export async function executeMcpToolWithRetry(
       lastError = err;
       const message = err instanceof Error ? err.message : String(err);
 
+      // Permanent for this credential — no retry, no RAG lookup, fail now.
+      if (isNonRetryableError(message)) {
+        throw err;
+      }
+
       if (attempt < maxRetries) {
         const ragTool = pickRagTool(toolName, availableNames);
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
         if (ragTool) {
-          const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${JSON.stringify(args)}. What is the correct usage or known constraint here?`;
+          const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What is the correct usage or known constraint here?`;
           record.raggedBefore = { tool: ragTool, query };
           try {
             record.raggedBefore.findings = await callMcpTool(ragTool, { query });
