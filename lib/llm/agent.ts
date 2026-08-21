@@ -51,7 +51,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     userInput,
     modelKey,
     allowFullBuild = false,
-    maxSteps = 10,
+    maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
   } = opts;
