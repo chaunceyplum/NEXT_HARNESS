@@ -74,6 +74,25 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
+    const MIN_TOOL_SHORTLIST_SIZE = 4;
+    const MAX_TOOL_SHORTLIST_SIZE = 80;
+    if (
+      body.toolShortlistSize !== undefined &&
+      (typeof body.toolShortlistSize !== 'number' ||
+        !Number.isInteger(body.toolShortlistSize) ||
+        body.toolShortlistSize < MIN_TOOL_SHORTLIST_SIZE ||
+        body.toolShortlistSize > MAX_TOOL_SHORTLIST_SIZE)
+    ) {
+      return Response.json(
+        {
+          error: `"toolShortlistSize" must be an integer between ${MIN_TOOL_SHORTLIST_SIZE} and ${MAX_TOOL_SHORTLIST_SIZE}`,
+          code: 'VALIDATION_ERROR',
+          details: { min: MIN_TOOL_SHORTLIST_SIZE, max: MAX_TOOL_SHORTLIST_SIZE },
+        } as ApiError,
+        { status: 400 }
+      );
+    }
+
     console.log('[BUILD] Running agent for:', description.slice(0, 80));
 
     const runId = newRunId();
@@ -84,6 +103,7 @@ export async function POST(request: Request): Promise<Response> {
       model: body.model,
       allowFullBuild: body.allowFullBuild === true,
       toolRetries: body.toolRetries,
+      toolShortlistSize: body.toolShortlistSize,
     };
 
     let agentResult;
@@ -93,6 +113,7 @@ export async function POST(request: Request): Promise<Response> {
         modelKey: body.model,
         allowFullBuild: normalizedRequest.allowFullBuild,
         toolRetries: body.toolRetries,
+        toolShortlistSize: body.toolShortlistSize,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

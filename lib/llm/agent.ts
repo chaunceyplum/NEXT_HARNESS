@@ -52,7 +52,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     modelKey,
     allowFullBuild = false,
     maxSteps = 10,
-    toolShortlistSize = 12,
+    toolShortlistSize = 24,
     toolRetries = 1,
   } = opts;
 
