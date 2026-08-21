@@ -22,6 +22,45 @@ export interface McpToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Non-Adobe integrations the harness currently has no use for — AWS,
+ * Databricks, Snowflake, Braze, Zeta, and cross-platform search all live in
+ * the same ~300-tool MCP catalog alongside AEP/CJA/AJO/Reactor, and by
+ * default compete for shortlist slots and always-on visibility against the
+ * Adobe tools every request here actually needs.
+ *
+ * Filtered out of the catalog entirely (not just excluded from the
+ * shortlist) so this is enforced regardless of embedding/keyword scoring,
+ * and so an always-on tool from one of these categories (e.g.
+ * search_aws_knowledge) silently becomes unavailable too — agent.ts already
+ * does `ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name))`.
+ *
+ * Set ADOBE_TOOLS_ONLY=false to disable this filter (e.g. a future request
+ * genuinely needs the AWS/data-eng side again) without a code change.
+ */
+const NON_ADOBE_TOOL_PREFIXES = ['aws_', 'databricks_', 'snowflake_'];
+const NON_ADOBE_TOOL_NAMES = new Set([
+  'search_aws_knowledge',
+  'search_data_eng_knowledge',
+  'search_braze_knowledge',
+  'search_zeta_knowledge',
+  'search_all_agents',
+  'aws_architecture_pattern',
+  'aws_recommend_services',
+  'data_sql_pattern',
+  'data_pipeline_pattern',
+  'data_compare_platforms',
+]);
+
+function isAdobeToolsOnlyEnabled(): boolean {
+  return process.env.ADOBE_TOOLS_ONLY !== 'false';
+}
+
+function isAdobeScoped(name: string): boolean {
+  if (NON_ADOBE_TOOL_NAMES.has(name)) return false;
+  return !NON_ADOBE_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
 let catalogPromise: Promise<McpToolDefinition[]> | null = null;
 
 /** Fetch (and cache) the full tool catalog: MCP's tools/list plus the locally-defined tools. Safe to call repeatedly. */
@@ -36,7 +75,8 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
             `Unexpected tools/list response shape: ${JSON.stringify(result).slice(0, 200)}`
           );
         }
-        return [...(raw as McpToolDefinition[]), ...LOCAL_TOOL_DEFINITIONS];
+        const combined = [...(raw as McpToolDefinition[]), ...LOCAL_TOOL_DEFINITIONS];
+        return isAdobeToolsOnlyEnabled() ? combined.filter((t) => isAdobeScoped(t.name)) : combined;
       })
       .catch((err) => {
         // Don't cache a failed fetch — next call should retry.
