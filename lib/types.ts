@@ -33,6 +33,13 @@ export interface BuildRequest {
   allowFullBuild?: boolean;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
   toolRetries?: number;
+  /**
+   * How many tools the semantic shortlist pulls in, on top of the always-on
+   * set. Omit for the server default. Raise this for requests that need a
+   * less obvious tool (e.g. a "list"/lookup tool the request text doesn't
+   * closely resemble) — the tradeoff is a larger prompt per tool-call turn.
+   */
+  toolShortlistSize?: number;
 }
 
 export interface BuildResponse {

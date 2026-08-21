@@ -12,6 +12,7 @@ export default function Home() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [allowFullBuild, setAllowFullBuild] = useState(false);
+  const [toolShortlistSize, setToolShortlistSize] = useState(24);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BuildResponse | null>(null);
@@ -37,6 +38,7 @@ export default function Home() {
         description: description.trim(),
         model: selectedModel || undefined,
         allowFullBuild,
+        toolShortlistSize,
       };
 
       const response = await fetch('/api/build', {
@@ -145,6 +147,28 @@ export default function Home() {
                   </span>
                 </label>
               </div>
+            </div>
+
+            <div>
+              <label htmlFor="toolShortlistSize" className="block text-sm font-semibold text-gray-700 mb-2">
+                Tools considered: {toolShortlistSize}
+              </label>
+              <input
+                id="toolShortlistSize"
+                type="range"
+                min={4}
+                max={80}
+                step={1}
+                value={toolShortlistSize}
+                onChange={(e) => setToolShortlistSize(Number(e.target.value))}
+                disabled={loading}
+                className="w-full"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                How many tools the agent is shown, on top of the always-on set. Raise this if a request needs a
+                less obvious tool (e.g. a lookup/list tool) the agent isn&apos;t reaching for — the tradeoff is a
+                larger prompt per tool-call turn.
+              </p>
             </div>
 
             {error && (
