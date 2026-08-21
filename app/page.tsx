@@ -13,6 +13,7 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [allowFullBuild, setAllowFullBuild] = useState(false);
   const [toolShortlistSize, setToolShortlistSize] = useState(24);
+  const [maxSteps, setMaxSteps] = useState(20);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BuildResponse | null>(null);
@@ -39,6 +40,7 @@ export default function Home() {
         model: selectedModel || undefined,
         allowFullBuild,
         toolShortlistSize,
+        maxSteps,
       };
 
       const response = await fetch('/api/build', {
@@ -168,6 +170,28 @@ export default function Home() {
                 How many tools the agent is shown, on top of the always-on set. Raise this if a request needs a
                 less obvious tool (e.g. a lookup/list tool) the agent isn&apos;t reaching for — the tradeoff is a
                 larger prompt per tool-call turn.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="maxSteps" className="block text-sm font-semibold text-gray-700 mb-2">
+                Max steps: {maxSteps}
+              </label>
+              <input
+                id="maxSteps"
+                type="range"
+                min={1}
+                max={50}
+                step={1}
+                value={maxSteps}
+                onChange={(e) => setMaxSteps(Number(e.target.value))}
+                disabled={loading}
+                className="w-full"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Tool-call round trips before the agent is forced to stop. Raise this for requests that chain many
+                dependent steps (e.g. find a property, then its rules, then add a component) — if a run ends with
+                &quot;finished: tool-calls&quot; instead of &quot;stop&quot;, it hit this limit mid-task.
               </p>
             </div>
 

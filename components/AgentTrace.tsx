@@ -11,11 +11,17 @@ export interface AgentTraceProps {
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
 export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText }: AgentTraceProps) {
+  // "stop" means the model decided it was done. Anything else — most
+  // commonly "tool-calls", meaning it hit maxSteps while still trying to
+  // call tools — means the run was cut off mid-task, and finalText is
+  // whatever sentence it was in the middle of, not a real conclusion.
+  const isIncomplete = finishReason !== 'stop';
+
   return (
     <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-900">Agent Trace</h2>
-        <span className="text-xs text-gray-500">
+        <span className={`text-xs ${isIncomplete ? 'text-amber-700 font-semibold' : 'text-gray-500'}`}>
           {toolsConsidered.length} tool(s) considered · finished: {finishReason}
         </span>
       </div>
@@ -54,9 +60,20 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
         ))}
       </div>
 
-      <div className="bg-green-50 border-l-4 border-green-500 p-4 rounded-lg">
-        <p className="text-green-800 font-medium">Final Answer</p>
-        <p className="text-green-900 text-sm mt-1 whitespace-pre-wrap">{finalText}</p>
+      <div className={`p-4 rounded-lg border-l-4 ${isIncomplete ? 'bg-amber-50 border-amber-500' : 'bg-green-50 border-green-500'}`}>
+        <p className={`font-medium ${isIncomplete ? 'text-amber-800' : 'text-green-800'}`}>
+          {isIncomplete ? `Incomplete — stopped early (${finishReason})` : 'Final Answer'}
+        </p>
+        {isIncomplete && (
+          <p className="text-amber-700 text-xs mt-1">
+            {finishReason === 'tool-calls'
+              ? 'The agent hit its step limit while still trying to call tools — the text below is not a finished answer. Raise "Max steps" and re-run for a complete result.'
+              : 'The run ended before the agent reached a natural stopping point — treat the text below as a fragment, not a conclusion.'}
+          </p>
+        )}
+        <p className={`text-sm mt-1 whitespace-pre-wrap ${isIncomplete ? 'text-amber-900' : 'text-green-900'}`}>
+          {finalText}
+        </p>
       </div>
     </div>
   );

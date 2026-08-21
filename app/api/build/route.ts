@@ -93,6 +93,25 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
+    const MIN_MAX_STEPS = 1;
+    const MAX_MAX_STEPS = 50;
+    if (
+      body.maxSteps !== undefined &&
+      (typeof body.maxSteps !== 'number' ||
+        !Number.isInteger(body.maxSteps) ||
+        body.maxSteps < MIN_MAX_STEPS ||
+        body.maxSteps > MAX_MAX_STEPS)
+    ) {
+      return Response.json(
+        {
+          error: `"maxSteps" must be an integer between ${MIN_MAX_STEPS} and ${MAX_MAX_STEPS}`,
+          code: 'VALIDATION_ERROR',
+          details: { min: MIN_MAX_STEPS, max: MAX_MAX_STEPS },
+        } as ApiError,
+        { status: 400 }
+      );
+    }
+
     console.log('[BUILD] Running agent for:', description.slice(0, 80));
 
     const runId = newRunId();
@@ -104,6 +123,7 @@ export async function POST(request: Request): Promise<Response> {
       allowFullBuild: body.allowFullBuild === true,
       toolRetries: body.toolRetries,
       toolShortlistSize: body.toolShortlistSize,
+      maxSteps: body.maxSteps,
     };
 
     let agentResult;
@@ -114,6 +134,7 @@ export async function POST(request: Request): Promise<Response> {
         allowFullBuild: normalizedRequest.allowFullBuild,
         toolRetries: body.toolRetries,
         toolShortlistSize: body.toolShortlistSize,
+        maxSteps: body.maxSteps,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

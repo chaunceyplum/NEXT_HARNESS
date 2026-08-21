@@ -40,6 +40,14 @@ export interface BuildRequest {
    * closely resemble) — the tradeoff is a larger prompt per tool-call turn.
    */
   toolShortlistSize?: number;
+  /**
+   * Tool-call round trips before the agent loop is forced to stop. Omit for
+   * the server default. Raise this for requests that chain many dependent
+   * lookups/writes (e.g. find a property, then its rules, then add a rule
+   * component) — if the run ends with finishReason "tool-calls" instead of
+   * "stop", it hit this limit mid-task rather than reaching a real answer.
+   */
+  maxSteps?: number;
 }
 
 export interface BuildResponse {
