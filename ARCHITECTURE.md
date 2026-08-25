@@ -6,10 +6,11 @@ server that actually executes them, and the platforms it reaches on the
 other side.
 
 ```mermaid
-flowchart LR
+flowchart TD
     Browser["Browser<br/>description, model,<br/>step &amp; tool limits"]
 
     subgraph Harness["Harness — Next.js on EC2 (PM2)"]
+        direction TB
         UI["UI<br/>app/page.tsx"]
         Agent["Agent loop<br/>POST /api/build → lib/llm/agent.ts<br/>shortlists tools, loops the model up to maxSteps,<br/>retries failed calls, skips permission errors outright"]
         Catalog["Tool catalog<br/>tool-catalog.ts — drops non-Adobe<br/>tools by default"]
@@ -20,12 +21,14 @@ flowchart LR
     LLM["LLM Providers<br/>Amazon Bedrock (default)<br/>Anthropic direct · OpenAI"]
 
     subgraph MCP["MCP Server — Lambda + API Gateway (separate system, AEC_MCP)"]
+        direction TB
         Dispatcher["Tool dispatcher<br/>~300 tools · tools/list, tools/call"]
         KB["Knowledge base<br/>pgvector + embeddings over docs"]
         DB["Its own Postgres<br/>harness_agent_runs (via execute_sql)<br/>+ orchestrator's own execution state"]
     end
 
     subgraph External["External Platforms"]
+        direction TB
         Adobe["Adobe<br/>Reactor/Launch · AEP · CJA · AJO<br/>(default scope)"]
         Rest["AWS · GitHub · Netlify · Databricks<br/>Snowflake · Braze · Zeta<br/>(reachable via MCP, filtered out by default)"]
     end
