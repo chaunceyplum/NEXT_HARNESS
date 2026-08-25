@@ -13,7 +13,9 @@ agent when a request explicitly opts into it (`allowFullBuild`), since it
 has real side effects across GitHub/Netlify/Adobe/AWS.
 
 See `ENVIRONMENT_VARIABLES.md` for the required `MCP_ENDPOINT_URL` and the
-LLM provider variables that control which models are available.
+LLM provider variables that control which models are available. See
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) for a diagram of how the harness,
+the MCP server, and the platforms behind it fit together.
 
 This project was bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
