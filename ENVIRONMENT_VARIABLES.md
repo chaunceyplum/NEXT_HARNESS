@@ -159,6 +159,23 @@ EMBEDDING_PROVIDER=openai        # or "bedrock" — auto-detected if unset
 EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model id
 ```
 
+### RAG judge (optional — on by default, `lib/llm/rag-judge.ts`)
+
+Every `search_adobe_knowledge`/`search_all_agents` call is independently
+scored by a second LLM call for relevance and sufficiency, and the
+judgment rides along on the tool result as `_ragJudgment` (or, when a RAG
+lookup grounds a retry, as `raggedBefore.judgment` in the retry history).
+The knowledge base already reranks its own results server-side — this
+judge doesn't re-rank or second-guess that ordering, it only grades
+whether what actually came back is good enough to act on. A judge failure
+(bad credentials, model error) is logged and swallowed; it never fails the
+underlying RAG call.
+
+```bash
+RAG_JUDGE_ENABLED=false     # disable entirely
+RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
+```
+
 ---
 
 ## Execution history / replay (lib/execution-store.ts)
