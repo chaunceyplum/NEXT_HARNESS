@@ -14,6 +14,7 @@
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
+import { judgeRagResult, JUDGEABLE_RAG_TOOLS, type RagJudgment } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
 export interface McpToolDefinition {
@@ -163,6 +164,26 @@ function pickRagTool(available: Set<string>): string | undefined {
   return [...available].find((c) => RAG_TOOLS.has(c));
 }
 
+/**
+ * If `toolName` is a judgeable RAG tool (see rag-judge.ts) and its args
+ * carried a `query` string, score the result and ride the judgment along on
+ * it — same pattern as `_retryHistory` below, so callers reading a result's
+ * normal fields are unaffected either way. A non-object result (or no
+ * judgment, e.g. the judge is disabled or failed) passes through unchanged.
+ */
+async function withRagJudgment(toolName: string, args: Record<string, unknown>, result: unknown): Promise<unknown> {
+  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return result;
+  const query = typeof args.query === 'string' ? args.query : undefined;
+  if (!query) return result;
+
+  const judgment = await judgeRagResult(query, result);
+  if (!judgment) return result;
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    return { ...(result as Record<string, unknown>), _ragJudgment: judgment };
+  }
+  return result;
+}
+
 export interface RetryAttemptRecord {
   attempt: number;
   error: string;
@@ -170,6 +191,8 @@ export interface RetryAttemptRecord {
     tool: string;
     query: string;
     findings?: unknown;
+    /** Set when the grounding lookup's own results were scored — see rag-judge.ts. */
+    judgment?: RagJudgment;
     lookupError?: string;
   };
 }
@@ -209,7 +232,8 @@ export async function executeMcpToolWithRetry(
   const isRagTool = RAG_TOOLS.has(toolName);
 
   if (isRagTool || maxRetries <= 0) {
-    return callTool(toolName, args);
+    const result = await callTool(toolName, args);
+    return isRagTool ? withRagJudgment(toolName, args, result) : result;
   }
 
   const attempts: RetryAttemptRecord[] = [];
@@ -242,7 +266,9 @@ export async function executeMcpToolWithRetry(
           const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What is the correct usage or known constraint here?`;
           record.raggedBefore = { tool: ragTool, query };
           try {
-            record.raggedBefore.findings = await callMcpTool(ragTool, { query });
+            const findings = await callMcpTool(ragTool, { query });
+            record.raggedBefore.findings = findings;
+            record.raggedBefore.judgment = await judgeRagResult(query, findings);
           } catch (ragErr) {
             record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
           }
