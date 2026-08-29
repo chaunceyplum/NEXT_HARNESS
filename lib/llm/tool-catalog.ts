@@ -23,20 +23,24 @@ export interface McpToolDefinition {
 }
 
 /**
- * Non-Adobe integrations the harness currently has no use for — AWS,
- * Databricks, Snowflake, Braze, Zeta, and cross-platform search all live in
- * the same ~300-tool MCP catalog alongside AEP/CJA/AJO/Reactor, and by
- * default compete for shortlist slots and always-on visibility against the
- * Adobe tools every request here actually needs.
+ * Non-Adobe integrations the harness currently has no use for. As of the
+ * last live tools/list check (Aug 2026), the connected MCP server doesn't
+ * actually expose any aws_/databricks_/snowflake_-prefixed tools or the
+ * named search/pattern tools below — so today this filter is a no-op
+ * defensive guard, not an active exclusion. It's kept (rather than deleted)
+ * so that if a future server redeploy brings AWS/data-eng tools back into
+ * the catalog, they stay excluded by default instead of silently competing
+ * for shortlist slots against the Adobe tools every request here actually
+ * needs — verify this list against a fresh tools/list before relying on it
+ * to hide anything.
  *
  * Filtered out of the catalog entirely (not just excluded from the
  * shortlist) so this is enforced regardless of embedding/keyword scoring,
- * and so an always-on tool from one of these categories (e.g.
- * search_aws_knowledge) silently becomes unavailable too — agent.ts already
- * does `ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name))`.
+ * and so an always-on tool from one of these categories would silently
+ * become unavailable too — agent.ts already does
+ * `ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name))`.
  *
- * Set ADOBE_TOOLS_ONLY=false to disable this filter (e.g. a future request
- * genuinely needs the AWS/data-eng side again) without a code change.
+ * Set ADOBE_TOOLS_ONLY=false to disable this filter without a code change.
  */
 const NON_ADOBE_TOOL_PREFIXES = ['aws_', 'databricks_', 'snowflake_'];
 const NON_ADOBE_TOOL_NAMES = new Set([
@@ -109,14 +113,10 @@ export async function getToolDefinition(name: string): Promise<McpToolDefinition
 /**
  * Knowledge-search tools used to ground a retry. Never wrapped in their own
  * retry logic (that would recurse) and never chosen as the RAG tool for
- * themselves.
+ * themselves. Verified present in the live MCP catalog, Aug 2026.
  */
 const RAG_TOOLS = new Set([
   'search_adobe_knowledge',
-  'search_aws_knowledge',
-  'search_data_eng_knowledge',
-  'search_braze_knowledge',
-  'search_zeta_knowledge',
   'search_all_agents',
   'query_rag_db',
   'knowledge_base_health',
@@ -157,14 +157,10 @@ function summarizeArgsForRagQuery(args: Record<string, unknown>): string {
   return `${json.slice(0, MAX_ARGS_CHARS_IN_RAG_QUERY)}… (truncated, ${json.length} chars total)`;
 }
 
-/** Pick which knowledge base is most likely to explain a given tool's failure. */
-function pickRagTool(toolName: string, available: Set<string>): string | undefined {
-  const candidates = toolName.startsWith('aws_')
-    ? ['search_aws_knowledge']
-    : toolName.startsWith('databricks_') || toolName.startsWith('snowflake_')
-      ? ['search_data_eng_knowledge']
-      : ['search_adobe_knowledge'];
-  return candidates.find((c) => available.has(c)) ?? [...available].find((c) => RAG_TOOLS.has(c));
+/** Pick which knowledge base is most likely to explain a tool failure — currently always Adobe's, the only knowledge-search tool the live catalog has. */
+function pickRagTool(available: Set<string>): string | undefined {
+  if (available.has('search_adobe_knowledge')) return 'search_adobe_knowledge';
+  return [...available].find((c) => RAG_TOOLS.has(c));
 }
 
 export interface RetryAttemptRecord {
@@ -224,8 +220,8 @@ export async function executeMcpToolWithRetry(
       const result = await callTool(toolName, args);
       if (attempts.length === 0) return result;
       // Succeeded after retrying — attach retry history without
-      // disturbing the shape callers rely on (e.g. agent.ts reading
-      // output.execution_id directly off msb_execute_solution's result).
+      // disturbing the shape callers rely on for reading fields directly
+      // off a tool's result object.
       if (result && typeof result === 'object' && !Array.isArray(result)) {
         return { ...(result as Record<string, unknown>), _retryHistory: attempts };
       }
@@ -240,7 +236,7 @@ export async function executeMcpToolWithRetry(
       }
 
       if (attempt < maxRetries) {
-        const ragTool = pickRagTool(toolName, availableNames);
+        const ragTool = pickRagTool(availableNames);
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
         if (ragTool) {
           const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What is the correct usage or known constraint here?`;

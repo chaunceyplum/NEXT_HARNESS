@@ -59,9 +59,9 @@ MCP_AUTH_TOKEN=<your-token>              # sent as Authorization: Bearer <token>
 **What it is**: a fine-grained GitHub PAT with read-only "Contents" access
 to whichever repo(s) you want the agent able to read via `github_read_file`/
 `github_list_directory` (`lib/llm/local-tools.ts`) before proposing a change
-to existing code with `msb_execute_solution`'s `msb_github_commit_code`.
-These two tools call GitHub's REST API directly — the MCP server has no
-read tool of its own.
+to existing code with the MCP server's `msb_github_commit_code` tool.
+These two read tools call GitHub's REST API directly — the MCP server has
+no read tool of its own.
 
 **What happens if missing**: the two read tools fail with a clear
 "GITHUB_TOKEN is not configured" error when called, rather than silently
@@ -171,11 +171,11 @@ connection already configured above — no separate database credentials or
 setup needed. The table (and its index) is created automatically on first
 use if it doesn't already exist.
 
-This is a table dedicated to the harness, separate from the orchestrator's
-own `executions` / `execution_resources` / `tool_invocations` tables
-(applied by `msb_run_migration`) — those track `msb_execute_solution`'s
-internal phase state with a different schema and are owned by the Python
-backend.
+This is a table dedicated to the harness. `allow_full_build`/`execution_id`
+are retained columns from when the harness could opt into a full
+end-to-end build tool; that tool isn't in the connected MCP server's
+catalog (verified against its live tools/list, Aug 2026), so both columns
+are now always `false`/`NULL` on new rows.
 
 ---
 
@@ -314,21 +314,10 @@ npm run dev
 curl -X POST http://localhost:3000/api/build \
   -H "Content-Type: application/json" \
   -d '{
-    "description": "Build an AEP solution for ecommerce"
+    "description": "Create an XDM schema for ecommerce purchase events"
   }'
 
-# Should return:
-# {"execution_id":"exec-xxx","status":"QUEUED","message":"..."}
-```
-
-### Test Status Polling
-
-```bash
-# Replace exec-xxx with actual execution_id
-curl http://localhost:3000/api/executions/exec-xxx/status
-
-# Should return:
-# {"execution_id":"exec-xxx","status":"RUNNING","progress":0.25,...}
+# Should return a runId, the step-by-step tool-call trace, and finishReason
 ```
 
 ---

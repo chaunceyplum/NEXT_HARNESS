@@ -47,11 +47,7 @@ export default function RunDetailPage() {
       }
 
       const data: BuildResponse = await res.json();
-      if (data.executionId) {
-        router.push(`/executions/${data.executionId}`);
-      } else {
-        router.push(`/results/${data.runId}`);
-      }
+      router.push(`/results/${data.runId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Replay failed');
       setReplaying(false);
@@ -126,10 +122,6 @@ export default function RunDetailPage() {
                     </span>
                   </div>
                   <div>
-                    <p className="text-gray-500 font-medium">Full build</p>
-                    <p className="text-gray-900 mt-1">{record.allowFullBuild ? 'yes' : 'no'}</p>
-                  </div>
-                  <div>
                     <p className="text-gray-500 font-medium">Duration</p>
                     <p className="text-gray-900 mt-1">{(record.durationMs / 1000).toFixed(1)}s</p>
                   </div>
@@ -152,17 +144,6 @@ export default function RunDetailPage() {
                 finishReason={record.result.finishReason}
                 finalText={record.result.finalText}
               />
-            )}
-
-            {record.executionId && (
-              <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
-                <p className="text-blue-800 font-medium">Triggered a full build</p>
-                <p className="text-blue-700 text-sm mt-1">
-                  <Link href={`/executions/${record.executionId}`} className="underline">
-                    View build progress →
-                  </Link>
-                </p>
-              </div>
             )}
           </>
         )}

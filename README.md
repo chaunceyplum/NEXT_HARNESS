@@ -1,16 +1,19 @@
 This is the web harness for an Adobe Experience Cloud MCP server (schemas,
-segments, CJA, AJO, Reactor/Launch, AWS, Databricks, Snowflake, and a
-solutions-architecture knowledge base — ~300 tools total).
+segments, CJA, Reactor/Launch, and a solutions-architecture knowledge base
+that also covers AJO — though there are no dedicated AJO journey/offer
+tools yet). The catalog is filtered to Adobe-scoped tools by default
+(`ADOBE_TOOLS_ONLY`, see below) — AWS/Databricks/Snowflake support is
+defined in the harness's tool-catalog filtering code but isn't currently
+present in the connected MCP server's tool list.
 
 `POST /api/build` runs a dynamic agent (`lib/llm/agent.ts`) rather than a
 fixed pipeline: it semantically shortlists the handful of MCP tools relevant
 to your request (`lib/llm/tool-retrieval.ts`), then lets an LLM call them in
 a loop until the task is done. The model is swappable per request across
 Anthropic, Bedrock, or OpenAI (`lib/llm/model-registry.ts`) — pick cheap vs.
-expensive, or switch providers, without code changes. The full end-to-end,
-9-phase martech build tool (`msb_execute_solution`) is only offered to the
-agent when a request explicitly opts into it (`allowFullBuild`), since it
-has real side effects across GitHub/Netlify/Adobe/AWS.
+expensive, or switch providers, without code changes. There is no full,
+end-to-end build tool wired up — every request resolves through specific,
+narrow tool calls chosen by the agent.
 
 See `ENVIRONMENT_VARIABLES.md` for the required `MCP_ENDPOINT_URL` and the
 LLM provider variables that control which models are available. See

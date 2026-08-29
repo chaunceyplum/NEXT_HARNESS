@@ -4,13 +4,16 @@
  * the read-only query_rag_db), not local files.
  *
  * Table: harness_agent_runs, created by ensureTable() the first time this
- * module is used (idempotent — CREATE TABLE/INDEX IF NOT EXISTS). This is
- * a table dedicated to the harness, separate from the orchestrator's own
- * `executions`/`execution_resources`/`tool_invocations` tables (applied by
- * msb_run_migration) — those track msb_execute_solution's internal phase
- * state with a different schema (execution_id/client_name/config/
- * current_phase/phase_results) and are owned by the Python backend; writing
- * into them directly would risk corrupting its own state machine.
+ * module is used (idempotent — CREATE TABLE/INDEX IF NOT EXISTS). Dedicated
+ * to the harness — write into it and nothing else in this database, since
+ * the schema is only guaranteed correct for what this file defines.
+ *
+ * `allow_full_build`/`execution_id` are retained columns from when the
+ * harness could opt into a full end-to-end build tool; that tool isn't in
+ * the connected MCP server's catalog (verified against its live tools/list,
+ * Aug 2026), so every run now persists with allow_full_build = false and
+ * execution_id = NULL. Kept rather than dropped to avoid a schema migration
+ * against a live table.
  *
  * execute_sql takes a raw SQL string with no parameter binding, so every
  * value below is escaped by hand (sqlStr/sqlJson/etc.) rather than using

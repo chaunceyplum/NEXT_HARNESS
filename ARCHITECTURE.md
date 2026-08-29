@@ -22,15 +22,16 @@ flowchart TD
 
     subgraph MCP["MCP Server — Lambda + API Gateway (separate system, AEC_MCP)"]
         direction TB
-        Dispatcher["Tool dispatcher<br/>~300 tools · tools/list, tools/call"]
+        Dispatcher["Tool dispatcher<br/>155 tools · tools/list, tools/call"]
         KB["Knowledge base<br/>pgvector + embeddings over docs"]
-        DB["Its own Postgres<br/>harness_agent_runs (via execute_sql)<br/>+ orchestrator's own execution state"]
+        DB["Its own Postgres<br/>harness_agent_runs (via execute_sql)"]
     end
 
     subgraph External["External Platforms"]
         direction TB
-        Adobe["Adobe<br/>Reactor/Launch · AEP · CJA · AJO<br/>(default scope)"]
-        Rest["AWS · GitHub · Netlify · Databricks<br/>Snowflake · Braze · Zeta<br/>(reachable via MCP, filtered out by default)"]
+        Adobe["Adobe<br/>Reactor/Launch · AEP · CJA<br/>(default scope)"]
+        GitHub["GitHub<br/>msb_github_* — always in scope,<br/>not affected by ADOBE_TOOLS_ONLY"]
+        Rest["AWS · Databricks · Snowflake<br/>Braze · Zeta<br/>(harness has filtering code for these,<br/>but none are in the connected server's catalog)"]
     end
 
     Browser -->|describes request| UI
@@ -38,6 +39,7 @@ flowchart TD
     Agent -->|tools/call, JSON-RPC| Dispatcher
     Agent -.->|execute_sql — persist run| DB
     Dispatcher --> Adobe
+    Dispatcher --> GitHub
     Dispatcher -.-> Rest
 ```
 
@@ -46,7 +48,7 @@ flowchart TD
 Reasoning and tool selection call an LLM provider directly — the MCP server
 never sees that traffic. Actually *doing* anything in Adobe goes out as a
 JSON-RPC `tools/call` to the MCP server, which is the only thing with real
-Reactor, AEP, CJA, and AJO credentials. Even the harness's own run history
+Reactor, AEP, and CJA credentials. Even the harness's own run history
 takes that same detour: it has no database of its own, so persisting a run
 is itself an `execute_sql` call back into the MCP server's Postgres
 instance.
@@ -59,15 +61,16 @@ relevant tools, then lets the model decide what to call and in what order,
 up to a configurable step budget.
 
 - Model, tool-shortlist size, and step limit are all tunable per request
-- Full end-to-end builds (`msb_execute_solution`) are opt-in only
+- There is no full, end-to-end build tool — every request resolves through
+  specific, narrow tool calls the agent chooses itself
 - Runs on AWS EC2 under PM2; also ships to Vercel or Docker
 
 ## MCP Server (AEC_MCP, separate system)
 
-The only thing in this picture holding real credentials for Adobe, AWS,
-GitHub, and the rest. The harness never talks to those platforms itself —
-every action is a tool call across this boundary, which is also where the
-~300-tool catalog and the knowledge base actually live.
+The only thing in this picture holding real credentials for Adobe and
+GitHub. The harness never talks to those platforms itself — every action is
+a tool call across this boundary, which is also where the tool catalog
+(155 tools as of the last live check) and the knowledge base actually live.
 
 - AWS Lambda behind API Gateway, called over HTTPS JSON-RPC
 - Owns the harness's own run-history table, not just its own state
@@ -76,18 +79,26 @@ every action is a tool call across this boundary, which is also where the
 
 ## External Platforms (what MCP actually calls)
 
-Everything the MCP server can reach is not everything the harness will use.
-By default the tool catalog is filtered to Adobe only — AWS, GitHub,
-Netlify, Databricks, Snowflake, Braze, and Zeta stay reachable at the MCP
-layer but never reach the model's shortlist.
+By default the tool catalog is filtered to Adobe only (`ADOBE_TOOLS_ONLY`).
+GitHub's `msb_github_*` tools aren't affected by that filter — they're
+always in scope, since the agent's code-reading and commit tools need them
+regardless of what else a request touches.
 
-- `ADOBE_TOOLS_ONLY=false` restores the rest, no rebuild required
+The harness's tool-catalog filtering code also has an exclusion list for
+AWS, Databricks, Snowflake, Braze, and Zeta tools — but as of the last live
+`tools/list` check, none of those actually exist in the connected MCP
+server's catalog, so today that part of the filter has nothing to exclude.
+`ADOBE_TOOLS_ONLY=false` disables the filter entirely if that changes.
+
 - Publishing to Adobe Reactor still ends in a manual approval step today —
   there's no `submit`/`approve`-adjacent tool that can link a library to an
   environment after the fact
+- There are no dedicated AJO (journey/offer) tools either — the knowledge
+  base covers AJO documentation, but nothing here creates or manages a
+  journey
 
 ---
 
-*Reconstructed from live agent traces, Aug 2026. See also
-[`ENVIRONMENT_VARIABLES.md`](./ENVIRONMENT_VARIABLES.md) and
-[`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md).*
+*Reconstructed from live agent traces and a direct tools/list comparison,
+Aug 2026. See also [`ENVIRONMENT_VARIABLES.md`](./ENVIRONMENT_VARIABLES.md)
+and [`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md).*

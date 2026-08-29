@@ -5,9 +5,8 @@
  *  1. Shortlists relevant MCP tools via semantic search over the tool catalog
  *  2. Lets the selected LLM (provider/model chosen per-request) call tools
  *     in a loop until it's done, instead of forcing every request through a
- *     fixed planner -> full-build pipeline
- *  3. Returns the step-by-step trace, plus an execution_id if the agent
- *     kicked off an async build (msb_execute_solution)
+ *     fixed planner pipeline
+ *  3. Returns the step-by-step trace
  */
 
 import { runAgent } from '@/lib/llm/agent';
@@ -120,7 +119,6 @@ export async function POST(request: Request): Promise<Response> {
     const normalizedRequest: BuildRequest = {
       description,
       model: body.model,
-      allowFullBuild: body.allowFullBuild === true,
       toolRetries: body.toolRetries,
       toolShortlistSize: body.toolShortlistSize,
       maxSteps: body.maxSteps,
@@ -131,7 +129,6 @@ export async function POST(request: Request): Promise<Response> {
       agentResult = await runAgent({
         userInput: description,
         modelKey: body.model,
-        allowFullBuild: normalizedRequest.allowFullBuild,
         toolRetries: body.toolRetries,
         toolShortlistSize: body.toolShortlistSize,
         maxSteps: body.maxSteps,
@@ -145,7 +142,7 @@ export async function POST(request: Request): Promise<Response> {
         createdAt,
         description,
         model: body.model || getDefaultModelKey(),
-        allowFullBuild: normalizedRequest.allowFullBuild ?? false,
+        allowFullBuild: false,
         status: 'failed',
         durationMs: Date.now() - startedAt,
         request: normalizedRequest,
@@ -167,7 +164,6 @@ export async function POST(request: Request): Promise<Response> {
       runId,
       steps: agentResult.steps.length,
       toolsConsidered: agentResult.toolsConsidered,
-      executionId: agentResult.executionId,
       finishReason: agentResult.finishReason,
     });
 
@@ -176,7 +172,6 @@ export async function POST(request: Request): Promise<Response> {
       finalText: agentResult.finalText,
       steps: agentResult.steps,
       toolsConsidered: agentResult.toolsConsidered,
-      executionId: agentResult.executionId,
       finishReason: agentResult.finishReason,
     };
 
@@ -185,11 +180,10 @@ export async function POST(request: Request): Promise<Response> {
       createdAt,
       description,
       model: body.model || getDefaultModelKey(),
-      allowFullBuild: normalizedRequest.allowFullBuild ?? false,
+      allowFullBuild: false,
       status: 'completed',
       durationMs: Date.now() - startedAt,
       toolsConsidered: agentResult.toolsConsidered,
-      executionId: agentResult.executionId,
       request: normalizedRequest,
       result: response,
     };
