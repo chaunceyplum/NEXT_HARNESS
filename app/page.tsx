@@ -1,17 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ApiError, BuildRequest, BuildResponse, ModelOption } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 
 export default function Home() {
-  const router = useRouter();
   const [description, setDescription] = useState('');
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
-  const [allowFullBuild, setAllowFullBuild] = useState(false);
   const [toolShortlistSize, setToolShortlistSize] = useState(24);
   const [maxSteps, setMaxSteps] = useState(20);
   const [loading, setLoading] = useState(false);
@@ -38,7 +35,6 @@ export default function Home() {
       const payload: BuildRequest = {
         description: description.trim(),
         model: selectedModel || undefined,
-        allowFullBuild,
         toolShortlistSize,
         maxSteps,
       };
@@ -55,13 +51,6 @@ export default function Home() {
       }
 
       const data: BuildResponse = await response.json();
-
-      if (data.executionId) {
-        // A full end-to-end build was triggered — switch to the async status view.
-        router.push(`/executions/${data.executionId}`);
-        return;
-      }
-
       setResult(data);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to run agent';
@@ -112,43 +101,23 @@ export default function Home() {
               <p className="text-sm text-gray-500 mt-2">{description.length} / 5000 characters</p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="model" className="block text-sm font-semibold text-gray-700 mb-2">
-                  Model
-                </label>
-                <select
-                  id="model"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
-                  disabled={loading || models.length === 0}
-                  className="w-full p-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none"
-                >
-                  {models.map((m) => (
-                    <option key={m.key} value={m.key}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex items-end">
-                <label className="flex items-center gap-2 text-sm text-gray-700 p-3">
-                  <input
-                    type="checkbox"
-                    checked={allowFullBuild}
-                    onChange={(e) => setAllowFullBuild(e.target.checked)}
-                    disabled={loading}
-                    className="w-4 h-4"
-                  />
-                  <span>
-                    Allow full end-to-end build
-                    <span className="block text-xs text-gray-500">
-                      Creates real resources across Adobe/AWS/GitHub/Netlify — leave off for narrow requests
-                    </span>
-                  </span>
-                </label>
-              </div>
+            <div>
+              <label htmlFor="model" className="block text-sm font-semibold text-gray-700 mb-2">
+                Model
+              </label>
+              <select
+                id="model"
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                disabled={loading || models.length === 0}
+                className="w-full p-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none"
+              >
+                {models.map((m) => (
+                  <option key={m.key} value={m.key}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -253,10 +222,7 @@ export default function Home() {
             </li>
             <li className="flex gap-3">
               <span className="text-blue-500 font-bold">•</span>
-              <span>
-                &quot;Build our entire ecommerce AEP solution end-to-end: schema, segments, CJA, and email
-                activation.&quot; (needs &quot;Allow full end-to-end build&quot; enabled)
-              </span>
+              <span>&quot;Create an XDM schema, a segment, and a CJA data view for our new loyalty program.&quot; (chains several tool calls)</span>
             </li>
           </ul>
         </div>

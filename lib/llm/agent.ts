@@ -3,32 +3,33 @@
  *
  *   OLD: planner_parse_natural_language (regex) -> orchestrator_execute (a
  *        tool that doesn't even exist) -> always runs a fixed, monolithic
- *        9-phase build no matter what was actually asked for.
+ *        build no matter what was actually asked for.
  *
  *   NEW: shortlist the handful of MCP tools relevant to the request (tool
  *        RAG) -> let an LLM (any provider, swappable per call) decide which
- *        of those tools to call, in a loop, based on results so far -> only
- *        reach for the full end-to-end build tool (msb_execute_solution)
- *        when the caller has explicitly opted into it.
+ *        of those tools to call, in a loop, based on results so far.
  *
  * This is what makes orchestration "dynamic": the tool selection happens
- * per-request based on the actual ask, not a hardcoded chain.
+ * per-request based on the actual ask, not a hardcoded chain. There is no
+ * full end-to-end build tool wired up here — the MCP server the harness
+ * currently talks to has no such tool in its catalog (verified against its
+ * live tools/list, Aug 2026), so every request resolves through specific,
+ * narrow tool calls.
  */
 
 import { generateText, stepCountIs } from 'ai';
 import { getDefaultModelKey, resolveModel } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
-import { ALWAYS_ON_TOOLS, FULL_BUILD_TOOL, systemPrompt, stage, type AgentStepTrace } from './agent-core';
+import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 
-export { ALWAYS_ON_TOOLS, FULL_BUILD_TOOL };
+export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
 
 export interface AgentRunResult {
   finalText: string;
   steps: AgentStepTrace[];
   toolsConsidered: string[];
-  executionId?: string;
   finishReason: string;
 }
 
@@ -36,8 +37,6 @@ export interface RunAgentOptions {
   userInput: string;
   /** Model registry key, e.g. "anthropic:haiku". Defaults to DEFAULT_MODEL env var. */
   modelKey?: string;
-  /** Must be explicitly true for msb_execute_solution to even be offered to the model. */
-  allowFullBuild?: boolean;
   /** Tool-call round trips before the loop is forced to stop. */
   maxSteps?: number;
   /** How many tools the semantic shortlist pulls in, on top of the always-on set. */
@@ -50,7 +49,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const {
     userInput,
     modelKey,
-    allowFullBuild = false,
     maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
@@ -63,14 +61,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
     shortlistTools(userInput, {
       k: toolShortlistSize,
-      exclude: [...alwaysOn, FULL_BUILD_TOOL],
+      exclude: alwaysOn,
     })
   );
 
   const selectedNames = new Set<string>([...alwaysOn, ...shortlisted]);
-  if (allowFullBuild && catalogByName.has(FULL_BUILD_TOOL)) {
-    selectedNames.add(FULL_BUILD_TOOL);
-  }
 
   const selectedDefs = [...selectedNames]
     .map((name) => catalogByName.get(name))
@@ -82,7 +77,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const result = await stage(`chat model call (${resolvedModelKey})`, () =>
     generateText({
       model: resolveModel(resolvedModelKey),
-      system: systemPrompt(allowFullBuild),
+      system: systemPrompt(),
       prompt: userInput,
       tools,
       stopWhen: stepCountIs(maxSteps),
@@ -116,23 +111,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     return { stepNumber: i, text: step.text, toolCalls, toolResults };
   });
 
-  // If any tool returned an execution_id (msb_execute_solution does), surface
-  // it so the UI can offer to switch to the async status-polling view.
-  let executionId: string | undefined;
-  for (const step of steps) {
-    for (const r of step.toolResults) {
-      const output = r.output;
-      if (output && typeof output === 'object' && typeof (output as Record<string, unknown>).execution_id === 'string') {
-        executionId = (output as Record<string, unknown>).execution_id as string;
-      }
-    }
-  }
-
   return {
     finalText: result.text,
     steps,
     toolsConsidered: [...selectedNames],
-    executionId,
     finishReason: result.finishReason,
   };
 }

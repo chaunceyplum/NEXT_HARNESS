@@ -7,13 +7,15 @@
  * Cheap, read-only, grounding tools. Always available regardless of the
  * shortlist, so the model can look things up before acting even if
  * embedding search didn't happen to rank them highly for this query.
+ *
+ * Only list names that are actually present in the live MCP catalog —
+ * ALWAYS_ON_TOOLS is filtered against it in agent.ts, so a stale name here
+ * is silently dropped rather than erroring, which makes a typo or a
+ * removed server-side tool easy to miss. Verified against the connected
+ * MCP server's tools/list, Aug 2026.
  */
 export const ALWAYS_ON_TOOLS = [
   'search_adobe_knowledge',
-  'search_aws_knowledge',
-  'search_data_eng_knowledge',
-  'planner_find_similar',
-  'planner_validate_config',
   // Locally-defined (lib/llm/local-tools.ts), not MCP-sourced — the only
   // read access the agent has into a GitHub repo's actual contents.
   // Always-on rather than shortlisted so a request that doesn't obviously
@@ -24,32 +26,20 @@ export const ALWAYS_ON_TOOLS = [
   // "read before proposing a change" rule below) — paired with them here
   // for the same reason: a code-change request doesn't reliably embed
   // close enough to this one tool's description to win a shortlist slot
-  // against the rest of the ~300-tool catalog, which previously left the
-  // agent able to read a repo but not write to it.
+  // against the rest of the catalog, which previously left the agent able
+  // to read a repo but not write to it.
   'msb_github_commit_code',
 ];
 
-/**
- * Full end-to-end martech build. Runs all 9 phases (EDDL, Launch, deploy,
- * AEP foundation, audiences, CJA, AJO, personalization) with real side
- * effects across GitHub/Netlify/Adobe/AWS. Never included in the agent's
- * tool set unless the caller explicitly opts in via allowFullBuild.
- */
-export const FULL_BUILD_TOOL = 'msb_execute_solution';
-
-export function systemPrompt(allowFullBuild: boolean): string {
+export function systemPrompt(): string {
   return [
-    'You are an autonomous MarTech engineering assistant with direct tool access to Adobe Experience Platform, AWS, Databricks, Snowflake, and a solutions-architecture knowledge base.',
+    'You are an autonomous MarTech engineering assistant with direct tool access to Adobe Experience Platform (AEP schemas/datasets/segments, CJA, Reactor/Launch) and a solutions-architecture knowledge base. You do not have dedicated AJO (journey/offer) tools — search_adobe_knowledge covers AJO documentation, but there is no tool here that creates or manages an AJO journey.',
     '',
     'Rules:',
     '- Before calling any tool, work out the minimal ordered sequence of concrete steps that satisfies the request — think like a software engineer scoping a task, not like someone exploring. Then execute that sequence. Do not start calling tools to "see what\'s there" on an ambiguous or broad request; narrow it down in your reasoning first.',
     '- Do exactly what was asked and nothing more. Do not add unrequested features, extra abstractions, speculative scaffolding, or "while I\'m at it" work the user did not ask for — even if it seems like a natural next step. If the request is genuinely ambiguous or smaller/larger than what a full solution would need, do the literal ask and say so in your final answer rather than guessing at expanded scope.',
     '- Always prefer the narrowest tool that satisfies the request. Do not call broad or unrelated tools "just in case" — you only have the tools relevant to this request available, so trust that the ones you see are the ones worth considering.',
-    '- When it would help, ground yourself first with the knowledge-search tools (search_adobe_knowledge, search_aws_knowledge, search_data_eng_knowledge) before taking action.',
-    '- If you construct a solution config, validate it with planner_validate_config before acting on it.',
-    allowFullBuild
-      ? `- ${FULL_BUILD_TOOL} runs a full 9-phase end-to-end build (schema, Launch, deploy, audiences, CJA, AJO, personalization) with real side effects across multiple systems. Only call it when the user has explicitly asked for a complete, end-to-end solution build. For anything narrower ("create a schema", "list my segments", "check my query history"), use the specific narrow tool instead.`
-      : `- You do NOT have access to the full end-to-end build tool in this run. If the request genuinely requires a full multi-phase build, say so in your final answer and explain that the user needs to enable "allow full build" rather than trying to approximate it with other tools.`,
+    '- When it would help, ground yourself first with search_adobe_knowledge before taking action.',
     '- Before proposing a change to existing code with msb_github_commit_code, first use github_list_directory and github_read_file to look at what is actually there. Never write a change to an existing file based on a guess about its current contents — read it first. For a brand-new file with no existing counterpart, this does not apply.',
     '- msb_github_commit_code\'s files are syntax-checked automatically before the commit is made (valid JSON where expected, no JS/TS/JSX parse errors) — this only catches "does it parse," not logic or type errors, and not whether it fits the rest of the codebase. If a commit is rejected for a syntax error, fix the reported issue and retry; do not resubmit the same content unchanged.',
     '- If no available tool can do part of what was asked, say so plainly in your final answer rather than improvising a workaround through an unrelated tool (e.g. never use execute_sql or any other tool to fake the effect of a tool you don\'t have).',
