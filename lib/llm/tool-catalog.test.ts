@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { isAdobeScoped, isNonRetryableError, pickRagTool, summarizeArgsForRagQuery } from './tool-catalog';
+import {
+  isAdobeScoped,
+  isNonRetryableError,
+  pickRagTool,
+  summarizeArgsForRagQuery,
+  summarizeFindingsForRetryHistory,
+} from './tool-catalog';
 
 describe('isAdobeScoped', () => {
   it('keeps Adobe and other in-scope tools', () => {
@@ -50,19 +56,42 @@ describe('summarizeArgsForRagQuery', () => {
   });
 });
 
+describe('summarizeFindingsForRetryHistory', () => {
+  it('passes small findings through untouched, unstringified', () => {
+    const findings = { results: ['a short answer'] };
+    expect(summarizeFindingsForRetryHistory(findings)).toBe(findings);
+  });
+
+  it('truncates and annotates large findings rather than embedding them in full', () => {
+    const findings = { results: Array(50).fill('x'.repeat(200)) };
+    const summary = summarizeFindingsForRetryHistory(findings);
+    expect(typeof summary).toBe('string');
+    expect((summary as string).length).toBeLessThan(JSON.stringify(findings).length);
+    expect(summary).toMatch(/truncated, \d+ chars total/);
+  });
+});
+
 describe('pickRagTool', () => {
   it('prefers search_adobe_knowledge when it is available', () => {
     const available = new Set(['search_adobe_knowledge', 'query_rag_db']);
-    expect(pickRagTool(available)).toBe('search_adobe_knowledge');
+    expect(pickRagTool('adobe_create_schema', available)).toBe('search_adobe_knowledge');
   });
 
   it('falls back to another known RAG tool when Adobe search is unavailable', () => {
     const available = new Set(['query_rag_db', 'some_unrelated_tool']);
-    expect(pickRagTool(available)).toBe('query_rag_db');
+    expect(pickRagTool('adobe_create_schema', available)).toBe('query_rag_db');
   });
 
   it('returns undefined when no RAG tool is available to ground a retry', () => {
     const available = new Set(['adobe_create_schema', 'reactor_get_library']);
-    expect(pickRagTool(available)).toBeUndefined();
+    expect(pickRagTool('adobe_create_schema', available)).toBeUndefined();
+  });
+
+  it('never grounds a failed GitHub tool with Adobe knowledge search, even when it is available', () => {
+    const available = new Set(['search_adobe_knowledge', 'query_rag_db']);
+    expect(pickRagTool('msb_github_commit_code', available)).toBeUndefined();
+    expect(pickRagTool('msb_github_create_branch', available)).toBeUndefined();
+    expect(pickRagTool('github_read_file', available)).toBeUndefined();
+    expect(pickRagTool('github_list_directory', available)).toBeUndefined();
   });
 });
