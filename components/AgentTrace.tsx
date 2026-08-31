@@ -19,26 +19,38 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
   // whatever sentence it was in the middle of, not a real conclusion.
   const isIncomplete = finishReason !== 'stop';
 
+  const hasUsage = usage && (usage.inputTokens != null || usage.outputTokens != null || usage.totalTokens != null);
+
   return (
     <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8 space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-900">Agent Trace</h2>
         <span className={`text-xs ${isIncomplete ? 'text-amber-700 font-semibold' : 'text-gray-500'}`}>
           {toolsConsidered.length} tool(s) considered · finished: {finishReason}
-          {usage?.totalTokens != null && ` · ${usage.totalTokens.toLocaleString()} tokens`}
         </span>
       </div>
 
-      <div className="text-xs text-gray-500">
-        Tools available this run: {toolsConsidered.join(', ') || 'none'}
-        {usage && (usage.inputTokens != null || usage.outputTokens != null) && (
-          <>
-            {' '}
-            · chat model usage: {usage.inputTokens?.toLocaleString() ?? '?'} in / {usage.outputTokens?.toLocaleString() ?? '?'} out
-            <span className="italic"> (tool-shortlisting and RAG-judge calls not included)</span>
-          </>
-        )}
-      </div>
+      {hasUsage && (
+        <div className="flex items-center gap-6 bg-indigo-50 rounded-lg px-4 py-3">
+          <div>
+            <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Input</p>
+            <p className="text-lg font-bold text-indigo-900">{usage!.inputTokens?.toLocaleString() ?? '—'}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Output</p>
+            <p className="text-lg font-bold text-indigo-900">{usage!.outputTokens?.toLocaleString() ?? '—'}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Total tokens</p>
+            <p className="text-lg font-bold text-indigo-900">{usage!.totalTokens?.toLocaleString() ?? '—'}</p>
+          </div>
+          <p className="text-xs text-indigo-400 italic ml-auto self-end">
+            chat model only — tool-shortlisting and RAG-judge calls not included
+          </p>
+        </div>
+      )}
+
+      <div className="text-xs text-gray-500">Tools available this run: {toolsConsidered.join(', ') || 'none'}</div>
 
       <div className="space-y-3">
         {steps.map((step) => (

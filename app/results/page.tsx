@@ -77,16 +77,22 @@ export default function ResultsPage() {
                   <p className="text-xs text-gray-500 mt-1">
                     {new Date(run.createdAt).toLocaleString()} · {run.model} ·{' '}
                     {(run.durationMs / 1000).toFixed(1)}s
-                    {run.usage?.totalTokens != null && ` · ${run.usage.totalTokens.toLocaleString()} tokens`}
                   </p>
                 </div>
-                <span
-                  className={`shrink-0 inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
-                    run.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                  }`}
-                >
-                  {run.status}
-                </span>
+                <div className="shrink-0 flex items-center gap-2">
+                  {run.usage?.totalTokens != null && (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">
+                      {run.usage.totalTokens.toLocaleString()} tokens
+                    </span>
+                  )}
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
+                      run.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                    }`}
+                  >
+                    {run.status}
+                  </span>
+                </div>
               </Link>
             ))}
           </div>

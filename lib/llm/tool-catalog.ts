@@ -158,8 +158,33 @@ export function summarizeArgsForRagQuery(args: Record<string, unknown>): string 
   return `${json.slice(0, MAX_ARGS_CHARS_IN_RAG_QUERY)}… (truncated, ${json.length} chars total)`;
 }
 
-/** Pick which knowledge base is most likely to explain a tool failure — currently always Adobe's, the only knowledge-search tool the live catalog has. */
-export function pickRagTool(available: Set<string>): string | undefined {
+/**
+ * A knowledge-search tool's own results, embedded into retry history and
+ * (if all retries are exhausted) the final thrown error's "Retry history"
+ * JSON blob — uncapped, a single grounding lookup can return tens of KB
+ * (a real production run hit 48KB from one lookup), and that then rides
+ * along in the model's context for every subsequent step of the run. Wider
+ * than MAX_ARGS_CHARS_IN_RAG_QUERY since findings need to stay useful for
+ * debugging, not just present.
+ */
+const MAX_FINDINGS_CHARS_IN_RETRY_HISTORY = 2000;
+
+export function summarizeFindingsForRetryHistory(findings: unknown): unknown {
+  const json = JSON.stringify(findings);
+  if (json.length <= MAX_FINDINGS_CHARS_IN_RETRY_HISTORY) return findings;
+  return `${json.slice(0, MAX_FINDINGS_CHARS_IN_RETRY_HISTORY)}… (truncated, ${json.length} chars total)`;
+}
+
+/**
+ * Pick which knowledge base is most likely to explain a tool failure.
+ * search_adobe_knowledge can't explain a GitHub API failure, so a failed
+ * "github_" or "msb_github_" tool call gets no grounding lookup at all
+ * rather than one that's irrelevant by construction — it was still firing
+ * before this, uselessly inflating those tools' retry-history/error size
+ * for no benefit.
+ */
+export function pickRagTool(toolName: string, available: Set<string>): string | undefined {
+  if (toolName.startsWith('github_') || toolName.startsWith('msb_github_')) return undefined;
   if (available.has('search_adobe_knowledge')) return 'search_adobe_knowledge';
   return [...available].find((c) => RAG_TOOLS.has(c));
 }
@@ -260,15 +285,18 @@ export async function executeMcpToolWithRetry(
       }
 
       if (attempt < maxRetries) {
-        const ragTool = pickRagTool(availableNames);
+        const ragTool = pickRagTool(toolName, availableNames);
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
         if (ragTool) {
           const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What is the correct usage or known constraint here?`;
           record.raggedBefore = { tool: ragTool, query };
           try {
             const findings = await callMcpTool(ragTool, { query });
-            record.raggedBefore.findings = findings;
+            // Judge against the real findings (still bounded on its own —
+            // see rag-judge.ts's own cap), but only ever store/throw the
+            // capped version below.
             record.raggedBefore.judgment = await judgeRagResult(query, findings);
+            record.raggedBefore.findings = summarizeFindingsForRetryHistory(findings);
           } catch (ragErr) {
             record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
           }

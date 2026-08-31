@@ -125,6 +125,12 @@ export default function RunDetailPage() {
                     <p className="text-gray-500 font-medium">Duration</p>
                     <p className="text-gray-900 mt-1">{(record.durationMs / 1000).toFixed(1)}s</p>
                   </div>
+                  <div>
+                    <p className="text-gray-500 font-medium">Tokens</p>
+                    <p className="text-gray-900 mt-1">
+                      {record.usage?.totalTokens != null ? record.usage.totalTokens.toLocaleString() : '—'}
+                    </p>
+                  </div>
                 </div>
               </div>
               <p className="text-xs text-gray-400 mt-4">{new Date(record.createdAt).toLocaleString()}</p>
