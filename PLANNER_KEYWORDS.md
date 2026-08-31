@@ -1,5 +1,15 @@
 # Planner Keyword Reference
 
+> **⚠️ Superseded.** This doc describes the original fixed
+> `planner_parse_natural_language → orchestrator_execute → orchestrator_get_status`
+> pipeline. The `orchestrator_*` tools it describes don't exist on the real
+> MCP, and routing every request through one fixed full-build tool caused
+> even narrow asks to touch dozens of unrelated tools. The harness now runs
+> a dynamic, provider-agnostic agent instead — see `README.md` and
+> `ARCHITECTURE.md` for how it actually works today (`lib/llm/agent.ts`,
+> `lib/llm/tool-retrieval.ts`, `lib/llm/model-registry.ts`). This file is
+> kept for historical context only.
+
 ## Important: NO LLM Required
 
 The planner does **NOT use Claude or any LLM**. It uses simple **regex-based keyword matching** to parse your description.

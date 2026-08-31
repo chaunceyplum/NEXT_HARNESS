@@ -2,6 +2,17 @@
 ║                    MCP HARNESS - QUICK REFERENCE GUIDE                        ║
 ╚════════════════════════════════════════════════════════════════════════════════╝
 
+*** SUPERSEDED ***
+This describes the original fixed planner_parse_natural_language ->
+orchestrator_execute pipeline. Those orchestrator_* tools don't exist on
+the real MCP, and routing every request through one fixed full-build tool
+caused even narrow asks to touch dozens of unrelated tools. The harness
+now runs a dynamic, provider-agnostic agent instead -- see README.md and
+ARCHITECTURE.md for how it actually works today (lib/llm/agent.ts,
+lib/llm/tool-retrieval.ts, lib/llm/model-registry.ts). Kept for historical
+context only.
+*** SUPERSEDED ***
+
 WHAT IS THE HARNESS?
 ━━━━━━━━━━━━━━━━━━━━
 A web application that lets users describe what they want to build (in English),

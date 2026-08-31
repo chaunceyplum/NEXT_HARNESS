@@ -1,16 +1,18 @@
 'use client';
 
-import { AgentStepDTO } from '@/lib/types';
+import { AgentStepDTO, TokenUsage } from '@/lib/types';
 
 export interface AgentTraceProps {
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finishReason: string;
   finalText: string;
+  /** Chat-model usage for this run. Omit for runs persisted before token tracking was added. */
+  usage?: TokenUsage;
 }
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText }: AgentTraceProps) {
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage }: AgentTraceProps) {
   // "stop" means the model decided it was done. Anything else — most
   // commonly "tool-calls", meaning it hit maxSteps while still trying to
   // call tools — means the run was cut off mid-task, and finalText is
@@ -23,11 +25,19 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
         <h2 className="text-xl font-bold text-gray-900">Agent Trace</h2>
         <span className={`text-xs ${isIncomplete ? 'text-amber-700 font-semibold' : 'text-gray-500'}`}>
           {toolsConsidered.length} tool(s) considered · finished: {finishReason}
+          {usage?.totalTokens != null && ` · ${usage.totalTokens.toLocaleString()} tokens`}
         </span>
       </div>
 
       <div className="text-xs text-gray-500">
         Tools available this run: {toolsConsidered.join(', ') || 'none'}
+        {usage && (usage.inputTokens != null || usage.outputTokens != null) && (
+          <>
+            {' '}
+            · chat model usage: {usage.inputTokens?.toLocaleString() ?? '?'} in / {usage.outputTokens?.toLocaleString() ?? '?'} out
+            <span className="italic"> (tool-shortlisting and RAG-judge calls not included)</span>
+          </>
+        )}
       </div>
 
       <div className="space-y-3">

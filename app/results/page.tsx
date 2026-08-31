@@ -77,6 +77,7 @@ export default function ResultsPage() {
                   <p className="text-xs text-gray-500 mt-1">
                     {new Date(run.createdAt).toLocaleString()} · {run.model} ·{' '}
                     {(run.durationMs / 1000).toFixed(1)}s
+                    {run.usage?.totalTokens != null && ` · ${run.usage.totalTokens.toLocaleString()} tokens`}
                   </p>
                 </div>
                 <span

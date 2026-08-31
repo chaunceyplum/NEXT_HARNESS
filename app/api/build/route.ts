@@ -165,6 +165,7 @@ export async function POST(request: Request): Promise<Response> {
       steps: agentResult.steps.length,
       toolsConsidered: agentResult.toolsConsidered,
       finishReason: agentResult.finishReason,
+      usage: agentResult.usage,
     });
 
     const response: BuildResponse = {
@@ -173,6 +174,7 @@ export async function POST(request: Request): Promise<Response> {
       steps: agentResult.steps,
       toolsConsidered: agentResult.toolsConsidered,
       finishReason: agentResult.finishReason,
+      usage: agentResult.usage,
     };
 
     const completedRecord: ExecutionRecord = {

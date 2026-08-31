@@ -3,7 +3,7 @@
 ## Quick Start
 
 ### 1. Prerequisites
-- Node.js 18+ installed
+- Node.js 20.9+ installed (Next.js 16 requires it — `node --version` to check)
 - MCP Lambda deployed on AWS
 - GitHub repository access
 
@@ -18,9 +18,20 @@ Look for `McpEndpointUrl` output.
 
 ### 3. Configure Environment
 
-Create `.env.local`:
+Create `.env.local`. `MCP_ENDPOINT_URL` is required, but so is at least one
+chat-model provider now — the harness runs an LLM agent loop
+(`lib/llm/agent.ts`), not just an MCP passthrough. See
+`ENVIRONMENT_VARIABLES.md` for the full list (Bedrock/Anthropic/OpenAI
+options, tool-shortlisting embeddings, `ADOBE_TOOLS_ONLY`, the RAG judge).
+Minimum to actually run something:
 ```bash
 MCP_ENDPOINT_URL=https://xxx.execute-api.us-east-1.amazonaws.com/mcp
+
+# Bedrock is the default chat-model provider — no Anthropic key needed,
+# just AWS credentials (or AWS_BEARER_TOKEN_BEDROCK — see the note below).
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
 ```
 
 ### 4. Local Development
@@ -38,14 +49,21 @@ npm run dev
 ### 5. Test the Connection
 
 In browser at http://localhost:3000:
-1. Enter a description: "Build an AEP solution for ecommerce"
-2. Click "Build"
-3. Monitor progress on the execution page
-4. Download artifacts when complete
+1. Enter a description: "Create an XDM schema for ecommerce purchase events"
+2. Click "Run"
+3. Read the Agent Trace — each tool call, its result, and the token usage
+   for the run — then the final answer at the bottom
+4. If `finished:` isn't `stop`, the agent hit its step limit mid-task
+   (raise "Max steps" and re-run) rather than reaching a real answer
 
 ---
 
 ## Deployment Options
+
+Every option below shows only `MCP_ENDPOINT_URL` for brevity — in practice
+you also need at least one chat-model provider's credentials (Bedrock's
+`AWS_*` vars by default, per step 3 above) or the app will fail at request
+time, not at startup. See `ENVIRONMENT_VARIABLES.md` for the full list.
 
 ### Option A: Vercel (Recommended)
 
@@ -92,7 +110,7 @@ ssh -i your-key.pem ubuntu@<instance-ip>
 sudo apt update && sudo apt upgrade -y
 
 # Install Node.js
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Install PM2 for process management
@@ -160,7 +178,7 @@ sudo systemctl restart nginx
 
 #### Step 1: Create Dockerfile
 ```dockerfile
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -242,15 +260,15 @@ sudo certbot certonly --standalone -d your-domain.com
 ### Verification
 - [ ] Application loads without errors
 - [ ] Form accepts input
-- [ ] Build endpoint responds
-- [ ] Status polling works
-- [ ] Artifacts download successfully
+- [ ] `/api/build` responds with a full agent trace
+- [ ] Token usage shows up in the trace and in `/results`
+- [ ] Past runs list and replay correctly from `/results`
 - [ ] Error handling displays properly
 
 ### Monitoring
 - [ ] Set up error tracking (Sentry, DataDog)
 - [ ] Monitor API response times
-- [ ] Track execution success rate
+- [ ] Track run success rate (`status` on `harness_agent_runs`)
 - [ ] Monitor server resources
 
 ### Security
@@ -262,7 +280,8 @@ sudo certbot certonly --standalone -d your-domain.com
 
 ### Performance
 - [ ] Cache enabled where appropriate
-- [ ] API response times < 1s (excluding orchestrator)
+- [ ] API response times reasonable given the model tier chosen (an
+      "expensive" tier + many tool calls is legitimately slower, not a bug)
 - [ ] Bundle size optimized
 - [ ] Images optimized
 
@@ -283,19 +302,12 @@ MCP_ENDPOINT_URL=https://xxx.execute-api.us-east-1.amazonaws.com/mcp
 3. Check security groups allow HTTPS
 4. Verify API Gateway is deployed
 
-### "Build starts but doesn't complete"
+### "Build finishes but the answer looks cut off"
 **Solutions**:
-1. Check MCP logs for errors
-2. Verify orchestrator is running
-3. Check network connectivity
-4. Verify timeout settings
-
-### "Artifacts not downloading"
-**Solutions**:
-1. Check artifact generation in MCP
-2. Verify response size is reasonable
-3. Check browser console for errors
-4. Try different browser
+1. Check `finishReason` in the trace — `tool-calls` means the agent hit
+   `maxSteps` mid-task, not a real error; raise "Max steps" and re-run
+2. Check MCP logs for errors on the individual tool calls in the trace
+3. Check network connectivity to the MCP endpoint
 
 ### "High latency / Slow responses"
 **Solutions**:
@@ -315,14 +327,17 @@ MCP_ENDPOINT_URL=https://xxx.execute-api.us-east-1.amazonaws.com/mcp
 
 ### Horizontal Scaling
 - Use load balancer (ALB/NLB)
-- Run multiple harness instances
+- Run multiple harness instances — note the tool catalog and the
+  tool-shortlisting embedding index are both in-memory, per-process
+  (`lib/llm/tool-catalog.ts`, `lib/llm/tool-retrieval.ts`); each instance
+  rebuilds them independently on first use rather than sharing one copy.
+  Fine at small scale, worth revisiting before running many instances.
 - Use Lambda reserved concurrency
 
 ### Optimization
 - Enable CloudFront CDN
 - Use Lambda@Edge for routing
 - Implement caching
-- Optimize artifact storage (S3)
 
 ---
 
@@ -343,9 +358,9 @@ docker logs <container-id>
 ### Metrics to Monitor
 - API response times
 - Error rate
-- Build success rate
-- User sessions
-- Artifact downloads
+- Run success rate (`status` on `harness_agent_runs`, via `/results`)
+- Token usage / cost per run (`usage` on each run — see `/results` and
+  `/results/:id`)
 
 ### Error Tracking
 ```bash
@@ -378,9 +393,46 @@ npm install
 # Rebuild
 npm run build
 
-# Restart (EC2 with PM2)
-pm2 restart mcp-harness
+# Restart (EC2 with PM2) — see "Known Gotchas" below if changed env vars
+# don't seem to take effect after this
+pm2 restart mcp-harness --update-env
 ```
+
+---
+
+## Known Gotchas (from live deployment)
+
+These cost real debugging time on a real deployment — check them before
+assuming something deeper is broken.
+
+### PM2 caches environment variables at daemon start
+`pm2 restart <name>` alone does **not** reliably pick up changes to
+`.env.local` — the PM2 daemon itself can hold onto stale env vars from
+when it was first started, especially if it was ever started from a shell
+that had conflicting values exported. Fixes, in order of how much they
+actually work:
+1. `pm2 restart <name> --update-env` (as in the Updates command above)
+2. If that doesn't work: `pm2 kill`, start a **clean** shell (no leftover
+   `export`ed vars from earlier debugging), then `pm2 start` fresh
+3. Confirm what the running process actually sees with `pm2 env <id>` or
+   by checking `pm2 logs` right after a boot
+
+### `npm run build` must succeed *before* `pm2 start`/`npm run start`
+Skipping or silently failing the build doesn't fail loudly — you'll instead
+see `next start` fail to bind the port, or a confusing `EADDRINUSE` on the
+next attempt, rather than a clear "no build found" error. If startup
+behaves strangely, `npm run build` on its own first and read its output
+before touching PM2 at all.
+
+### Bedrock auth: two different mechanisms, don't mix signals
+Bedrock (the default chat-model provider) accepts either SigV4 credentials
+(`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`) or bearer
+token auth (`AWS_BEARER_TOKEN_BEDROCK`), and the bearer token takes
+precedence if both are set. Either way, `AWS_REGION` is still required —
+Bedrock builds its endpoint URL from the region regardless of which auth
+method you're using, and throws rather than defaulting on its own if it's
+unresolvable. A bare `Forbidden` with no useful body from Bedrock is worth
+checking both of these before assuming an IAM permissions problem.
 
 ---
 
@@ -388,23 +440,27 @@ pm2 restart mcp-harness
 
 ### Data to Backup
 - `.env.local` (secrets)
-- Execution history (if storing in DB)
+- Run history — lives in the **MCP server's own Postgres**
+  (`harness_agent_runs`, written via its `execute_sql` tool), not in
+  anything local to the harness; back that database up, not this app
 - Application logs
 
 ### Recovery Steps
 1. Restore `.env.local`
 2. Redeploy application
 3. Verify MCP connectivity
-4. Run test builds
+4. Run a real request end-to-end and confirm it shows up in `/results`
 
 ---
 
 ## Support & Resources
 
-- **Documentation**: See `START_HERE.md`
-- **Architecture**: See `HARNESS_REQUIREMENTS.md`
-- **API Reference**: See `MCP_TOOLS_REFERENCE.md`
-- **Implementation**: See `IMPLEMENTATION_SUMMARY.md`
+- **Overview & architecture**: See `README.md` and `ARCHITECTURE.md`
+- **Environment variables**: See `ENVIRONMENT_VARIABLES.md`
+- Everything else in this repo's root (`START_HERE.md`,
+  `HARNESS_REQUIREMENTS.md`, `MCP_TOOLS_REFERENCE.md`,
+  `IMPLEMENTATION_SUMMARY.md`, etc.) describes an earlier, abandoned design
+  and is marked superseded at the top — historical context only.
 
 ---
 

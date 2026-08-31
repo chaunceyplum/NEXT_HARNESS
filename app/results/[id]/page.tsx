@@ -143,6 +143,7 @@ export default function RunDetailPage() {
                 toolsConsidered={record.result.toolsConsidered}
                 finishReason={record.result.finishReason}
                 finalText={record.result.finalText}
+                usage={record.result.usage}
               />
             )}
           </>

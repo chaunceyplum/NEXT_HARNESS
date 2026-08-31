@@ -13,7 +13,9 @@ a loop until the task is done. The model is swappable per request across
 Anthropic, Bedrock, or OpenAI (`lib/llm/model-registry.ts`) — pick cheap vs.
 expensive, or switch providers, without code changes. There is no full,
 end-to-end build tool wired up — every request resolves through specific,
-narrow tool calls chosen by the agent.
+narrow tool calls chosen by the agent. Every run's chat-model token usage
+is tracked and shown in the agent trace and in `/results`, so cost per
+request is visible, not just inferred from the model tier picked.
 
 See `ENVIRONMENT_VARIABLES.md` for the required `MCP_ENDPOINT_URL` and the
 LLM provider variables that control which models are available. See
@@ -41,6 +43,21 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Testing
+
+```bash
+npm run test        # run the suite once (vitest)
+npm run test:watch  # re-run on file changes
+```
+
+Covers the pure logic that's cheap to get wrong silently: the tool-scoping
+filter (`isAdobeScoped`), the non-retryable-error classifier and RAG-query
+summarizer in `lib/llm/tool-catalog.ts`, `cosineSimilarity`, the
+pre-commit syntax checker (`validateCommitFiles`), the model registry, and
+the RAG judge's enable/disable gate. Deliberately doesn't hit the live MCP
+server, a real chat model, or a real embedding provider — those need
+credentials this suite shouldn't require just to run.
 
 ## Learn More
 
