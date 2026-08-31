@@ -107,6 +107,7 @@ export function newRunId(): string {
 // ── Row <-> ExecutionRecord mapping ───────────────────────────────────────
 
 function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
+  const result = (row.result as ExecutionRecord['result'] | null) ?? undefined;
   return {
     id: row.id as string,
     createdAt: new Date(row.created_at as string).toISOString(),
@@ -117,8 +118,10 @@ function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
     durationMs: row.duration_ms as number,
     toolsConsidered: (row.tools_considered as string[] | null) ?? undefined,
     executionId: (row.execution_id as string | null) ?? undefined,
+    // Absent on rows persisted before token tracking was added (result has no `usage` key) — never a schema concern since it's read out of the existing `result` JSONB column, not a dedicated one.
+    usage: result?.usage,
     request: row.request as ExecutionRecord['request'],
-    result: (row.result as ExecutionRecord['result'] | null) ?? undefined,
+    result,
     error: (row.error as string | null) ?? undefined,
   };
 }
@@ -167,7 +170,11 @@ export async function listExecutions(opts: ListExecutionsOptions = {}): Promise<
 
   const [listResult, countResult] = await Promise.all([
     execSql(
-      `SELECT id, created_at, description, model, allow_full_build, status, duration_ms, tools_considered, execution_id
+      // result->'usage' pulls just that sub-object out of the existing
+      // result JSONB column (NULL on rows from before token tracking was
+      // added, or on failed runs) — no schema change, unlike adding a
+      // dedicated column would have needed.
+      `SELECT id, created_at, description, model, allow_full_build, status, duration_ms, tools_considered, execution_id, result->'usage' AS usage
        FROM ${TABLE} ORDER BY created_at DESC LIMIT ${sqlInt(limit)} OFFSET ${sqlInt(offset)}`.replace(/\s+/g, ' ')
     ),
     execSql(`SELECT count(*) AS total FROM ${TABLE}`),
@@ -183,6 +190,7 @@ export async function listExecutions(opts: ListExecutionsOptions = {}): Promise<
     durationMs: row.duration_ms as number,
     toolsConsidered: (row.tools_considered as string[] | null) ?? undefined,
     executionId: (row.execution_id as string | null) ?? undefined,
+    usage: (row.usage as RunSummary['usage']) ?? undefined,
   }));
 
   const total = Number(countResult.rows?.[0]?.total ?? 0);

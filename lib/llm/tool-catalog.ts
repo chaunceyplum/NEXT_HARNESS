@@ -61,7 +61,7 @@ function isAdobeToolsOnlyEnabled(): boolean {
   return process.env.ADOBE_TOOLS_ONLY !== 'false';
 }
 
-function isAdobeScoped(name: string): boolean {
+export function isAdobeScoped(name: string): boolean {
   if (NON_ADOBE_TOOL_NAMES.has(name)) return false;
   return !NON_ADOBE_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
@@ -139,7 +139,7 @@ const NON_RETRYABLE_ERROR_PATTERNS = [
   /permission denied/i,
 ];
 
-function isNonRetryableError(message: string): boolean {
+export function isNonRetryableError(message: string): boolean {
   return NON_RETRYABLE_ERROR_PATTERNS.some((re) => re.test(message));
 }
 
@@ -152,14 +152,14 @@ function isNonRetryableError(message: string): boolean {
  */
 const MAX_ARGS_CHARS_IN_RAG_QUERY = 600;
 
-function summarizeArgsForRagQuery(args: Record<string, unknown>): string {
+export function summarizeArgsForRagQuery(args: Record<string, unknown>): string {
   const json = JSON.stringify(args);
   if (json.length <= MAX_ARGS_CHARS_IN_RAG_QUERY) return json;
   return `${json.slice(0, MAX_ARGS_CHARS_IN_RAG_QUERY)}… (truncated, ${json.length} chars total)`;
 }
 
 /** Pick which knowledge base is most likely to explain a tool failure — currently always Adobe's, the only knowledge-search tool the live catalog has. */
-function pickRagTool(available: Set<string>): string | undefined {
+export function pickRagTool(available: Set<string>): string | undefined {
   if (available.has('search_adobe_knowledge')) return 'search_adobe_knowledge';
   return [...available].find((c) => RAG_TOOLS.has(c));
 }

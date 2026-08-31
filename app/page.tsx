@@ -204,6 +204,7 @@ export default function Home() {
               toolsConsidered={result.toolsConsidered}
               finishReason={result.finishReason}
               finalText={result.finalText}
+              usage={result.usage}
             />
           </div>
         )}

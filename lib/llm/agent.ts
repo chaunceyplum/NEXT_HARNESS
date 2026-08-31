@@ -26,11 +26,27 @@ import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './age
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
 
+/**
+ * Chat-model token usage for one run, summed across every step of the
+ * agent loop (generateText's `usage` is already the all-steps total, not
+ * just the final step — see the AI SDK's GenerateTextResult docs). Does
+ * NOT include the tool-shortlisting embedding call or any RAG-judge calls
+ * (lib/llm/rag-judge.ts) — both are real but comparatively small costs;
+ * this covers the dominant one (the actual chat model) without threading
+ * usage through every side call.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
 export interface AgentRunResult {
   finalText: string;
   steps: AgentStepTrace[];
   toolsConsidered: string[];
   finishReason: string;
+  usage: TokenUsage;
 }
 
 export interface RunAgentOptions {
@@ -116,5 +132,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     steps,
     toolsConsidered: [...selectedNames],
     finishReason: result.finishReason,
+    usage: {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      totalTokens: result.usage.totalTokens,
+    },
   };
 }

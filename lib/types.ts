@@ -25,6 +25,20 @@ export interface AgentStepDTO {
   toolResults: AgentToolResultDTO[];
 }
 
+/**
+ * Chat-model token usage for one run, summed across every step of the
+ * agent loop. Does NOT include the tool-shortlisting embedding call or any
+ * RAG-judge calls (lib/llm/rag-judge.ts) — both are real but comparatively
+ * small costs; this covers the dominant one (the actual chat model)
+ * without threading usage through every side call. Any field can be
+ * `undefined` if the provider didn't report it.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
 export interface BuildRequest {
   description: string;
   /** Model registry key, e.g. "anthropic:sonnet". Omit to use the server default. */
@@ -55,6 +69,7 @@ export interface BuildResponse {
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finishReason: string;
+  usage: TokenUsage;
 }
 
 export interface ModelOption {
@@ -77,6 +92,8 @@ export interface RunSummary {
   durationMs: number;
   toolsConsidered?: string[];
   executionId?: string;
+  /** Absent on runs persisted before token tracking was added, and on failed runs (the agent never got a usage figure). */
+  usage?: TokenUsage;
 }
 
 export interface ExecutionRecord extends RunSummary {
