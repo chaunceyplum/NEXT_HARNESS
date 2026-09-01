@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capRagResult,
   isAdobeScoped,
   isNonRetryableError,
   pickRagTool,
@@ -68,6 +69,26 @@ describe('summarizeFindingsForRetryHistory', () => {
     expect(typeof summary).toBe('string');
     expect((summary as string).length).toBeLessThan(JSON.stringify(findings).length);
     expect(summary).toMatch(/truncated, \d+ chars total/);
+  });
+});
+
+describe('capRagResult', () => {
+  it('passes small results through untouched, unstringified', () => {
+    const result = { results: ['a short, useful answer'] };
+    expect(capRagResult(result)).toBe(result);
+  });
+
+  it('truncates and annotates a large result rather than returning it in full', () => {
+    const result = { results: Array(200).fill('x'.repeat(200)) };
+    const capped = capRagResult(result);
+    expect(typeof capped).toBe('string');
+    expect((capped as string).length).toBeLessThan(JSON.stringify(result).length);
+    expect(capped).toMatch(/truncated, \d+ chars total/);
+  });
+
+  it('is generous enough to preserve a genuine multi-paragraph explanatory answer', () => {
+    const result = { answer: 'A merge policy determines which record wins when identities merge. '.repeat(20) };
+    expect(capRagResult(result)).toBe(result);
   });
 });
 
