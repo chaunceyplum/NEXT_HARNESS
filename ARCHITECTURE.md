@@ -22,7 +22,7 @@ flowchart TD
 
     subgraph MCP["MCP Server — Lambda + API Gateway (separate system, AEC_MCP)"]
         direction TB
-        Dispatcher["Tool dispatcher<br/>155 tools · tools/list, tools/call"]
+        Dispatcher["Tool dispatcher<br/>218 tools · tools/list, tools/call"]
         KB["Knowledge base<br/>pgvector + embeddings over docs"]
         DB["Its own Postgres<br/>harness_agent_runs (via execute_sql)"]
     end
@@ -70,7 +70,12 @@ up to a configurable step budget.
 The only thing in this picture holding real credentials for Adobe and
 GitHub. The harness never talks to those platforms itself — every action is
 a tool call across this boundary, which is also where the tool catalog
-(155 tools as of the last live check) and the knowledge base actually live.
+(218 tools as of the last source-level check — Schema Registry classes/
+field groups/data types/descriptors, batch ingestion, real-time customer
+profile, sandbox management, identity namespaces, privacy jobs, and
+segment/export jobs were added on top of the prior 139; the Lambda still
+needs a `sam deploy` from the MCP repo before `tools/list` reflects them
+live) and the knowledge base actually live.
 
 - AWS Lambda behind API Gateway, called over HTTPS JSON-RPC
 - Owns the harness's own run-history table, not just its own state
