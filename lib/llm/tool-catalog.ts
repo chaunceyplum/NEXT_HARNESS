@@ -190,23 +190,51 @@ export function pickRagTool(toolName: string, available: Set<string>): string | 
 }
 
 /**
+ * A search_adobe_knowledge/search_all_agents call's own result, made
+ * directly by the model (not the automatic retry-grounding path — see
+ * summarizeFindingsForRetryHistory for that one) and returned straight to
+ * it as the tool output. One real production run burned roughly 400K input
+ * tokens largely because ~9 of these searches (2-4K tokens/~8-16K chars
+ * each), made across a troubleshooting loop, each stayed in full in every
+ * subsequent turn's context — the multi-step loop resends the whole
+ * conversation so far on every turn. Capped generously enough to still
+ * carry a complete explanatory answer for a genuine knowledge question
+ * (e.g. "what's the best merge policy for..."), just not an unbounded one.
+ * This is a backstop, not the primary fix for a troubleshooting loop —
+ * that's the system prompt's "stop repeating the same failed approach"
+ * rule (lib/llm/agent-core.ts).
+ */
+const MAX_CHARS_IN_RAG_RESULT = 6000;
+
+export function capRagResult(result: unknown): unknown {
+  const json = JSON.stringify(result);
+  if (json.length <= MAX_CHARS_IN_RAG_RESULT) return result;
+  return `${json.slice(0, MAX_CHARS_IN_RAG_RESULT)}… (truncated, ${json.length} chars total — narrow the query for a more focused result)`;
+}
+
+/**
  * If `toolName` is a judgeable RAG tool (see rag-judge.ts) and its args
- * carried a `query` string, score the result and ride the judgment along on
- * it — same pattern as `_retryHistory` below, so callers reading a result's
- * normal fields are unaffected either way. A non-object result (or no
- * judgment, e.g. the judge is disabled or failed) passes through unchanged.
+ * carried a `query` string, score the result (against the real,
+ * uncapped content — the judge has its own separate size cap) and cap the
+ * result itself before it's returned to the model. Judgment metadata rides
+ * along on the capped result the same way `_retryHistory` rides along
+ * below, so callers reading a result's normal fields are unaffected either
+ * way. A non-object capped result (i.e. one large enough to have become a
+ * truncated string) can't carry the judgment metadata too — the truncation
+ * note matters more there than the judgment would.
  */
 async function withRagJudgment(toolName: string, args: Record<string, unknown>, result: unknown): Promise<unknown> {
   if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return result;
   const query = typeof args.query === 'string' ? args.query : undefined;
-  if (!query) return result;
+  if (!query) return capRagResult(result);
 
   const judgment = await judgeRagResult(query, result);
-  if (!judgment) return result;
-  if (result && typeof result === 'object' && !Array.isArray(result)) {
-    return { ...(result as Record<string, unknown>), _ragJudgment: judgment };
+  const capped = capRagResult(result);
+  if (!judgment) return capped;
+  if (capped && typeof capped === 'object' && !Array.isArray(capped)) {
+    return { ...(capped as Record<string, unknown>), _ragJudgment: judgment };
   }
-  return result;
+  return capped;
 }
 
 export interface RetryAttemptRecord {
