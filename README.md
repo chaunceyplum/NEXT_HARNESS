@@ -1,7 +1,9 @@
 This is the web harness for an Adobe Experience Cloud MCP server (schemas,
 schema registry classes/field groups/data types/descriptors, batch
 ingestion, real-time customer profile, sandbox management, identity
-namespaces, privacy jobs, segments and segment/export jobs, CJA,
+namespaces, privacy jobs, segments plus segment/export/estimate jobs,
+Flow Service sources and destinations (including flow specs, landing
+zone, and pause/resume), the Data Prep mapping-set API, CJA,
 Reactor/Launch, and a solutions-architecture knowledge base that also
 covers AJO — though there are no dedicated AJO journey/offer tools yet).
 The catalog is filtered to Adobe-scoped tools by default

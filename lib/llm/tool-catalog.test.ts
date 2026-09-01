@@ -33,6 +33,26 @@ describe('isAdobeScoped', () => {
     }
   });
 
+  it('keeps the follow-up AEP tools rounding out Flow Service, Segmentation, and Data Prep (218 -> 238)', () => {
+    for (const name of [
+      'adobe_create_segment_estimate',
+      'adobe_get_segment_estimate',
+      'flow_get_connection_spec',
+      'flow_list_flow_specs',
+      'flow_get_flow_spec',
+      'flow_get_landing_zone_credentials',
+      'flow_enable',
+      'flow_disable',
+      'dataprep_list_mapping_sets',
+      'dataprep_create_mapping_set',
+      'dataprep_create_mapping',
+      'dataprep_preview_mapping',
+      'dataprep_list_mapping_functions',
+    ]) {
+      expect(isAdobeScoped(name)).toBe(true);
+    }
+  });
+
   it('excludes AWS/Databricks/Snowflake-prefixed tools', () => {
     for (const name of ['aws_recommend_services', 'databricks_run_job', 'snowflake_query']) {
       expect(isAdobeScoped(name)).toBe(false);
