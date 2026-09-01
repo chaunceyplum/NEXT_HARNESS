@@ -1,7 +1,10 @@
 This is the web harness for an Adobe Experience Cloud MCP server (schemas,
-segments, CJA, Reactor/Launch, and a solutions-architecture knowledge base
-that also covers AJO — though there are no dedicated AJO journey/offer
-tools yet). The catalog is filtered to Adobe-scoped tools by default
+schema registry classes/field groups/data types/descriptors, batch
+ingestion, real-time customer profile, sandbox management, identity
+namespaces, privacy jobs, segments and segment/export jobs, CJA,
+Reactor/Launch, and a solutions-architecture knowledge base that also
+covers AJO — though there are no dedicated AJO journey/offer tools yet).
+The catalog is filtered to Adobe-scoped tools by default
 (`ADOBE_TOOLS_ONLY`, see below) — AWS/Databricks/Snowflake support is
 defined in the harness's tool-catalog filtering code but isn't currently
 present in the connected MCP server's tool list.

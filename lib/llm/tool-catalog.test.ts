@@ -14,6 +14,24 @@ describe('isAdobeScoped', () => {
     }
   });
 
+  it('keeps the Tier 1/2 AEP tools added on top of the original 139 (Schema Registry, Ingestion, Profile, Sandbox, Identity, Privacy, Segmentation jobs, Flow runs)', () => {
+    for (const name of [
+      'adobe_list_classes',
+      'adobe_create_field_group',
+      'adobe_create_batch',
+      'adobe_get_profile_entity',
+      'adobe_create_sandbox',
+      'adobe_create_identity_namespace',
+      'adobe_create_privacy_job',
+      'adobe_create_segment_job',
+      'adobe_create_export_job',
+      'flow_list_runs',
+      'flow_get_run',
+    ]) {
+      expect(isAdobeScoped(name)).toBe(true);
+    }
+  });
+
   it('excludes AWS/Databricks/Snowflake-prefixed tools', () => {
     for (const name of ['aws_recommend_services', 'databricks_run_job', 'snowflake_query']) {
       expect(isAdobeScoped(name)).toBe(false);
