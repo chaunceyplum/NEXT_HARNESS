@@ -115,6 +115,27 @@ Registry key used when a build request doesn't specify `model`. Defaults to
 the cheapest option, or `DEFAULT_MODEL=anthropic:sonnet` to default to
 Anthropic direct instead.
 
+### Model-health circuit breaker (optional — `lib/llm/model-health.ts`)
+
+When a request does **not** pin a specific `model` (i.e. it uses
+`DEFAULT_MODEL`), the agent now routes around a model that is failing on
+provider-side access/auth/quota errors — the dominant failure class in the
+harness's own execution history — by retrying against the next healthy model
+in the same tier. A pinned model still surfaces its own error unchanged, and a
+context-length overflow is *not* treated as a health failure (a same-tier
+sibling shares the same context window). The breaker's thresholds are tunable:
+
+```bash
+MODEL_HEALTH_FAILURE_THRESHOLD=2      # provider failures in the window before a model is tripped
+MODEL_HEALTH_WINDOW_MS=900000         # rolling window (default 15m)
+MODEL_HEALTH_COOLDOWN_MS=600000       # how long a tripped model stays out (default 10m)
+```
+
+Note: this reroutes around a model with no verified access, but it can't
+*grant* access. If a tier has no healthy alternative (e.g. Bedrock model
+access isn't granted for any model in it — AWS Console → Bedrock → Model
+access), the underlying provider error is still surfaced; fix the grant.
+
 ### `ANTHROPIC_API_KEY` (optional — only for the `anthropic:*` entries)
 
 Used by the `anthropic:haiku` / `anthropic:sonnet` / `anthropic:opus`

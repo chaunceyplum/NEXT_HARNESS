@@ -18,10 +18,11 @@
  */
 
 import { generateText, stepCountIs } from 'ai';
-import { getDefaultModelKey, resolveModel } from './model-registry';
+import { getDefaultModelKey, getModelRegistry, resolveModel } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
+import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -59,6 +60,13 @@ export interface RunAgentOptions {
   toolShortlistSize?: number;
   /** Extra attempts per failed tool call, each preceded by a RAG lookup for context. 0 disables retrying. */
   toolRetries?: number;
+  /**
+   * Health tracker used to route around models failing on provider-side
+   * access/auth/quota errors. Defaults to the process-wide tracker; inject a
+   * fresh one in tests. Only used when the request is unpinned (no explicit
+   * modelKey) — a pinned model still surfaces its own error.
+   */
+  modelHealth?: ModelHealthTracker;
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
@@ -68,6 +76,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
+    modelHealth = defaultModelHealth,
   } = opts;
 
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
@@ -88,17 +97,69 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     .filter((d): d is McpToolDefinition => Boolean(d));
 
   const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
-  const resolvedModelKey = modelKey || getDefaultModelKey();
 
-  const result = await stage(`chat model call (${resolvedModelKey})`, () =>
-    generateText({
-      model: resolveModel(resolvedModelKey),
-      system: systemPrompt(),
-      prompt: userInput,
-      tools,
-      stopWhen: stepCountIs(maxSteps),
-    })
-  );
+  // Whether the caller pinned a specific model. Pinned requests surface their
+  // own provider errors verbatim; only unpinned (default-model) requests get
+  // automatically rerouted to a healthy same-tier sibling.
+  const isPinned = Boolean(modelKey);
+  const registry = getModelRegistry();
+
+  const callModel = (resolvedModelKey: string) =>
+    stage(`chat model call (${resolvedModelKey})`, () =>
+      generateText({
+        model: resolveModel(resolvedModelKey),
+        system: systemPrompt(),
+        prompt: userInput,
+        tools,
+        stopWhen: stepCountIs(maxSteps),
+      })
+    );
+
+  // Start from the pinned key, or the default key routed away from any model
+  // already known to be unhealthy.
+  let resolvedModelKey = modelKey || getDefaultModelKey();
+  if (!isPinned && modelHealth.isUnhealthy(resolvedModelKey)) {
+    const healthy = modelHealth.pickFallback(resolvedModelKey, registry);
+    if (healthy) resolvedModelKey = healthy;
+  }
+
+  const tried = new Set<string>();
+  let result: Awaited<ReturnType<typeof callModel>> | undefined;
+
+  // Try the chosen model; on a provider-health failure (access/auth/quota),
+  // record it and fall back to the next healthy same-tier model. A pinned
+  // request, a non-health error (e.g. context overflow), or having no healthy
+  // sibling left all stop the loop and rethrow.
+  for (;;) {
+    tried.add(resolvedModelKey);
+    try {
+      result = await callModel(resolvedModelKey);
+      modelHealth.recordSuccess(resolvedModelKey);
+      break;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const failureKind = classifyProviderFailure(message);
+
+      if (failureKind) modelHealth.recordFailure(resolvedModelKey);
+
+      const fallback =
+        !isPinned && failureKind
+          ? modelHealth.pickFallback(resolvedModelKey, registry, tried)
+          : null;
+
+      if (!fallback) throw err;
+
+      console.warn(
+        `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
+          `falling back to same-tier "${fallback}".`
+      );
+      resolvedModelKey = fallback;
+    }
+  }
+
+  // The loop only exits via `break` (after `result` is assigned) or by
+  // throwing, so this is always defined here; assert it for the type checker.
+  if (!result) throw new Error('unreachable: chat model call produced no result');
 
   // Walk step.content directly rather than the toolResults convenience
   // array — tool-error content parts (a failed tool call, including one
