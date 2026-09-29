@@ -62,6 +62,8 @@ export interface BuildRequest {
   resumeContext?: string;
   /** Server-set: the interrupted run this one resumes. */
   resumedFrom?: string;
+  /** Set by the server from the authenticated user; ignored if sent in the body. */
+  requestedBy?: string;
   /** Token budget for this run. Can only tighten RUN_MAX_TOKENS. */
   maxTokens?: number;
   /** Estimated-cost ceiling (USD) for this run. Can only tighten RUN_MAX_COST_USD. */

@@ -15,6 +15,8 @@
 export interface ApprovalDecision {
   approved: boolean;
   reason: string;
+  /** The user who decided; absent when the call timed out or the run was cancelled. */
+  decidedBy?: string;
 }
 
 interface Pending {
@@ -68,6 +70,6 @@ export function resolveApproval(runId: string, toolCallId: string, approved: boo
   const pending = registry.get(key(runId, toolCallId));
   if (!pending) return false;
   const who = user ? `"${user}"` : 'the user';
-  pending.resolve({ approved, reason: approved ? `Approved by ${who}.` : `Denied by ${who}.` });
+  pending.resolve({ approved, reason: approved ? `Approved by ${who}.` : `Denied by ${who}.`, ...(user ? { decidedBy: user } : {}) });
   return true;
 }

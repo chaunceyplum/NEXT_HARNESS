@@ -33,6 +33,15 @@ vi.mock('@/lib/execution-store', () => ({
   },
 }));
 
+const audited: Array<{ type: string; actor: string }> = [];
+vi.mock('@/lib/audit-log', () => ({
+  auditReads: () => false,
+  recordAudit: async (events: Array<{ type: string; actor: string }>) => {
+    audited.push(...events);
+  },
+}));
+vi.mock('@/lib/online-judge', () => ({ shouldJudgeRun: () => false, judgeRun: async () => true }));
+
 const { POST } = await import('./route');
 const events = await import('../runs/[id]/events/route');
 const cancel = await import('../runs/[id]/cancel/route');
@@ -73,6 +82,7 @@ describe('POST /api/build as a job', () => {
 
     const replay = await (await events.GET(new Request('http://x'), params(start.runId))).text();
     expect(replay.trim().split('\n').map((l) => JSON.parse(l).type)).toEqual(['run_start', 'step', 'done']);
+    expect(audited).toContainEqual(expect.objectContaining({ type: 'run_start', actor: 'anonymous' }));
   });
 
   it('stops only when cancelled, saving the run as failed with its steps', async () => {

@@ -5,6 +5,8 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import RunFeedback from '@/components/RunFeedback';
+import AuditTrail from '@/components/AuditTrail';
 
 /** Status badge colors; the badge text always carries the status too. */
 const STATUS_BADGE: Record<string, string> = {
@@ -209,6 +211,10 @@ export default function RunDetailPage() {
                 stopReason={record.result.stopReason}
               />
             )}
+
+            {record.status === 'completed' && <RunFeedback runId={record.id} />}
+
+            <AuditTrail runId={record.id} />
           </>
         )}
       </div>

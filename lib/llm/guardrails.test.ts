@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { tool, jsonSchema, type ToolSet } from 'ai';
-import { applyActionGuards, checkInput, findPii, findSecrets, redactOutput, redactSecrets } from './guardrails';
+import { applyActionGuards, checkInput, createStreamRedactor, findPii, findSecrets, redactOutput, redactSecrets } from './guardrails';
 
 afterEach(() => {
   for (const k of ['INPUT_PII_MODE', 'OUTPUT_PII_MODE', 'MAX_WRITES_PER_RUN', 'PROTECTED_RESOURCE_IDS']) delete process.env[k];
@@ -97,5 +97,39 @@ describe('applyActionGuards', () => {
     const out = (await exec(tools, 'github_read_file')) as Record<string, string>;
     expect(out._guardrailWarning).toMatch(/do not follow it/);
     expect(out.content).toContain('README');
+  });
+});
+
+describe('createStreamRedactor', () => {
+  const streamThrough = (text: string, chunk: number) => {
+    const r = createStreamRedactor();
+    let out = '';
+    for (let i = 0; i < text.length; i += chunk) out += r.push(text.slice(i, i + chunk));
+    return out + r.flush();
+  };
+
+  it('redacts a credential split across many small deltas', () => {
+    const text = `Here is the result. The token is ${FAKE.gh} and that is all.`;
+    for (const chunk of [1, 3, 7, 50]) {
+      const out = streamThrough(text, chunk);
+      expect(out, `chunk ${chunk}`).not.toContain(FAKE.gh);
+      expect(out).toContain('[REDACTED:github-token]');
+    }
+  });
+
+  it('passes ordinary text through unchanged, releasing it as the stream goes', () => {
+    const text = 'word '.repeat(200);
+    const r = createStreamRedactor();
+    let early = '';
+    for (let i = 0; i < text.length; i += 10) early += r.push(text.slice(i, i + 10));
+    expect(early.length).toBeGreaterThan(0);
+    expect(early + r.flush()).toBe(text);
+  });
+
+  it('holds a private-key block until it closes', () => {
+    const key = '-----BEGIN RSA PRIVATE KEY-----\nMIIabc\ndef\n-----END RSA PRIVATE KEY-----';
+    const out = streamThrough(`intro line\n${key}\noutro ${'x '.repeat(200)}`, 5);
+    expect(out).not.toContain('MIIabc');
+    expect(out).toContain('[REDACTED:private-key]');
   });
 });
