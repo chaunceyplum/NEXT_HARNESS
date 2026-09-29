@@ -14,7 +14,7 @@
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
-import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult } from './rag-judge';
+import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
 export interface McpToolDefinition {
@@ -93,12 +93,12 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
 }
 
 /** Local tools first (no network round-trip), then the MCP server — with the pre-commit syntax check gating msb_github_commit_code either way. */
-async function callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+async function callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (isLocalTool(toolName)) {
-    return executeLocalTool(toolName, args);
+    return executeLocalTool(toolName, args, signal);
   }
   await validateBeforeCommit(toolName, args);
-  return callMcpTool(toolName, args);
+  return callMcpTool(toolName, args, { signal });
 }
 
 /** Force the next getMcpToolCatalog() call to refetch (e.g. after MCP redeploy). */
@@ -187,10 +187,31 @@ export function isRateLimitError(message: string): boolean {
   return RATE_LIMIT_ERROR_PATTERNS.some((re) => re.test(message));
 }
 
-/** Back-off before transient retry N (1-based): 500ms, 1s, 2s…; longer for rate limits. */
-function retryDelayMs(attempt: number, message: string): number {
+/**
+ * Back-off before transient retry N (1-based): 500ms, 1s, 2s…; longer for
+ * rate limits. Jittered to 50–100% of that, so concurrent runs that failed
+ * together don't all retry in the same instant.
+ */
+export function retryDelayMs(attempt: number, message: string, random: () => number = Math.random): number {
   const base = isRateLimitError(message) ? 2_000 : 500;
-  return base * 2 ** (attempt - 1);
+  const ceiling = base * 2 ** (attempt - 1);
+  return Math.round(ceiling * (0.5 + random() * 0.5));
+}
+
+/** setTimeout as a promise that rejects early (with the abort reason) if `signal` fires. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -226,6 +247,51 @@ export interface GroundingState {
 
 export function createGroundingState(): GroundingState {
   return { validationFailures: new Map(), lookups: new Map() };
+}
+
+/**
+ * One knowledge-search's quality judgment, collected out-of-band. The judge
+ * (rag-judge.ts) is monitoring data the agent never acts on, so it no longer
+ * rides on the tool result the model sees — it's scored off the critical path
+ * and lands here instead, to be persisted with the run record.
+ */
+export interface RagJudgmentEntry {
+  toolName: string;
+  query: string;
+  judgment: RagJudgment;
+}
+
+/**
+ * Per-run collector for RAG judgments produced by the fire-and-forget judge.
+ *
+ * A judgeable knowledge search kicks off judgeRagResult() WITHOUT awaiting it
+ * (so the tool call returns to the agent immediately), and tracks the pending
+ * promise here. drain() awaits every outstanding judgment and returns those
+ * that produced a verdict — runAgent calls it once the loop finishes, so the
+ * judgments are captured before the run resolves without ever sitting on a
+ * tool call's critical path. One per buildAiTools() call, i.e. per agent run,
+ * mirroring GroundingState.
+ */
+export interface RagJudgmentSink {
+  /** Track a fire-and-forget judgment. Never rejects — a failed judge just contributes nothing. */
+  track(promise: Promise<RagJudgmentEntry | undefined>): void;
+  /** Await all tracked judgments and return the ones that produced a verdict. */
+  drain(): Promise<RagJudgmentEntry[]>;
+}
+
+export function createRagJudgmentSink(): RagJudgmentSink {
+  const pending: Promise<RagJudgmentEntry | undefined>[] = [];
+  return {
+    track(promise) {
+      // Swallow rejections here so a judge failure can never surface as an
+      // unhandled rejection; drain() filters the undefined out.
+      pending.push(promise.catch(() => undefined));
+    },
+    async drain() {
+      const settled = await Promise.all(pending);
+      return settled.filter((e): e is RagJudgmentEntry => e !== undefined);
+    },
+  };
 }
 
 /**
@@ -322,17 +388,31 @@ export function capRagResult(result: unknown): unknown {
  * truncated string) can't carry the judgment metadata too — the truncation
  * note matters more there than the judgment would.
  */
-async function withRagJudgment(toolName: string, args: Record<string, unknown>, result: unknown): Promise<unknown> {
-  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return result;
-  const query = typeof args.query === 'string' ? args.query : undefined;
-  if (!query || !shouldJudgeLiveResult(result)) return capRagResult(result);
-
-  const judgment = await judgeRagResult(query, result);
+function withRagJudgment(
+  toolName: string,
+  args: Record<string, unknown>,
+  result: unknown,
+  sink?: RagJudgmentSink
+): unknown {
   const capped = capRagResult(result);
-  if (!judgment) return capped;
-  if (capped && typeof capped === 'object' && !Array.isArray(capped)) {
-    return { ...(capped as Record<string, unknown>), _ragJudgment: judgment };
-  }
+  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return capped;
+  const query = typeof args.query === 'string' ? args.query : undefined;
+  if (!query || !shouldJudgeLiveResult(result)) return capped;
+
+  // Fire-and-forget: kick off the judge on the UNCAPPED result (it has its
+  // own size cap) WITHOUT awaiting, so the tool call returns to the agent
+  // immediately instead of waiting a whole extra model round trip. It's
+  // monitoring data the agent doesn't act on, so it no longer rides on the
+  // result the model sees.
+  //
+  // judgeRagResult never rejects (it swallows model/credential failures and
+  // resolves undefined — see rag-judge.ts), so this promise is safe to leave
+  // untracked when no sink is attached. A sink, when present, collects the
+  // verdict so runAgent can persist it with the run record.
+  const judged = judgeRagResult(query, result).then((judgment) =>
+    judgment ? { toolName, query, judgment } : undefined
+  );
+  sink?.track(judged);
   return capped;
 }
 
@@ -352,6 +432,12 @@ export interface RetryAttemptRecord {
 export interface BuildAiToolsOptions {
   /** Extra attempts after a transient (5xx/timeout/429) failure, with back-off. 0 disables retrying. */
   maxRetries?: number;
+  /**
+   * Per-run collector for fire-and-forget RAG judgments. When provided,
+   * judgeable knowledge searches are scored off the critical path and the
+   * verdicts land here (see RagJudgmentSink). Omit to skip live judging.
+   */
+  ragJudgmentSink?: RagJudgmentSink;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
@@ -361,6 +447,10 @@ export interface ExecuteMcpToolWithRetryOptions {
   availableNames: Set<string>;
   /** Per-run lookup state (see GroundingState). A fresh one is used if omitted. */
   grounding?: GroundingState;
+  /** The run was stopped: abort the in-flight request and skip any remaining retries. */
+  abortSignal?: AbortSignal;
+  /** Per-run RAG judgment collector (see RagJudgmentSink). Omit to skip live judging. */
+  ragJudgmentSink?: RagJudgmentSink;
 }
 
 /**
@@ -395,13 +485,13 @@ export async function executeMcpToolWithRetry(
   args: Record<string, unknown>,
   opts: ExecuteMcpToolWithRetryOptions
 ): Promise<unknown> {
-  const { maxRetries, availableNames } = opts;
+  const { maxRetries, availableNames, abortSignal } = opts;
   const grounding = opts.grounding ?? createGroundingState();
   const isRagTool = RAG_TOOLS.has(toolName);
 
   if (isRagTool || maxRetries <= 0) {
-    const result = await callTool(toolName, args);
-    return isRagTool ? withRagJudgment(toolName, args, result) : result;
+    const result = await callTool(toolName, args, abortSignal);
+    return isRagTool ? withRagJudgment(toolName, args, result, opts.ragJudgmentSink) : result;
   }
 
   const attempts: RetryAttemptRecord[] = [];
@@ -409,7 +499,7 @@ export async function executeMcpToolWithRetry(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const result = await callTool(toolName, args);
+      const result = await callTool(toolName, args, abortSignal);
       if (attempts.length === 0) return result;
       // Succeeded after retrying — attach retry history without
       // disturbing the shape callers rely on for reading fields directly
@@ -420,6 +510,8 @@ export async function executeMcpToolWithRetry(
       return result;
     } catch (err) {
       lastError = err;
+      // Stopped by the caller — not a failure of the tool, never retried.
+      if (abortSignal?.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
 
       // Tier 1: permanent auth/permission error — fail immediately.
@@ -446,7 +538,7 @@ export async function executeMcpToolWithRetry(
             const key = `${ragTool}\u0000${toolName}\u0000${message}`;
             let lookup = grounding.lookups.get(key);
             if (!lookup) {
-              lookup = callMcpTool(ragTool, { query });
+              lookup = callMcpTool(ragTool, { query }, { signal: abortSignal });
               grounding.lookups.set(key, lookup);
               lookup.catch(() => grounding.lookups.delete(key)); // don't cache a failed lookup
             }
@@ -465,7 +557,7 @@ export async function executeMcpToolWithRetry(
       // Tier 3: transient error — back off and retry.
       attempts.push({ attempt: attempt + 1, error: message });
       if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt + 1, message)));
+        await sleep(retryDelayMs(attempt + 1, message), abortSignal);
       }
     }
   }
@@ -529,11 +621,11 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       // MCP inputSchema is already JSON Schema; jsonSchema() takes it as-is
       // without requiring a hand-written Zod schema per tool.
       inputSchema: jsonSchema(def.inputSchema as never),
-      execute: async (input: unknown) => {
+      execute: async (input: unknown, { abortSignal }) => {
         const result = await executeMcpToolWithRetry(
           def.name,
           (input as Record<string, unknown>) ?? {},
-          { maxRetries, availableNames, grounding }
+          { maxRetries, availableNames, grounding, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
         );
         return capToolResult(def.name, result);
       },

@@ -9,15 +9,24 @@ export interface AgentTraceProps {
   finalText: string;
   /** Chat-model usage for this run. Omit for runs persisted before token tracking was added. */
   usage?: TokenUsage;
+  /** Set when a run budget or loop detection cut the run short. */
+  stopReason?: string;
 }
 
+const STOP_REASON_LABEL: Record<string, string> = {
+  'token-budget': 'token budget reached',
+  'cost-budget': 'cost ceiling reached',
+  'time-budget': 'time limit reached',
+  'loop-detected': 'repeated the same tool call',
+};
+
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage }: AgentTraceProps) {
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason }: AgentTraceProps) {
   // "stop" means the model decided it was done. "running" means we're still
   // streaming. Anything else (most commonly "tool-calls") means the run was
   // cut off at the step limit, and finalText is not a real conclusion.
   const isRunning = finishReason === 'running';
-  const isIncomplete = !isRunning && finishReason !== 'stop';
+  const isIncomplete = !isRunning && (finishReason !== 'stop' || Boolean(stopReason));
 
   const hasUsage = usage && (usage.inputTokens != null || usage.outputTokens != null || usage.totalTokens != null);
 
@@ -88,18 +97,36 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
 
       <div className={`p-4 rounded-lg border-l-4 ${isIncomplete ? 'bg-amber-50 border-amber-500' : isRunning ? 'bg-blue-50 border-blue-400' : 'bg-green-50 border-green-500'}`}>
         <p className={`font-medium ${isIncomplete ? 'text-amber-800' : isRunning ? 'text-blue-700' : 'text-green-800'}`}>
-          {isRunning ? 'Agent is working…' : isIncomplete ? `Incomplete — stopped early (${finishReason})` : 'Final Answer'}
+          {isRunning
+            ? 'Agent is working…'
+            : isIncomplete
+              ? `Incomplete — stopped early (${stopReason ? STOP_REASON_LABEL[stopReason] ?? stopReason : finishReason})`
+              : 'Final Answer'}
         </p>
-        {isIncomplete && (
+        {isIncomplete && stopReason && (
+          <p className="text-amber-700 text-xs mt-1">
+            A run limit stopped the agent and it was asked to wrap up — the text below summarises partial work.
+          </p>
+        )}
+        {isIncomplete && !stopReason && (
           <p className="text-amber-700 text-xs mt-1">
             {finishReason === 'tool-calls'
               ? 'The agent hit its step limit while still trying to call tools — the text below is not a finished answer. Raise "Max steps" and re-run for a complete result.'
               : 'The run ended before the agent reached a natural stopping point — treat the text below as a fragment, not a conclusion.'}
           </p>
         )}
-        {!isRunning && (
-          <p className={`text-sm mt-1 whitespace-pre-wrap ${isIncomplete ? 'text-amber-900' : 'text-green-900'}`}>
+        {/* TASK 1: while running, finalText carries the live streamed text (if
+            any yet). Once done it's the authoritative final answer. */}
+        {(!isRunning || finalText) && (
+          <p
+            className={`text-sm mt-1 whitespace-pre-wrap ${
+              isIncomplete ? 'text-amber-900' : isRunning ? 'text-blue-900' : 'text-green-900'
+            }`}
+          >
             {finalText}
+            {isRunning && finalText && (
+              <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 align-text-bottom animate-pulse" />
+            )}
           </p>
         )}
       </div>

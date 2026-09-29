@@ -5,7 +5,24 @@
  * on the Lambda backend using HTTP POST requests.
  */
 
+import { envTimeoutMs, fetchWithTimeout } from './fetch-timeout';
+
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT_URL;
+
+/**
+ * Per-request deadlines. API Gateway cuts an integration off at ~29s by
+ * default, so 60s for a tool call only matters if the stage allows longer;
+ * it's there so a hung connection can't stall a run indefinitely.
+ */
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
+const DEFAULT_LIST_TIMEOUT_MS = 30_000;
+
+export interface McpCallOptions {
+  /** Aborts the request (e.g. the agent run was stopped). */
+  signal?: AbortSignal;
+  /** Overrides MCP_TOOL_TIMEOUT_MS for this call. */
+  timeoutMs?: number;
+}
 
 /**
  * A bare "Forbidden" with no JSON error body is the standard response from
@@ -57,7 +74,8 @@ export interface MCPResponse<T = unknown> {
  */
 export async function callMcpTool(
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  opts: McpCallOptions = {}
 ): Promise<unknown> {
   if (!MCP_ENDPOINT) {
     throw new Error(
@@ -78,20 +96,26 @@ export async function callMcpTool(
   };
 
   try {
-    const response = await fetch(MCP_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders(),
+    const result = (await fetchWithTimeout(
+      MCP_ENDPOINT,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(await describeError(response));
-    }
-
-    const result: MCPResponse = await response.json();
+      {
+        timeoutMs: opts.timeoutMs ?? envTimeoutMs('MCP_TOOL_TIMEOUT_MS', DEFAULT_TOOL_TIMEOUT_MS),
+        label: `MCP tool ${toolName}`,
+        signal: opts.signal,
+      },
+      async (response) => {
+        if (!response.ok) throw new Error(await describeError(response));
+        return response.json();
+      }
+    )) as MCPResponse;
 
     // Handle JSON-RPC error response
     if (result.error) {
@@ -166,20 +190,22 @@ export async function listMcpTools(): Promise<unknown> {
   };
 
   try {
-    const response = await fetch(MCP_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders(),
+    const result = (await fetchWithTimeout(
+      MCP_ENDPOINT,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-
-    if (!response.ok) {
-      throw new Error(await describeError(response));
-    }
-
-    const result: MCPResponse = await response.json();
+      { timeoutMs: envTimeoutMs('MCP_LIST_TIMEOUT_MS', DEFAULT_LIST_TIMEOUT_MS), label: 'MCP tools/list' },
+      async (response) => {
+        if (!response.ok) throw new Error(await describeError(response));
+        return response.json();
+      }
+    )) as MCPResponse;
 
     if (result.error) {
       throw new Error(
