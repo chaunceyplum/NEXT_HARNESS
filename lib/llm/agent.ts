@@ -41,6 +41,14 @@ import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
+import {
+  budgetFinalNote,
+  resolveBudget,
+  RunBudgetTracker,
+  type BudgetStopReason,
+  type BudgetUsage,
+  type RunBudgetLimits,
+} from './run-budget';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -59,6 +67,13 @@ export interface AgentRunResult {
   usage: TokenUsage;
   /** Model registry key that actually produced the result. Differs from the requested one after a same-tier fallback. */
   modelKey: string;
+  /**
+   * Set when a run budget or loop detection cut the run short (run-budget.ts).
+   * The final text is then a wrap-up of partial work, not a finished answer.
+   */
+  stopReason?: BudgetStopReason;
+  /** Tokens, estimated cost, and wall-clock time the successful attempt used. */
+  budgetUsage: BudgetUsage;
 }
 
 export interface RunAgentOptions {
@@ -114,6 +129,8 @@ export interface RunAgentOptions {
    * Per-request value takes precedence over the env var.
    */
   thinkingBudget?: number;
+  /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
+  budget?: Partial<RunBudgetLimits>;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -228,6 +245,9 @@ function mergeProviderOptions(...parts: Array<ProviderOptions | undefined>): Pro
   }
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
+
+/** How far past the time budget a run may go (to finish the step in flight and wrap up) before it's aborted. */
+const HARD_TIMEOUT_GRACE_MS = 5 * 60_000;
 
 /** Appended on the final step for history-bound models, which can't drop the tools array. */
 const FINAL_STEP_NOTE =
@@ -488,6 +508,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // TASK 8: step counter for onStepEnd → onStep mapping. Reset per model
   // attempt, since a fallback restarts the run from scratch.
   let stepIndex = 0;
+  const runStartedAt = Date.now();
+  const budgetLimits = resolveBudget(opts.budget);
+  // Per model attempt, like stepIndex (a fallback restarts the run).
+  let budget = new RunBudgetTracker(budgetLimits, modelKey || getDefaultModelKey(), runStartedAt);
+  let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
   let attemptHadSideEffects = false;
@@ -495,6 +520,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const callModel = (resolvedModelKey: string) => {
     stepIndex = 0;
     attemptHadSideEffects = false;
+    budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt);
+    stopReason = undefined;
+    // Step index at which a budget forced the wrap-up step; the loop stops after it.
+    let forcedAt: number | undefined;
 
     // TASK 10: resolve thinking config for this model + request combination
     const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget);
@@ -514,20 +543,38 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
         messages: [{ role: 'user', content: userInput }],
         tools,
-        stopWhen: stepCountIs(maxSteps),
+        stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
         abortSignal: opts.abortSignal,
+        // Hard backstop for the time budget, which is otherwise checked
+        // between steps: one step that hangs (or waits on an approval) past
+        // it still gets cut off, with room left for the wrap-up step.
+        ...(budgetLimits.maxDurationMs !== undefined
+          ? { timeout: { totalMs: budgetLimits.maxDurationMs + HARD_TIMEOUT_GRACE_MS - (Date.now() - runStartedAt) } }
+          : {}),
         // TASK 10 (thinking) + TASK 2 (server-side context editing)
         ...(providerOptions ? { providerOptions } : {}),
         ...(toolApproval ? { toolApproval } : {}),
         prepareStep: ({ steps, messages }) => {
-          const isLastStep = steps.length >= maxSteps - 1;
+          // Run budgets / loop detection (run-budget.ts): a hit limit turns
+          // this step into the wrap-up step, and repeated calls get a warning.
+          const exceeded = budget.exceeded();
+          if (exceeded && forcedAt === undefined) {
+            forcedAt = steps.length;
+            stopReason = exceeded;
+          }
+          const isLastStep = steps.length >= maxSteps - 1 || forcedAt !== undefined;
+          const notes = budget.takeWarnings();
+          if (exceeded) notes.push(budgetFinalNote(exceeded));
+          else if (historyBound && isLastStep) notes.push(FINAL_STEP_NOTE);
+          const withNotes = (base: ModelMessage[]): ModelMessage[] =>
+            notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
 
           // History-bound models: append-only. Old tool results are cleared
           // server-side (providerOptions above), and the last step keeps the
           // tools array — toolChoice 'none' makes the providers drop it — and
           // instead appends an instruction after the latest tool results.
           if (historyBound) {
-            return isLastStep ? { messages: [...messages, { role: 'user' as const, content: FINAL_STEP_NOTE }] } : {};
+            return notes.length ? { messages: withNotes(messages) } : {};
           }
 
           // TASK 2: compress tool results from steps older than the threshold
@@ -540,14 +587,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           const compressedMessages = compressOldToolMessages(messages, steps.length);
 
           // TASK 3: force text-only on the final allowed step
+          const nextMessages = notes.length ? withNotes(compressedMessages ?? messages) : compressedMessages;
           return {
             toolChoice: isLastStep ? 'none' : 'auto',
-            ...(compressedMessages ? { messages: compressedMessages } : {}),
+            ...(nextMessages ? { messages: nextMessages } : {}),
           };
         },
         // TASK 8: fire onStep callback after each step so the route can stream it
         onStepEnd: (step) => {
           const trace = toStepTrace(step, stepIndex++);
+          budget.recordStep(
+            step.usage,
+            step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))
+          );
           // Only calls that actually ran count — a denied call never executed.
           for (const part of step.content) {
             if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
@@ -609,6 +661,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     toolsConsidered,
     finishReason: result.finishReason,
     modelKey: resolvedModelKey,
+    ...(stopReason ? { stopReason } : {}),
+    budgetUsage: budget.usage(),
     usage: {
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,

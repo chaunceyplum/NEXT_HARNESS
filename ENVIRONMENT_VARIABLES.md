@@ -219,6 +219,21 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Run budgets (`lib/llm/run-budget.ts`)
+
+Hard limits enforced in code on top of the step cap. When one is hit, the
+next step is forced to be a written wrap-up (no more tool calls), and the
+run's `stopReason` is set so the UI flags the answer as partial.
+
+| Variable | Default | Limit |
+| --- | --- | --- |
+| `RUN_MAX_TOKENS` | `1500000` | Input + output tokens across all steps |
+| `RUN_MAX_COST_USD` | none | Estimated cost via `lib/llm/pricing.ts` (ignored for unpriced models) |
+| `RUN_TIMEOUT_MS` | `1800000` | Wall-clock time; checked between steps, hard abort 5 minutes later |
+| `RUN_MAX_IDENTICAL_CALLS` | `3` | Same tool with identical arguments: the model is warned at this count, and the run stops if it repeats again |
+
+A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be

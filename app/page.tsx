@@ -14,6 +14,7 @@ interface RunState {
   finalText: string;
   finishReason: string;
   usage: TokenUsage;
+  stopReason?: string;
   done: boolean;
   error?: string;
   /** Destructive tool calls the run is paused on, waiting for Approve/Deny. */
@@ -164,6 +165,7 @@ export default function Home() {
                   finalText: event.finalText,
                   finishReason: event.finishReason,
                   usage: event.usage,
+                  stopReason: event.stopReason,
                   done: true,
                 }
               : prev
@@ -375,6 +377,7 @@ export default function Home() {
               finishReason={runState.done ? runState.finishReason : 'running'}
               finalText={runState.done ? runState.finalText : ''}
               usage={runState.done ? runState.usage : undefined}
+              stopReason={runState.done ? runState.stopReason : undefined}
             />
           </div>
         )}
