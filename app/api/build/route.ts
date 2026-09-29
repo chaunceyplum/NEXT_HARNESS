@@ -37,6 +37,7 @@ import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
 import { checkInput, redactOutput } from '@/lib/llm/guardrails';
 import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
+import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -319,7 +320,14 @@ export async function POST(request: Request): Promise<Response> {
             ragJudgments: agentResult.ragJudgments,
           },
         };
-        saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
+        saveExecution(completedRecord)
+          .then(() => {
+            // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.
+            if (shouldJudgeRun()) {
+              void judgeRun({ runId, task: req.description, answer: agentResult.finalText, steps: agentResult.steps });
+            }
+          })
+          .catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
       } catch (error) {
         const cancelled = abort.signal.aborted;
         const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
