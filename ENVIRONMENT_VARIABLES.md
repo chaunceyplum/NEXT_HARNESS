@@ -219,6 +219,20 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Write safety and read caching (`lib/llm/tool-call-cache.ts`)
+
+- **No ambiguous write retries:** a write or destructive call is retried
+  only after an error that shows the server refused it (429, 503,
+  throttling, refused connection). After a timeout or other 5xx the change
+  may already have been applied, so the model gets an error telling it to
+  check the current state first.
+- **Per-run de-duplication:** an identical write (same tool, same
+  arguments) that already succeeded in the run isn't sent again. The model
+  gets the earlier result back.
+- **Read cache:** identical reads share a result for `READ_CACHE_TTL_MS`
+  (default `60000`; `0` disables it). The cache is process-wide and any
+  write clears it. Credential/secret reads are never cached.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
