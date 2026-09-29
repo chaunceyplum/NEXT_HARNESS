@@ -16,6 +16,7 @@ interface RunState {
   streamingText: string;
   finishReason: string;
   usage: TokenUsage;
+  stopReason?: string;
   done: boolean;
   error?: string;
   /** Tool calls the run is paused on, waiting for Approve/Deny. */
@@ -176,6 +177,7 @@ export default function Home() {
                   streamingText: '',
                   finishReason: event.finishReason,
                   usage: event.usage,
+                  stopReason: event.stopReason,
                   done: true,
                 }
               : prev
@@ -389,6 +391,7 @@ export default function Home() {
               // replaces it with the authoritative final text.
               finalText={runState.done ? runState.finalText : runState.streamingText}
               usage={runState.done ? runState.usage : undefined}
+              stopReason={runState.done ? runState.stopReason : undefined}
             />
           </div>
         )}

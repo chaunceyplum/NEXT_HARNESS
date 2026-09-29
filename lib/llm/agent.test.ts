@@ -115,6 +115,7 @@ beforeEach(() => {
   executed = [];
   delete process.env.TOOL_DRY_RUN;
   delete process.env.BUILD_POLICY;
+  delete process.env.RUN_MAX_TOKENS;
   delete process.env.ROLLOUT_MODE;
 });
 
@@ -256,6 +257,52 @@ describe('runAgent loop shape', () => {
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
     expect(calls[0].providerOptions?.anthropic).toBeUndefined();
+  });
+});
+
+describe('runAgent run budgets', () => {
+  const listSame: Scripted = { toolCall: { toolName: 'adobe_list_segments', input: { id: 'same' } } };
+  const lastPromptText = () => JSON.stringify(calls[calls.length - 1].prompt);
+
+  it('warns the model about a repeated identical call, then stops the loop and asks for a wrap-up', async () => {
+    // The mock model ignores toolChoice, so the script itself answers on the wrap-up step.
+    script = [listSame, listSame, listSame, listSame, { text: 'wrapped up' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+
+    // Step 4's prompt carries the warning; step 5 is the forced wrap-up.
+    expect(JSON.stringify(calls[3].prompt)).toContain('3 times with identical arguments');
+    expect(calls[4].toolChoice).toEqual({ type: 'none' });
+    expect(lastPromptText()).toContain('kept repeating the same tool call');
+    expect(result.stopReason).toBe('loop-detected');
+    expect(executed).toHaveLength(4);
+    expect(calls).toHaveLength(5);
+  });
+
+  it('stops at the token budget with a partial-result flag instead of failing', async () => {
+    script = [listSame, { toolCall: { toolName: 'adobe_list_segments', input: { id: 'b' } } }, listSame, { text: 'partial' }];
+    // Each scripted step reports 15 tokens.
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', budget: { maxTokens: 20 } });
+
+    expect(result.stopReason).toBe('token-budget');
+    expect(calls).toHaveLength(3);
+    expect(calls[2].toolChoice).toEqual({ type: 'none' });
+    expect(lastPromptText()).toContain('token budget');
+    expect(result.budgetUsage.tokens).toBe(45);
+  });
+
+  it('on a history-bound model, keeps the tools array and appends the wrap-up note', async () => {
+    script = [listSame, listSame, { text: 'partial' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:bound', budget: { maxTokens: 20 } });
+    expect(result.stopReason).toBe('token-budget');
+    expect(calls[2].tools?.length).toBeGreaterThan(0);
+    expect(lastPromptText()).toContain('token budget');
+  });
+
+  it('leaves a run inside its limits alone', async () => {
+    script = [listSame, { text: 'done' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    expect(result.stopReason).toBeUndefined();
+    expect(result.finalText).toBe('done');
   });
 });
 

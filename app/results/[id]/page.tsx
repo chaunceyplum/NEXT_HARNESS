@@ -150,6 +150,7 @@ export default function RunDetailPage() {
                 finishReason={record.result.finishReason}
                 finalText={record.result.finalText}
                 usage={record.result.usage}
+                stopReason={record.result.stopReason}
               />
             )}
           </>

@@ -55,6 +55,10 @@ export interface BuildRequest {
    * the server default.
    */
   maxSteps?: number;
+  /** Token budget for this run. Can only tighten RUN_MAX_TOKENS. */
+  maxTokens?: number;
+  /** Estimated-cost ceiling (USD) for this run. Can only tighten RUN_MAX_COST_USD. */
+  maxCostUsd?: number;
   /**
    * TASK 9: Tool policy. 'read-only' removes all write and destructive tools
    * so the model structurally cannot call them. Can only tighten the
@@ -103,6 +107,10 @@ export interface BuildResponse {
   toolsConsidered: string[];
   finishReason: string;
   usage: TokenUsage;
+  /** Set when a run budget or loop detection cut the run short (lib/llm/run-budget.ts). */
+  stopReason?: string;
+  /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
+  budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
   /**
    * Quality judgments for a sample of the run's knowledge searches, scored
    * off the critical path by the RAG judge. Absent on runs from before this
@@ -146,6 +154,8 @@ export type BuildStreamEvent =
       /** Model that produced the result — differs from the requested one after a fallback. */
       modelKey: string;
       toolsConsidered: string[];
+      stopReason?: string;
+      budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
     }
   | { type: 'error'; error: string; code?: string };
 

@@ -11,7 +11,8 @@
  *   {"type":"step","step":{...}}           // one per agent step, as it finishes
  *   {"type":"step","step":{...}}
  *   ...
- *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...]}
+ *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...],
+ *    "stopReason":"token-budget"?,"budgetUsage":{"tokens":...,"costUsd":...,"durationMs":...}}
  *
  * When a tool call needs a human decision (lib/llm/approval-policy.ts; POST it
  * to /api/build/approve — the run waits until then, or until it times out):
@@ -127,6 +128,20 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     }
   }
 
+  if (b.maxTokens !== undefined && (typeof b.maxTokens !== 'number' || !Number.isInteger(b.maxTokens) || b.maxTokens < 1_000)) {
+    return {
+      ok: false,
+      error: { error: '"maxTokens" must be an integer of at least 1000', code: 'VALIDATION_ERROR', details: { min: 1_000 } },
+      status: 400,
+    };
+  }
+  if (b.maxCostUsd !== undefined && (typeof b.maxCostUsd !== 'number' || !(b.maxCostUsd > 0))) {
+    return {
+      ok: false,
+      error: { error: '"maxCostUsd" must be a positive number', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
   if (b.rolloutMode !== undefined && !parseRolloutMode(b.rolloutMode)) {
     return {
       ok: false,
@@ -143,6 +158,8 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
       maxSteps: typeof b.maxSteps === 'number' ? b.maxSteps : undefined,
+      maxTokens: typeof b.maxTokens === 'number' ? b.maxTokens : undefined,
+      maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
       rolloutMode: parseRolloutMode(b.rolloutMode),
@@ -211,6 +228,7 @@ export async function POST(request: Request): Promise<Response> {
           toolRetries: req.toolRetries,
           toolShortlistSize: req.toolShortlistSize,
           maxSteps: req.maxSteps,
+          budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
           policy: req.policy,
           dryRun: req.dryRun,
           rolloutMode: req.rolloutMode,
@@ -245,6 +263,8 @@ export async function POST(request: Request): Promise<Response> {
           runId,
           modelKey: agentResult.modelKey,
           toolsConsidered: agentResult.toolsConsidered,
+          stopReason: agentResult.stopReason,
+          budgetUsage: agentResult.budgetUsage,
         });
 
         close();
@@ -267,6 +287,8 @@ export async function POST(request: Request): Promise<Response> {
             toolsConsidered: agentResult.toolsConsidered,
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
+            stopReason: agentResult.stopReason,
+            budgetUsage: agentResult.budgetUsage,
             ragJudgments: agentResult.ragJudgments,
           },
         };
