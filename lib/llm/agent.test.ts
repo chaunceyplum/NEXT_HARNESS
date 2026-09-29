@@ -324,6 +324,17 @@ describe('runAgent token streaming (TASK 1)', () => {
   });
 });
 
+describe('runAgent with model "auto"', () => {
+  it('routes a clear change request by rules and records the decision, without pinning', async () => {
+    script = [{ text: 'done' }];
+    const routes: unknown[] = [];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', onRoute: (r) => routes.push(r) });
+    expect(result.route).toMatchObject({ category: 'change', via: 'rules', tier: 'balanced', modelKey: 'test:plain' });
+    expect(routes).toHaveLength(1);
+    expect(result.modelKey).toBe('test:plain');
+  });
+});
+
 describe('runAgent tool outcomes (audit log feed)', () => {
   it('reports each call with its effective tool, level, outcome and approval reason', async () => {
     script = [

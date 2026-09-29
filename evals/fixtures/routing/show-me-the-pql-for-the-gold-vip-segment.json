@@ -1,0 +1,5 @@
+{
+  "id": "show-me-the-pql-for-the-gold-vip-segment",
+  "request": "Show me the PQL for the Gold VIP segment",
+  "expected": "lookup"
+}

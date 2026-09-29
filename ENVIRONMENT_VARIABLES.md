@@ -177,6 +177,31 @@ OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
 OPENAI_BALANCED_MODEL_ID=gpt-4o
 ```
 
+### Model routing (optional — `lib/llm/model-router.ts`)
+
+Pick **Auto** in the model picker (or send `"model": "auto"`) to route each
+request to a model tier instead of using one model for everything:
+
+- Clear cases are decided by keyword rules at no cost. The rest go to one
+  structured call on the cheap tier, which returns lookup, change, build or
+  unclear.
+- Default mapping: lookup → cheap, change → balanced, build → expensive,
+  on the default model's provider (unhealthy models skipped).
+- **unclear** → the run returns the router's clarifying question instead
+  of guessing. Low confidence → the default model.
+- A request that names a specific model is never re-routed. Routed runs
+  keep the same-tier fallback.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_ROUTING` | `false` | `true` makes Auto the default when a request names no model |
+| `ROUTE_TIERS` | `{"lookup":"cheap","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
+| `ROUTER_MIN_CONFIDENCE` | `0.6` | Below this, use the default model |
+| `ROUTER_CLARIFY` | `true` | `false` sends unclear requests to the default model instead of asking |
+
+Measure routing accuracy with `npm run eval:routing` (labelled requests in
+`evals/fixtures/routing/`).
+
 ### `MODEL_REGISTRY_JSON` (optional escape hatch)
 
 Add arbitrary extra entries (more Bedrock foundation models — Llama, Nova,
