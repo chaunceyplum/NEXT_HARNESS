@@ -115,9 +115,18 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
               : 'The run ended before the agent reached a natural stopping point — treat the text below as a fragment, not a conclusion.'}
           </p>
         )}
-        {!isRunning && (
-          <p className={`text-sm mt-1 whitespace-pre-wrap ${isIncomplete ? 'text-amber-900' : 'text-green-900'}`}>
+        {/* TASK 1: while running, finalText carries the live streamed text (if
+            any yet). Once done it's the authoritative final answer. */}
+        {(!isRunning || finalText) && (
+          <p
+            className={`text-sm mt-1 whitespace-pre-wrap ${
+              isIncomplete ? 'text-amber-900' : isRunning ? 'text-blue-900' : 'text-green-900'
+            }`}
+          >
             {finalText}
+            {isRunning && finalText && (
+              <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 align-text-bottom animate-pulse" />
+            )}
           </p>
         )}
       </div>

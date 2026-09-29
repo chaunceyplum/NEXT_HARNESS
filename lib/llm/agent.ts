@@ -33,9 +33,9 @@
  *      RunAgentOptions.approveTool; without an approver they're denied.
  */
 
-import { generateText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
+import { streamText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
-import { buildAiTools, getMcpToolCatalog } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
@@ -49,6 +49,7 @@ import {
   type BudgetUsage,
   type RunBudgetLimits,
 } from './run-budget';
+import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -74,6 +75,14 @@ export interface AgentRunResult {
   stopReason?: BudgetStopReason;
   /** Tokens, estimated cost, and wall-clock time the successful attempt used. */
   budgetUsage: BudgetUsage;
+  /**
+   * Quality judgments for a sample of the knowledge searches this run made,
+   * scored off the critical path by the fire-and-forget RAG judge
+   * (lib/llm/rag-judge.ts) and drained once the loop finished. Monitoring
+   * data the agent didn't act on — persisted with the run record. Empty when
+   * nothing was sampled, judging is disabled, or the eval path was used.
+   */
+  ragJudgments: RagJudgmentEntry[];
 }
 
 export interface RunAgentOptions {
@@ -104,6 +113,16 @@ export interface RunAgentOptions {
    */
   onStep?: (step: AgentStepTrace) => void;
   /**
+   * TASK 1 (token streaming): called with each chunk of assistant text as the
+   * model generates it, so the route can stream the answer to the client token
+   * by token instead of only revealing it once the step finishes. The concrete
+   * win is the final written answer rendering as it's produced; intermediate
+   * steps are usually short text plus a tool call. Reasoning/thinking tokens
+   * are NOT forwarded here (they're hidden by default on current models). Text
+   * for a given step is also still delivered in full via onStep.
+   */
+  onTextDelta?: (delta: string) => void;
+  /**
    * TASK 9: Tool policy to apply before handing the tool set to the model.
    * 'read-only' removes all write and destructive tools structurally —
    * the model cannot call them at all, not just rule-based.
@@ -116,6 +135,11 @@ export interface RunAgentOptions {
    * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
+  /**
+   * Rollout stage (approval-policy.ts): 'assisted' asks before every write,
+   * 'shadow' dry-runs every write. Can only tighten ROLLOUT_MODE.
+   */
+  rolloutMode?: RolloutMode;
   /**
    * TASK 10: Enable extended thinking (Claude via Anthropic / Bedrock only).
    * Ignored for other providers and non-Claude Bedrock models.
@@ -140,13 +164,20 @@ export interface RunAgentOptions {
    */
   onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
   /**
-   * TASK 9: asks a human to approve one destructive tool call (delete_*,
-   * abort_*, privacy jobs, merge_pr — including ones routed via call_tool)
-   * before it runs. Not consulted in dry-run mode, where destructive tools
-   * don't execute. On a live run without an approver, destructive calls are
-   * denied. The eval path (opts.tools) is never gated.
+   * TASK 9: asks a human to approve one tool call before it runs — every call
+   * approval-policy.ts flags: destructive tools, non-read-only SQL, outbound
+   * tools (commits, exports, destinations, publishing), credential reads, and
+   * every write in assisted mode. Calls routed via call_tool are unwrapped
+   * first. Calls that won't execute (dry-run/shadow) aren't gated. On a live
+   * run without an approver, flagged calls are denied. The eval path
+   * (opts.tools) is never gated.
    */
-  approveTool?: (call: { toolCallId: string; toolName: string; input: unknown }) => Promise<{ approved: boolean; reason?: string }>;
+  approveTool?: (call: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+    reason: ApprovalReason;
+  }) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
@@ -392,7 +423,8 @@ async function selectLiveTools(
   userInput: string,
   toolShortlistSize: number,
   toolRetries: number,
-  policy: { mode?: PolicyMode; dryRun?: boolean }
+  policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
+  ragJudgmentSink: RagJudgmentSink
 ): Promise<LiveToolSelection> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -404,7 +436,7 @@ async function selectLiveTools(
 
   // TASK 9: the policy runs over the whole catalog, so a tool reached via
   // call_tool is filtered/dry-run-wrapped exactly like a shortlisted one.
-  const callable = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
+  const callable = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink }), policy);
 
   const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
   const tools: ToolSet = Object.fromEntries(
@@ -473,6 +505,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
+  const rolloutMode = resolveRolloutMode(opts.rolloutMode);
+  // Collects fire-and-forget RAG judgments for live runs; drained once the
+  // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
+  // sink — there's nothing to drain and no judgments to persist there.
+  let ragJudgmentSink: RagJudgmentSink | undefined;
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -480,25 +517,33 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     tools = opts.tools;
     toolsConsidered = Object.keys(opts.tools);
   } else {
-    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries, {
-      mode: opts.policy,
-      dryRun: opts.dryRun,
-    });
+    ragJudgmentSink = createRagJudgmentSink();
+    const live = await selectLiveTools(
+      userInput,
+      toolShortlistSize,
+      toolRetries,
+      { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
+      ragJudgmentSink
+    );
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
   }
 
-  // TASK 9: gate destructive calls on a human decision (live runs only).
+  // TASK 9: gate risky calls on a human decision (live runs only).
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = opts.tools
     ? undefined
     : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
-        if (dryRun || classifyTool(call.toolName) !== 'destructive') return 'not-applicable' as const;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
+        if (!reason) return 'not-applicable' as const;
         if (!opts.approveTool) {
-          return { type: 'denied' as const, reason: 'Destructive tool calls need a human approver, and none is attached to this run.' };
+          return {
+            type: 'denied' as const,
+            reason: `This call needs a human approver (${APPROVAL_REASON_TEXT[reason]}), and none is attached to this run.`,
+          };
         }
-        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call });
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason });
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 
@@ -536,8 +581,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       historyBound ? contextEditingProviderOptions(resolvedModelKey) : undefined
     ) as Record<string, Record<string, never>> | undefined;
 
-    return stage(`chat model call (${resolvedModelKey})`, () =>
-      generateText({
+    return stage(`chat model call (${resolvedModelKey})`, async () => {
+      // TASK 1 (token streaming): streamText instead of generateText so the
+      // assistant's text is emitted as it's produced. Everything else — the
+      // multi-step loop (stopWhen), prepareStep context management, the
+      // approval gate, abort, thinking/context-editing providerOptions, and
+      // the onStepEnd trace/side-effect tracking — is unchanged; streamText
+      // takes the same options. We consume fullStream to forward text deltas,
+      // then await the terminal promises for the same result shape the
+      // fallback loop and result construction below already expect.
+      const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
         instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
@@ -607,8 +660,30 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           }
           opts.onStep?.(trace);
         },
-      })
-    );
+      });
+
+      // Drain the stream, forwarding assistant text as it arrives. Reasoning
+      // (thinking) deltas are intentionally not forwarded — they're hidden by
+      // default on current models. Errors during streaming surface when the
+      // terminal promises below are awaited, so they still reach the fallback
+      // try/catch as a rejection rather than being swallowed here.
+      if (opts.onTextDelta) {
+        for await (const part of stream.fullStream) {
+          if (part.type === 'text-delta') opts.onTextDelta(part.text);
+        }
+      }
+
+      // Same shape generateText returned, so nothing downstream changes.
+      // Awaiting these also drives the loop to completion when onTextDelta
+      // isn't set (no fullStream consumer) and rejects on a provider failure.
+      const [text, steps, finishReason, usage] = await Promise.all([
+        stream.text,
+        stream.steps,
+        stream.finishReason,
+        stream.usage,
+      ]);
+      return { text, steps, finishReason, usage };
+    });
   };
 
   let resolvedModelKey = modelKey || getDefaultModelKey();
@@ -655,6 +730,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   const steps = result.steps.map((step, i) => toStepTrace(step, i));
 
+  // The judge ran concurrently with the loop; await any still in flight now
+  // (off the tool-call critical path) so the verdicts are captured with the
+  // run record. drain() never rejects.
+  const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+
   return {
     finalText: result.text,
     steps,
@@ -668,5 +748,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       outputTokens: result.usage.outputTokens,
       totalTokens: result.usage.totalTokens,
     },
+    ragJudgments,
   };
 }

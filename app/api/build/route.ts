@@ -7,15 +7,16 @@
  *
  * Event sequence:
  *   {"type":"run_start","runId":"...","toolsConsidered":["..."]}
+ *   {"type":"text_delta","delta":"..."}    // TASK 1: assistant text as it streams
  *   {"type":"step","step":{...}}           // one per agent step, as it finishes
  *   {"type":"step","step":{...}}
  *   ...
  *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...],
  *    "stopReason":"token-budget"?,"budgetUsage":{"tokens":...,"costUsd":...,"durationMs":...}}
  *
- * When a destructive tool call needs a human decision (POST it to
- * /api/build/approve — the run waits until then, or until it times out):
- *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...}}
+ * When a tool call needs a human decision (lib/llm/approval-policy.ts; POST it
+ * to /api/build/approve — the run waits until then, or until it times out):
+ *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...},"reason":"outbound","reasonText":"..."}
  *   {"type":"approval_resolved","toolCallId":"...","approved":true,"reason":"..."}
  *
  * If a provider failure restarts the run on a same-tier fallback model:
@@ -31,6 +32,7 @@
 
 import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
+import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
@@ -140,6 +142,13 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       status: 400,
     };
   }
+  if (b.rolloutMode !== undefined && !parseRolloutMode(b.rolloutMode)) {
+    return {
+      ok: false,
+      error: { error: '"rolloutMode" must be "autonomous", "assisted", or "shadow"', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
 
   return {
     ok: true,
@@ -153,6 +162,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
+      rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
     },
   };
@@ -221,14 +231,17 @@ export async function POST(request: Request): Promise<Response> {
           budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
           policy: req.policy,
           dryRun: req.dryRun,
+          rolloutMode: req.rolloutMode,
           thinkingBudget: req.thinkingBudget,
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
           onStep: (step) => push({ type: 'step', step }),
+          // TASK 1: stream assistant text token-by-token as it's generated
+          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
-          // TASK 9: destructive calls wait here for the user's decision
-          approveTool: async ({ toolCallId, toolName, input }) => {
-            push({ type: 'approval_request', toolCallId, toolName, input });
+          // TASK 9: flagged calls wait here for the user's decision
+          approveTool: async ({ toolCallId, toolName, input, reason }) => {
+            push({ type: 'approval_request', toolCallId, toolName, input, reason, reasonText: APPROVAL_REASON_TEXT[reason] });
             const decision = await waitForApproval(runId, toolCallId, abort.signal);
             push({ type: 'approval_resolved', toolCallId, ...decision });
             return decision;
@@ -276,6 +289,7 @@ export async function POST(request: Request): Promise<Response> {
             usage: agentResult.usage,
             stopReason: agentResult.stopReason,
             budgetUsage: agentResult.budgetUsage,
+            ragJudgments: agentResult.ragJudgments,
           },
         };
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));

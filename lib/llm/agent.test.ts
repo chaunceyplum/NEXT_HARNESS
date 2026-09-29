@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { tool, jsonSchema, type ToolSet } from 'ai';
+import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
 
 // runAgent's live path end to end, against a scripted model and a fake
 // catalog: approval gating (incl. via call_tool), dry-run, and the
@@ -28,6 +29,9 @@ vi.mock('./model-registry', () => {
       return e;
     },
     resolveModel: () =>
+      // runAgent uses streamText, so doStream is the path exercised here.
+      // doGenerate is kept for completeness/any other caller. Both consume
+      // the same `script` queue and record the same `calls` for assertions.
       new MockLanguageModelV4({
         doGenerate: async (options) => {
           calls.push(JSON.parse(JSON.stringify(options)));
@@ -42,18 +46,48 @@ vi.mock('./model-registry', () => {
             warnings: [],
           };
         },
+        doStream: async (options) => {
+          calls.push(JSON.parse(JSON.stringify(options)));
+          const next = script.shift() ?? { text: 'done' };
+          const id = `call-${calls.length}`;
+          const parts: LanguageModelV4StreamPart[] =
+            'text' in next
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id },
+                  { type: 'text-delta', id, delta: next.text },
+                  { type: 'text-end', id },
+                  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'tool-call', toolCallId: id, toolName: next.toolCall.toolName, input: JSON.stringify(next.toolCall.input) },
+                  { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_use' }, usage },
+                ];
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                for (const p of parts) controller.enqueue(p);
+                controller.close();
+              },
+            }),
+          };
+        },
       }),
   };
 });
 
-const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment'].map((name) => ({
+const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment', 'execute_sql', 'adobe_create_export_job'].map((name) => ({
   name,
   description: name.replace(/_/g, ' '),
-  inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+  inputSchema: { type: 'object', properties: { id: { type: 'string' }, sql: { type: 'string' } } },
 }));
 
 vi.mock('./tool-catalog', () => ({
   getMcpToolCatalog: async () => CATALOG,
+  // runAgent creates a sink on the live path and drains it at the end; the
+  // scripted tools here never judge, so an empty-draining stub is enough.
+  createRagJudgmentSink: () => ({ track() {}, async drain() { return []; } }),
   buildAiTools: (defs: typeof CATALOG): ToolSet =>
     Object.fromEntries(
       defs.map((d) => [
@@ -82,6 +116,7 @@ beforeEach(() => {
   delete process.env.TOOL_DRY_RUN;
   delete process.env.BUILD_POLICY;
   delete process.env.RUN_MAX_TOKENS;
+  delete process.env.ROLLOUT_MODE;
 });
 
 const deleteViaProxy: Scripted = {
@@ -124,6 +159,47 @@ describe('runAgent approval gate', () => {
     await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', approveTool });
     expect(approveTool).not.toHaveBeenCalled();
     expect(executed.map((e) => e.name)).toEqual(['adobe_create_segment']);
+  });
+
+  it('asks before SQL that is not a single read-only query, with the reason', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'execute_sql', arguments: { sql: 'DROP TABLE harness_agent_runs' } } } }, { text: 'no' }];
+    const approveTool = vi.fn(async () => ({ approved: false, reason: 'Denied by the user.' }));
+    await runAgent({ userInput: 'clean up the runs table', modelKey: 'test:plain', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ toolName: 'execute_sql', reason: 'sql-write' }));
+    expect(executed).toEqual([]);
+  });
+
+  it('runs a read-only SELECT through execute_sql without asking', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'execute_sql', arguments: { sql: 'SELECT count(*) FROM runs' } } } }, { text: '3' }];
+    const approveTool = vi.fn();
+    await runAgent({ userInput: 'how many runs?', modelKey: 'test:plain', approveTool });
+    expect(approveTool).not.toHaveBeenCalled();
+    expect(executed.map((e) => e.name)).toEqual(['execute_sql']);
+  });
+
+  it('asks before an outbound call such as an export job', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_export_job', arguments: { id: 'x' } } } }, { text: 'no' }];
+    const approveTool = vi.fn(async () => ({ approved: true, reason: 'ok' }));
+    await runAgent({ userInput: 'export the audience', modelKey: 'test:plain', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ reason: 'outbound' }));
+  });
+
+  it('asks before every write in assisted rollout mode', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_segment', arguments: { id: 'n' } } } }, { text: 'made' }];
+    const approveTool = vi.fn(async () => ({ approved: true, reason: 'ok' }));
+    await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', rolloutMode: 'assisted', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ reason: 'assisted-mode' }));
+    expect(executed.map((e) => e.name)).toEqual(['adobe_create_segment']);
+  });
+
+  it('dry-runs writes in shadow rollout mode, and a request cannot loosen ROLLOUT_MODE', async () => {
+    process.env.ROLLOUT_MODE = 'shadow';
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_segment', arguments: { id: 'n' } } } }, { text: 'shadow' }];
+    const approveTool = vi.fn();
+    const result = await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', rolloutMode: 'autonomous', approveTool });
+    expect(approveTool).not.toHaveBeenCalled();
+    expect(executed).toEqual([]);
+    expect(result.steps[0].toolResults[0].output).toMatchObject({ _dryRun: true });
   });
 
   it('skips approval in dry-run mode, where destructive tools do not execute', async () => {
@@ -227,5 +303,23 @@ describe('runAgent run budgets', () => {
     const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
     expect(result.stopReason).toBeUndefined();
     expect(result.finalText).toBe('done');
+  });
+});
+
+describe('runAgent token streaming (TASK 1)', () => {
+  it('forwards assistant text deltas via onTextDelta as the model generates them', async () => {
+    script = [{ toolCall: { toolName: 'adobe_list_segments', input: {} } }, { text: 'here is the answer' }];
+    const deltas: string[] = [];
+
+    const result = await runAgent({
+      userInput: 'list segments',
+      modelKey: 'test:plain',
+      maxSteps: 3,
+      onTextDelta: (d) => deltas.push(d),
+    });
+
+    // The streamed chunks reassemble into the final answer text.
+    expect(deltas.join('')).toContain('here is the answer');
+    expect(result.finalText).toBe('here is the answer');
   });
 });

@@ -72,12 +72,31 @@ export interface BuildRequest {
    */
   dryRun?: boolean;
   /**
+   * Rollout stage: 'assisted' asks before every write, 'shadow' dry-runs
+   * every write. Can only tighten the ROLLOUT_MODE env var.
+   */
+  rolloutMode?: 'autonomous' | 'assisted' | 'shadow';
+  /**
    * TASK 10: Extended thinking (Claude via Anthropic/Bedrock only), 1 024–64 000.
    * On Haiku 4.5 and older it's the thinking token budget (8 000–16 000 is a
    * good start); newer models only take adaptive thinking, so there any value
    * just switches it on. Can also be set globally via THINKING_BUDGET_TOKENS.
    */
   thinkingBudget?: number;
+}
+
+/**
+ * One knowledge-search quality judgment collected during a run by the
+ * fire-and-forget RAG judge (lib/llm/rag-judge.ts), persisted with the run
+ * record for monitoring. Structural type — see RagJudgmentEntry /
+ * RagJudgment in the llm layer for the source shape — kept here so this
+ * module doesn't take a hard dependency on the llm layer, matching how
+ * EvalRunSummary references eval-metrics via an inline import type.
+ */
+export interface RagJudgmentDTO {
+  toolName: string;
+  query: string;
+  judgment: import('./llm/rag-judge').RagJudgment;
 }
 
 export interface BuildResponse {
@@ -92,6 +111,12 @@ export interface BuildResponse {
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /**
+   * Quality judgments for a sample of the run's knowledge searches, scored
+   * off the critical path by the RAG judge. Absent on runs from before this
+   * was tracked, and empty when nothing was sampled or judging was disabled.
+   */
+  ragJudgments?: RagJudgmentDTO[];
 }
 
 // ── TASK 8: Streaming event types ─────────────────────────────────────────────
@@ -104,8 +129,21 @@ export interface BuildResponse {
 export type BuildStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
   | { type: 'step'; step: AgentStepDTO }
+  // TASK 1 (token streaming): a chunk of assistant text as it's generated.
+  // The client appends these for a live view; the authoritative final text
+  // still arrives on 'done'. Discard accumulated deltas on 'restart'.
+  | { type: 'text_delta'; delta: string }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
-  | { type: 'approval_request'; toolCallId: string; toolName: string; input: unknown }
+  | {
+      type: 'approval_request';
+      toolCallId: string;
+      toolName: string;
+      input: unknown;
+      /** Why this call needs a person (lib/llm/approval-policy.ts), e.g. 'outbound'. */
+      reason: string;
+      /** Human-readable form of `reason`. */
+      reasonText: string;
+    }
   | { type: 'approval_resolved'; toolCallId: string; approved: boolean; reason: string }
   | {
       type: 'done';
