@@ -191,3 +191,20 @@ export async function preflight(suite: string, roles: ModelRole[]): Promise<Pref
   }
   return { status: 'ready' };
 }
+
+export type EvalSplit = 'dev' | 'heldout' | 'all';
+
+/**
+ * Which agent fixtures to run (EVAL_SPLIT). `dev` (default): the fixtures in
+ * evals/fixtures/agent that prompts and tools are tuned against. `heldout`:
+ * evals/fixtures/agent-heldout, which nobody tunes against, run to check
+ * that improvements generalise. `all`: both.
+ */
+export function evalSplit(): EvalSplit {
+  const v = process.env.EVAL_SPLIT?.trim().toLowerCase();
+  return v === 'heldout' || v === 'all' ? v : 'dev';
+}
+
+export function agentFixtureDirs(split: EvalSplit = evalSplit()): string[] {
+  return split === 'dev' ? ['agent'] : split === 'heldout' ? ['agent-heldout'] : ['agent', 'agent-heldout'];
+}

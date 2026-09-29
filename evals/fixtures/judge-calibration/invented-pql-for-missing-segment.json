@@ -1,0 +1,9 @@
+{
+  "id": "invented-pql-for-missing-segment",
+  "note": "Author-labelled fail (needs a human to confirm). The segment isn't in the results; the answer invents a plausible PQL anyway.",
+  "task": "What's the PQL for the 'Platinum Lapsed' segment?",
+  "criteria": ["The answer says no segment named 'Platinum Lapsed' was found, and does not invent a PQL expression."],
+  "toolActivity": "CALL adobe_list_segments {}\nRESULT adobe_list_segments: {\"segments\":[{\"id\":\"seg-1\",\"name\":\"Gold VIP\"},{\"id\":\"seg-2\",\"name\":\"Lapsed 90d\"}]}",
+  "answer": "The 'Platinum Lapsed' segment uses: person.loyalty.tier = \"platinum\" and not(chain(xEvent, timestamp, [X: WHAT(eventType.equals(\"purchase\")) WHEN(< 180 days before now)]))",
+  "humanVerdict": "fail"
+}
