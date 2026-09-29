@@ -20,7 +20,7 @@ import { getDefaultModelKey } from '@/lib/llm/model-registry';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
-import { isModelConfigured, trialsPerFixture, warnSkip } from './lib/env';
+import { modelSource, preflight, trialsPerFixture, warnSkip } from './lib/env';
 import { gradeRagJudgment, type RagJudgeExpectations } from './lib/grading';
 
 type RagJudgeFixture = {
@@ -34,9 +34,11 @@ type RagJudgeFixture = {
 const modelKey = process.env.RAG_JUDGE_MODEL || getDefaultModelKey();
 const trials = trialsPerFixture();
 const disabled = process.env.RAG_JUDGE_ENABLED === 'false';
-const configured = !disabled && isModelConfigured(modelKey);
-if (disabled) warnSkip('RAG-judge eval', 'RAG_JUDGE_ENABLED=false — the judge being graded is turned off.');
-else if (!configured) warnSkip('RAG-judge eval', `no credentials found for judge model "${modelKey}".`);
+const pre = disabled
+  ? ({ status: 'skip', reason: 'RAG_JUDGE_ENABLED=false — the judge being graded is turned off.' } as const)
+  : await preflight('RAG-judge eval', [{ role: 'RAG judge', key: modelKey, source: modelSource('rag-judge') }]);
+if (pre.status === 'skip') warnSkip('RAG-judge eval', pre.reason);
+const preflightError = pre.status === 'fail' ? pre.reason : '';
 
 const results: EvalTrialRecord[] = [];
 const startedAt = new Date();
@@ -44,7 +46,13 @@ afterAll(() =>
   report({ suite: 'rag_judge', label: 'RAG judge calibration (judgeRagResult)', subject: modelKey, startedAt, results })
 );
 
-describe.skipIf(!configured)(`RAG judge eval (judgeRagResult, k=${trials})`, () => {
+describe.runIf(pre.status === 'fail')('RAG judge eval preflight', () => {
+  it('configured model is reachable', () => {
+    throw new Error(preflightError);
+  });
+});
+
+describe.runIf(pre.status === 'ready')(`RAG judge eval (judgeRagResult, k=${trials})`, () => {
   const fixtures = loadFixtures<RagJudgeFixture>('rag-judge');
 
   it.each(fixtures)('$id', async (fixture) => {

@@ -41,8 +41,9 @@ import { allCriteria, formatJudgeNotes, judge, summarizeToolActivity } from './l
 import {
   evalModelKey,
   isMcpConfigured,
-  isModelConfigured,
   judgeModelKey,
+  modelSource,
+  preflight,
   trialsPerFixture,
   warnIfSelfJudging,
   warnSkip,
@@ -67,9 +68,13 @@ const modelKey = evalModelKey();
 const judgeKey = judgeModelKey();
 const trials = trialsPerFixture();
 const promptVersion = createHash('sha256').update(systemPrompt()).digest('hex').slice(0, 12);
-const configured = isModelConfigured(modelKey);
-if (!configured) warnSkip('agent eval', `no credentials found for model "${modelKey}" (set EVAL_MODEL or DEFAULT_MODEL).`);
-else warnIfSelfJudging(modelKey, judgeKey);
+const pre = await preflight('agent eval', [
+  { role: 'model under test', key: modelKey, source: modelSource('model') },
+  { role: 'judge', key: judgeKey, source: modelSource('judge') },
+]);
+if (pre.status === 'skip') warnSkip('agent eval', pre.reason);
+if (pre.status === 'ready') warnIfSelfJudging(modelKey, judgeKey);
+const preflightError = pre.status === 'fail' ? pre.reason : '';
 
 const results: EvalTrialRecord[] = [];
 const startedAt = new Date();
@@ -148,7 +153,13 @@ async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrial
   return record;
 }
 
-describe.skipIf(!configured)(`Agent behavior eval (runAgent, k=${trials})`, () => {
+describe.runIf(pre.status === 'fail')('Agent behavior eval preflight', () => {
+  it('configured models are reachable', () => {
+    throw new Error(preflightError);
+  });
+});
+
+describe.runIf(pre.status === 'ready')(`Agent behavior eval (runAgent, k=${trials})`, () => {
   const fixtures = loadFixtures<AgentFixture>('agent');
 
   beforeAll(async () => {
