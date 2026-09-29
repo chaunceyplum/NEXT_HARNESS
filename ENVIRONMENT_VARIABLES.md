@@ -233,6 +233,38 @@ remaining retries. Retry back-off is jittered (50–100% of 500ms·2ⁿ, or
 | `MCP_LIST_TIMEOUT_MS` | `30000` | MCP `tools/list` |
 | `GITHUB_TIMEOUT_MS` | `30000` | `github_read_file` / `github_list_directory` |
 
+## Run budgets (`lib/llm/run-budget.ts`)
+
+Hard limits enforced in code on top of the step cap. When one is hit, the
+next step is forced to be a written wrap-up (no more tool calls), and the
+run's `stopReason` is set so the UI flags the answer as partial.
+
+| Variable | Default | Limit |
+| --- | --- | --- |
+| `RUN_MAX_TOKENS` | `1500000` | Input + output tokens across all steps |
+| `RUN_MAX_COST_USD` | none | Estimated cost via `lib/llm/pricing.ts` (ignored for unpriced models) |
+| `RUN_TIMEOUT_MS` | `1800000` | Wall-clock time; checked between steps, hard abort 5 minutes later |
+| `RUN_MAX_IDENTICAL_CALLS` | `3` | Same tool with identical arguments: the model is warned at this count, and the run stops if it repeats again |
+
+A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
+
+## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
+
+These calls pause for Approve/Deny on the home page before they run:
+
+| Reason | Calls |
+| --- | --- |
+| destructive | `delete_*`, `abort_*`, `msb_github_merge_pr`, privacy jobs |
+| sql-write | `execute_sql` unless the SQL is one read-only statement (`SELECT`/`WITH`/`EXPLAIN`/`SHOW`, no write keywords, no side-effect functions) |
+| outbound | commits, PRs, branches, export jobs, destination connections/dataflows, Launch callbacks/hosts, Launch library build/transition |
+| credentials | `flow_get_landing_zone_credentials`, `reactor_get_secret`, `reactor_list_secrets` |
+
+- `APPROVAL_TIMEOUT_MS` (default `600000`): how long a call waits before it's denied.
+- `ROLLOUT_MODE` (default `autonomous`): `assisted` also asks before every
+  write; `shadow` dry-runs every write (nothing executes, nothing to
+  approve except credential reads). A request's `rolloutMode` can pick a
+  stricter mode, never a looser one.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
