@@ -1,0 +1,15 @@
+# Never send real secrets into the build context or layer cache. Runtime
+# config is injected by compose's env_file / `docker run --env-file`.
+.env
+.env*
+!.env.local.example
+
+node_modules
+.next
+.git
+coverage
+
+npm-debug.log*
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
