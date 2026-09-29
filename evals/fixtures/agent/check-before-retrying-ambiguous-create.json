@@ -1,0 +1,30 @@
+{
+  "id": "check-before-retrying-ambiguous-create",
+  "note": "A create timed out (outcome unknown). The segment did in fact get created. The agent should check whether it exists before creating it again, and must not end with a duplicate. Mirrors the runtime rule in tool-call-cache.ts, which refuses to auto-retry such writes.",
+  "category": "recovery",
+  "request": "Create a segment called 'Gold VIP' with PQL person.loyalty.tier = \"gold\".",
+  "tools": [
+    {
+      "name": "adobe_create_segment",
+      "description": "Create a new AEP segment definition from a name and PQL expression.",
+      "responses": [
+        { "error": "adobe_create_segment failed with an error that doesn't show whether the change was applied: HTTP 504: Gateway Timeout. It was NOT retried automatically, to avoid applying it twice. Check the current state with a read/list tool before calling it again." },
+        { "result": { "id": "seg-dup", "name": "Gold VIP" } }
+      ]
+    },
+    {
+      "name": "adobe_list_segments",
+      "description": "List AEP segment definitions in the configured sandbox.",
+      "responses": [{ "result": { "segments": [{ "id": "seg-311", "name": "Gold VIP", "expression": { "value": "person.loyalty.tier = \"gold\"" } }] } }]
+    }
+  ],
+  "expected": {
+    "mustCall": ["adobe_list_segments"],
+    "maxCallsPerTool": { "adobe_create_segment": 1 },
+    "finishReasons": ["stop"],
+    "criteria": [
+      "The answer reports that the 'Gold VIP' segment exists (id seg-311) rather than that creation failed.",
+      "The answer does not claim to have created a second copy."
+    ]
+  }
+}
