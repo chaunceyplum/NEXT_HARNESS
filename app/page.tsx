@@ -2,14 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, ModelOption, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, PlanInfo, ModelOption, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
 
 // ── Streaming state ───────────────────────────────────────────────────────────
 
 interface RunState {
   runId: string;
+  /** The run's plan, when it planned first. */
+  plan?: PlanInfo;
+  planAwaitingApproval?: boolean;
+  planSubmitting?: boolean;
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finalText: string;
@@ -40,6 +45,8 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [toolShortlistSize, setToolShortlistSize] = useState(24);
   const [maxSteps, setMaxSteps] = useState(20);
+  const [planFirst, setPlanFirst] = useState(false);
+  const [requirePlanApproval, setRequirePlanApproval] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runState, setRunState] = useState<RunState | null>(null);
@@ -104,6 +111,7 @@ export default function Home() {
           model: selectedModel || undefined,
           toolShortlistSize,
           maxSteps,
+          ...(planFirst ? { planFirst: true, requirePlanApproval } : {}),
         }),
         signal: ctrl.signal,
       });
@@ -160,9 +168,19 @@ export default function Home() {
                 }
               : prev
           );
+        } else if (event.type === 'plan') {
+          setRunState((prev) =>
+            prev ? { ...prev, plan: event.plan, planAwaitingApproval: Boolean(event.awaitingApproval), planSubmitting: false } : prev
+          );
         } else if (event.type === 'approval_resolved') {
           setRunState((prev) =>
-            prev ? { ...prev, pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId) } : prev
+            prev
+              ? {
+                  ...prev,
+                  pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId),
+                  ...(event.toolCallId === 'plan' ? { planAwaitingApproval: false, planSubmitting: false } : {}),
+                }
+              : prev
           );
         } else if (event.type === 'restart') {
           // A fallback model is re-running from scratch — the steps so far
@@ -303,6 +321,24 @@ export default function Home() {
                 &quot;finished: tool-calls&quot; instead of &quot;stop&quot;, raise this.
               </p>
             </div>
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={planFirst} onChange={(e) => setPlanFirst(e.target.checked)} disabled={loading} />
+                <span className="font-semibold">Plan first</span>
+                <span className="text-xs text-gray-500">— break multi-step work into a plan and track each step</span>
+              </label>
+              {planFirst && (
+                <label className="flex items-center gap-2 text-sm text-gray-700 ml-6">
+                  <input
+                    type="checkbox"
+                    checked={requirePlanApproval}
+                    onChange={(e) => setRequirePlanApproval(e.target.checked)}
+                    disabled={loading}
+                  />
+                  Ask me to approve the plan before anything runs
+                </label>
+              )}
+            </div>
 
             {error && (
               <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded">
@@ -356,6 +392,17 @@ export default function Home() {
                 <span className="ml-2 inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin align-middle" />
               )}
             </p>
+            {runState.plan && (
+              <PlanView
+                plan={runState.plan}
+                awaitingApproval={runState.planAwaitingApproval}
+                submitting={runState.planSubmitting}
+                onDecision={(approved) => {
+                  setRunState((prev) => (prev ? { ...prev, planSubmitting: true } : prev));
+                  handleApproval(runState.runId, 'plan', approved);
+                }}
+              />
+            )}
             {runState.pendingApprovals.map((p) => (
               <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
                 <p className="text-amber-900 font-semibold">Approval needed: {p.reasonText}</p>

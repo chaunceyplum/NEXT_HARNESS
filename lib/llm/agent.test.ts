@@ -323,3 +323,52 @@ describe('runAgent token streaming (TASK 1)', () => {
     expect(result.finalText).toBe('here is the answer');
   });
 });
+
+describe('runAgent plan-first', () => {
+  const plan = {
+    goal: 'List segments',
+    steps: [
+      { id: 1, description: 'List the segments', tool: 'adobe_list_segments', expectedOutput: 'segment names', dependsOn: [] },
+      { id: 2, description: 'Answer', tool: null, expectedOutput: 'the list', dependsOn: [1] },
+    ],
+  };
+
+  it('plans, gives the executor the plan and the plan tools, and returns the tracked plan', async () => {
+    script = [
+      { text: JSON.stringify(plan) },
+      { toolCall: { toolName: 'update_plan', input: { stepId: 1, status: 'done', note: '2 segments' } } },
+      { text: 'There are 2 segments.' },
+    ];
+    const updates: unknown[] = [];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true, onPlan: (p) => updates.push(JSON.parse(JSON.stringify(p))) });
+
+    const executorPrompt = JSON.stringify(calls[1].prompt);
+    expect(executorPrompt).toContain('Execute this plan');
+    expect(executorPrompt).toContain('1. [pending] List the segments');
+    expect(calls[1].tools?.map((t) => t.name)).toEqual(expect.arrayContaining(['update_plan', 'revise_plan']));
+    expect(result.plan?.steps[0]).toMatchObject({ status: 'done', note: '2 segments' });
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('runs nothing when the plan is denied', async () => {
+    script = [{ text: JSON.stringify(plan) }];
+    const result = await runAgent({
+      userInput: 'list segments',
+      modelKey: 'test:plain',
+      planFirst: true,
+      approvePlan: async () => ({ approved: false, reason: 'Denied by "bob".' }),
+    });
+    expect(result.finalText).toMatch(/plan wasn't approved/);
+    expect(calls).toHaveLength(1);
+    expect(executed).toEqual([]);
+  });
+
+  it('falls back to running without a plan when planning fails', async () => {
+    script = [{ text: 'not json' }, { text: 'done anyway' }];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true });
+    warn.mockRestore();
+    expect(result.plan).toBeUndefined();
+    expect(result.finalText).toBe('done anyway');
+  });
+});
