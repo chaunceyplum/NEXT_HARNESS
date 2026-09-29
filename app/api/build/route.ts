@@ -38,6 +38,7 @@ import { newRunId, saveExecution } from '@/lib/execution-store';
 import { checkInput, createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
 import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
 import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
+import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -207,6 +208,17 @@ export async function POST(request: Request): Promise<Response> {
   const runId = newRunId();
   const startedAt = Date.now();
   const createdAt = new Date(startedAt).toISOString();
+  const actor = request.headers.get('x-harness-user') || 'anonymous';
+  // Who started the run, persisted with it (server-set, never from the body).
+  req.requestedBy = actor;
+  void recordAudit([{ type: 'run_start', runId, actor, input: { description: req.description, model: req.model } }]);
+  // Tool outcomes are buffered per step and written in one insert.
+  let pendingAudit: AuditEvent[] = [];
+  const flushAudit = () => {
+    const batch = pendingAudit;
+    pendingAudit = [];
+    void recordAudit(batch);
+  };
 
   // Aborts the agent run when the client goes away — the request's own signal
   // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
@@ -216,7 +228,7 @@ export async function POST(request: Request): Promise<Response> {
   const unregister = registerRun(runId, {
     abort,
     startedAt,
-    user: request.headers.get('x-harness-user') || 'anonymous',
+    user: actor,
     description: req.description,
   });
 
@@ -269,6 +281,22 @@ export async function POST(request: Request): Promise<Response> {
           onStep: (step) => {
             pushDelta(textRedactor.flush());
             push({ type: 'step', step: redactOutput(step) });
+            flushAudit();
+          },
+          // Audit log: every write/destructive call's outcome (reads with AUDIT_READS=true)
+          onToolOutcome: (o) => {
+            if (o.level === 'read' && !o.approvalReason && !auditReads()) return;
+            pendingAudit.push({
+              type: 'tool_call',
+              runId,
+              actor,
+              tool: o.toolName,
+              level: o.level,
+              reason: o.approvalReason,
+              input: o.input,
+              outcome: o.outcome,
+              error: o.error,
+            });
           },
           // TASK 1: stream assistant text token-by-token as it's generated
           onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
@@ -277,7 +305,20 @@ export async function POST(request: Request): Promise<Response> {
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
             push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
             const decision = await waitForApproval(runId, toolCallId, abort.signal);
-            push({ type: 'approval_resolved', toolCallId, ...decision });
+            push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
+            void recordAudit([
+              {
+                type: 'approval',
+                runId,
+                // Who decided; timeouts and cancellations are the system's call.
+                actor: decision.decidedBy ?? 'system',
+                tool: toolName,
+                reason,
+                input,
+                outcome: decision.approved ? 'approved' : 'denied',
+                error: decision.approved ? undefined : decision.reason,
+              },
+            ]);
             return decision;
           },
         });
@@ -365,6 +406,7 @@ export async function POST(request: Request): Promise<Response> {
         };
         saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
       } finally {
+        flushAudit();
         unregister();
       }
     },
