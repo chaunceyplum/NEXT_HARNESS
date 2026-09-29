@@ -35,6 +35,7 @@ import { waitForApproval } from '@/lib/llm/approvals';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
+import { checkInput, redactOutput } from '@/lib/llm/guardrails';
 import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
@@ -54,21 +55,31 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     };
   }
 
-  const description = b.description.trim();
-  if (description.length < 10) {
+  const rawDescription = b.description.trim();
+  if (rawDescription.length < 10) {
     return {
       ok: false,
-      error: { error: 'Description must be at least 10 characters', code: 'VALIDATION_ERROR', details: { minLength: 10, received: description.length } },
+      error: { error: 'Description must be at least 10 characters', code: 'VALIDATION_ERROR', details: { minLength: 10, received: rawDescription.length } },
       status: 400,
     };
   }
-  if (description.length > 5000) {
+  if (rawDescription.length > 5000) {
     return {
       ok: false,
-      error: { error: 'Description must be less than 5000 characters', code: 'VALIDATION_ERROR', details: { maxLength: 5000, received: description.length } },
+      error: { error: 'Description must be less than 5000 characters', code: 'VALIDATION_ERROR', details: { maxLength: 5000, received: rawDescription.length } },
       status: 400,
     };
   }
+
+  // Input guardrail: refuse credentials, apply INPUT_PII_MODE, flag override phrasing.
+  const input = checkInput(rawDescription);
+  if (!input.ok) {
+    return { ok: false, error: { error: input.reason, code: input.code }, status: 400 };
+  }
+  if (input.injection.length) {
+    console.warn('[BUILD] Request contains instruction-override phrasing:', input.injection);
+  }
+  const description = input.text;
 
   if (b.model !== undefined) {
     const known = getModelRegistry().some((e) => e.key === b.model);
@@ -235,7 +246,7 @@ export async function POST(request: Request): Promise<Response> {
         // inside runAgent, so it's sent on `done` instead.
         push({ type: 'run_start', runId, toolsConsidered: [] });
 
-        const agentResult = await runAgent({
+        const rawResult = await runAgent({
           userInput: req.description,
           modelKey: req.model,
           toolRetries: req.toolRetries,
@@ -248,18 +259,21 @@ export async function POST(request: Request): Promise<Response> {
           thinkingBudget: req.thinkingBudget,
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
-          onStep: (step) => push({ type: 'step', step }),
+          onStep: (step) => push({ type: 'step', step: redactOutput(step) }),
           // TASK 1: stream assistant text token-by-token as it's generated
           onTextDelta: (delta) => push({ type: 'text_delta', delta }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
           // TASK 9: flagged calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
-            push({ type: 'approval_request', toolCallId, toolName, input, reason, reasonText: APPROVAL_REASON_TEXT[reason] });
+            push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
             const decision = await waitForApproval(runId, toolCallId, abort.signal);
             push({ type: 'approval_resolved', toolCallId, ...decision });
             return decision;
           },
         });
+
+        // Output guardrail: nothing leaves the server (stream or run history) unredacted.
+        const agentResult = redactOutput(rawResult);
 
         console.log('[BUILD] Agent finished:', {
           runId,
@@ -309,9 +323,11 @@ export async function POST(request: Request): Promise<Response> {
       } catch (error) {
         const cancelled = abort.signal.aborted;
         const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
-        const message = cancelled
-          ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
-          : error instanceof Error ? error.message : String(error);
+        const message = redactOutput(
+          cancelled
+            ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
+            : error instanceof Error ? error.message : String(error),
+        );
         if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
         else console.error('[BUILD] Agent run failed:', error);
 

@@ -297,6 +297,35 @@ These calls pause for Approve/Deny on the home page before they run:
   `x-harness-user`) may engage or release it. Unset means anyone.
 - `GET /api/admin/kill-switch` lists active runs.
 
+## Guardrails (`lib/llm/guardrails.ts`)
+
+Cheap, deterministic checks (regexes and counters) at the three points
+where the loop meets the outside world:
+
+- **Input:** a request containing a credential (AWS/GitHub/Anthropic/OpenAI/
+  Slack keys, Adobe `p8e-` client secrets, JWTs, private keys,
+  `password=…`) is refused with 400. Personal data follows
+  `INPUT_PII_MODE`. Instruction-override phrasing is logged.
+- **Actions:** each run may make at most `MAX_WRITES_PER_RUN` (default 25)
+  write/destructive calls. Writes whose arguments name an id in
+  `PROTECTED_RESOURCE_IDS` (exact, case-insensitive string match) are
+  blocked. Credentials are redacted from tool results before the model
+  sees them. Results containing instruction-like text get a
+  `_guardrailWarning` telling the model not to follow it.
+- **Output:** credentials are redacted from streamed steps, approval
+  requests, the final answer, errors and persisted runs. Personal data is
+  masked there too when `OUTPUT_PII_MODE=mask`.
+
+| Variable | Default | Values |
+| --- | --- | --- |
+| `INPUT_PII_MODE` | `allow` | `allow`, `mask`, `block` (emails, US SSNs, Luhn-valid card numbers, phone numbers) |
+| `OUTPUT_PII_MODE` | `allow` | `allow`, `mask` |
+| `MAX_WRITES_PER_RUN` | `25` | positive integer |
+| `PROTECTED_RESOURCE_IDS` | none | comma-separated ids |
+
+`PROTECTED_RESOURCE_IDS` only sees ids that appear in the arguments. A
+tool that falls back to a server-side default sandbox isn't caught.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be

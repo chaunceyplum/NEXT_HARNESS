@@ -41,6 +41,7 @@ import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
+import { applyActionGuards } from './guardrails';
 import {
   budgetFinalNote,
   resolveBudget,
@@ -436,7 +437,11 @@ async function selectLiveTools(
 
   // TASK 9: the policy runs over the whole catalog, so a tool reached via
   // call_tool is filtered/dry-run-wrapped exactly like a shortlisted one.
-  const callable = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink }), policy);
+  // Action guardrails (write cap, protected ids, result redaction) wrap the
+  // same objects call_tool executes.
+  const callable = applyActionGuards(
+    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink }), policy)
+  );
 
   const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
   const tools: ToolSet = Object.fromEntries(
