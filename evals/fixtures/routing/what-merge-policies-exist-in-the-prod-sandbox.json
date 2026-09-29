@@ -1,0 +1,5 @@
+{
+  "id": "what-merge-policies-exist-in-the-prod-sandbox",
+  "request": "What merge policies exist in the prod sandbox?",
+  "expected": "lookup"
+}

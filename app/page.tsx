@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, ModelOption, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, ModelOption, RouteInfo, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 import KillSwitch from '@/components/KillSwitch';
 
@@ -10,6 +10,8 @@ import KillSwitch from '@/components/KillSwitch';
 
 interface RunState {
   runId: string;
+  /** How an "auto" run picked its model. */
+  route?: RouteInfo;
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finalText: string;
@@ -164,6 +166,8 @@ export default function Home() {
           setRunState((prev) =>
             prev ? { ...prev, pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId) } : prev
           );
+        } else if (event.type === 'route') {
+          setRunState((prev) => (prev ? { ...prev, route: event.route } : prev));
         } else if (event.type === 'restart') {
           // A fallback model is re-running from scratch — the steps so far
           // and any streamed text belong to the abandoned attempt.
@@ -356,6 +360,13 @@ export default function Home() {
                 <span className="ml-2 inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin align-middle" />
               )}
             </p>
+            {runState.route && (
+              <p className="text-xs text-gray-600 mb-3">
+                Auto-routed to <code className="bg-white px-1 rounded">{runState.route.modelKey}</code> as a{' '}
+                <strong>{runState.route.category}</strong> request ({runState.route.via}, confidence{' '}
+                {Math.round(runState.route.confidence * 100)}%): {runState.route.reason}
+              </p>
+            )}
             {runState.pendingApprovals.map((p) => (
               <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
                 <p className="text-amber-900 font-semibold">Approval needed: {p.reasonText}</p>

@@ -1,0 +1,5 @@
+{
+  "id": "why-did-last-night-s-crm-dataflow-run-fail",
+  "request": "Why did last night's CRM dataflow run fail?",
+  "expected": "lookup"
+}

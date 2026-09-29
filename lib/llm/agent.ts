@@ -42,6 +42,7 @@ import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './age
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
+import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
   resolveBudget,
@@ -84,6 +85,8 @@ export interface AgentRunResult {
    * nothing was sampled, judging is disabled, or the eval path was used.
    */
   ragJudgments: RagJudgmentEntry[];
+  /** Set when the request asked for model "auto": how the model was chosen. */
+  route?: RouteDecision;
 }
 
 export interface RunAgentOptions {
@@ -156,6 +159,8 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
+  /** Called once with the routing decision when modelKey is "auto". */
+  onRoute?: (route: RouteDecision) => void;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -501,12 +506,36 @@ function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const {
     userInput,
-    modelKey,
     maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
     modelHealth = defaultModelHealth,
   } = opts;
+
+  // Model routing (model-router.ts): "auto" picks a tier per request. A
+  // routed model isn't pinned, so the same-tier fallback still applies.
+  let modelKey = opts.modelKey;
+  let route: RouteDecision | undefined;
+  if (modelKey === AUTO_MODEL) {
+    route = await routeRequest(userInput, { health: modelHealth });
+    opts.onRoute?.(route);
+    if (route.category === 'unclear' && route.clarifyingQuestion) {
+      // Don't guess at an unclear request: ask instead of running tools.
+      return {
+        finalText: route.clarifyingQuestion,
+        steps: [],
+        toolsConsidered: [],
+        finishReason: 'stop',
+        modelKey: route.modelKey,
+        budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+        usage: {},
+        ragJudgments: [],
+        route,
+      };
+    }
+    modelKey = undefined;
+  }
+  const startModelKey = route?.modelKey ?? modelKey;
 
   let tools: ToolSet;
   let toolsConsidered: string[];
@@ -561,7 +590,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const runStartedAt = Date.now();
   const budgetLimits = resolveBudget(opts.budget);
   // Per model attempt, like stepIndex (a fallback restarts the run).
-  let budget = new RunBudgetTracker(budgetLimits, modelKey || getDefaultModelKey(), runStartedAt);
+  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt);
   let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
@@ -691,7 +720,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     });
   };
 
-  let resolvedModelKey = modelKey || getDefaultModelKey();
+  let resolvedModelKey = startModelKey || getDefaultModelKey();
   if (!isPinned && modelHealth.isUnhealthy(resolvedModelKey)) {
     const healthy = modelHealth.pickFallback(resolvedModelKey, registry);
     if (healthy) resolvedModelKey = healthy;
@@ -754,5 +783,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       totalTokens: result.usage.totalTokens,
     },
     ragJudgments,
+    ...(route ? { route } : {}),
   };
 }
