@@ -18,8 +18,10 @@ function Tile({ label, value, hint, alert }: { label: string; value: string; hin
 }
 
 function trialStatus(trials: EvalTrialRecord[]): { label: string; className: string } {
-  const passed = trials.filter((t) => t.passed).length;
-  if (passed === trials.length) return { label: 'PASS', className: 'bg-green-100 text-green-800' };
+  const graded = trials.filter((t) => !t.errored);
+  const passed = graded.filter((t) => t.passed).length;
+  if (graded.length === 0) return { label: 'ERROR', className: 'bg-gray-200 text-gray-700' };
+  if (passed === graded.length) return { label: 'PASS', className: 'bg-green-100 text-green-800' };
   if (passed === 0) return { label: 'FAIL', className: 'bg-red-100 text-red-800' };
   return { label: 'FLAKY', className: 'bg-amber-100 text-amber-800' };
 }
@@ -124,6 +126,9 @@ export default function EvalRunPage() {
             {m && (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <Tile label="Success rate" value={pct(m.successRate)} hint={`n=${m.trials} (${m.fixtures} × k=${m.k})`} />
+                {m.errored > 0 && (
+                  <Tile label="Errored (excluded)" value={String(m.errored)} hint="grader/infrastructure failures" />
+                )}
                 <Tile label={`pass@${m.k}`} value={pct(m.passAtK)} hint="any trial passed" />
                 <Tile label={`pass^${m.k}`} value={pct(m.passHatK)} hint="every trial passed" />
                 <Tile
@@ -152,7 +157,8 @@ export default function EvalRunPage() {
             <div className="bg-white rounded-lg shadow-lg divide-y divide-gray-100">
               {fixtures.map(([fixtureId, trials]) => {
                 const status = trialStatus(trials);
-                const passed = trials.filter((t) => t.passed).length;
+                const graded = trials.filter((t) => !t.errored);
+                const passed = graded.filter((t) => t.passed).length;
                 const unsafe = trials.some((t) => t.safetyViolation);
                 return (
                   <div key={fixtureId} className="p-4 space-y-2">
@@ -168,7 +174,8 @@ export default function EvalRunPage() {
                           </span>
                         )}
                         <span className="text-xs text-gray-500">
-                          {passed}/{trials.length}
+                          {passed}/{graded.length}
+                          {graded.length < trials.length ? ` · ${trials.length - graded.length} errored` : ''}
                         </span>
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${status.className}`}>
                           {status.label}
@@ -178,8 +185,12 @@ export default function EvalRunPage() {
                     <ul className="space-y-1">
                       {trials.map((t) => (
                         <li key={t.trial} className="text-xs text-gray-600 flex gap-2">
-                          <span className={`shrink-0 font-mono ${t.passed ? 'text-green-700' : 'text-red-700'}`}>
-                            #{t.trial} {t.passed ? 'pass' : 'fail'}
+                          <span
+                            className={`shrink-0 font-mono ${
+                              t.errored ? 'text-gray-500' : t.passed ? 'text-green-700' : 'text-red-700'
+                            }`}
+                          >
+                            #{t.trial} {t.errored ? 'error' : t.passed ? 'pass' : 'fail'}
                           </span>
                           <span className="shrink-0 text-gray-400">
                             {[

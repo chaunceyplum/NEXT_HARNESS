@@ -30,6 +30,23 @@ export function judgeModelKey(): string {
   }
 }
 
+/**
+ * Judge to retry on when the primary judge refuses: EVAL_JUDGE_FALLBACK_MODEL,
+ * else the next-strongest model on the same provider (expensive tier first,
+ * then balanced). Refusals are model-specific, so a sibling usually grades
+ * what the primary won't.
+ */
+export function judgeFallbackModelKey(primary: string): string | undefined {
+  if (process.env.EVAL_JUDGE_FALLBACK_MODEL) return process.env.EVAL_JUDGE_FALLBACK_MODEL;
+  try {
+    const { provider } = getModelEntry(primary);
+    const siblings = getModelRegistry().filter((e) => e.provider === provider && e.key !== primary);
+    return (siblings.find((e) => e.tier === 'expensive') ?? siblings.find((e) => e.tier === 'balanced'))?.key;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Where a role's model key came from, for the config line each suite prints. */
 export function modelSource(role: 'model' | 'judge' | 'rag-judge'): string {
   const fromDefault = process.env.DEFAULT_MODEL ? 'DEFAULT_MODEL' : "built-in default (DEFAULT_MODEL unset)";

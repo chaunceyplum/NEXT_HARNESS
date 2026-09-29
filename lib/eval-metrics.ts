@@ -11,13 +11,20 @@
  *     production reliability, and it drops fast as k grows.
  *   - costPerSuccessUsd: total cost over successes, not over runs. A cheaper
  *     model that fails more can cost more.
+ *
+ * Errored trials (the grader or infrastructure failed, not the subject) are
+ * counted in `errored` and excluded from every rate. A fixture whose trials
+ * all errored drops out of pass@k/pass^k entirely.
  */
 
 import type { EvalTrialRecord } from './types';
 
 export interface EvalRunMetrics {
   fixtures: number;
+  /** Graded trials — errored trials excluded. */
   trials: number;
+  /** Trials where the grader/infrastructure failed; excluded from all rates. */
+  errored: number;
   /** Trials per fixture. The minimum across fixtures, if they ever differ. */
   k: number;
   successRate: number;
@@ -62,7 +69,8 @@ export function groupByFixture(trials: EvalTrialRecord[]): Map<string, EvalTrial
   return groups;
 }
 
-export function computeRunMetrics(trials: EvalTrialRecord[]): EvalRunMetrics {
+export function computeRunMetrics(allTrials: EvalTrialRecord[]): EvalRunMetrics {
+  const trials = allTrials.filter((t) => !t.errored);
   const groups = [...groupByFixture(trials).values()];
   const passed = trials.filter((t) => t.passed);
   const structural = defined(trials.map((t) => t.structuralPassed));
@@ -79,6 +87,7 @@ export function computeRunMetrics(trials: EvalTrialRecord[]): EvalRunMetrics {
   return {
     fixtures: groups.length,
     trials: trials.length,
+    errored: allTrials.length - trials.length,
     k: groups.length ? Math.min(...groups.map((g) => g.length)) : 0,
     successRate: trials.length ? passed.length / trials.length : 0,
     passAtK: groups.length ? groups.filter((g) => g.some((t) => t.passed)).length / groups.length : 0,

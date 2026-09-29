@@ -53,3 +53,18 @@ describe('computeRunMetrics', () => {
     expect(m.costPerSuccessUsd).toBeUndefined();
   });
 });
+
+describe('errored trials', () => {
+  it('are counted but excluded from every rate', () => {
+    const m = computeRunMetrics([
+      trial('a', true),
+      trial('a', false, { errored: true }),
+      trial('b', false, { errored: true }),
+    ]);
+    expect(m.errored).toBe(2);
+    expect(m.trials).toBe(1);
+    expect(m.fixtures).toBe(1);
+    expect(m.successRate).toBe(1);
+    expect(m.passHatK).toBe(1);
+  });
+});

@@ -74,7 +74,9 @@ describe.runIf(pre.status === 'ready')(`RAG judge eval (judgeRagResult, k=${tria
         fixtureId: fixture.id,
         trial,
         passed,
-        structuralPassed: passed,
+        // No judgment at all is the model call failing, not miscalibration.
+        errored: !judgment,
+        structuralPassed: judgment ? passed : undefined,
         notes: notes.join('; '),
         durationMs: Date.now() - t0,
       });
