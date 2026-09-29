@@ -219,6 +219,20 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Kill switch (`lib/kill-switch.ts`)
+
+- **Stop all runs** (home page) or `POST /api/admin/kill-switch
+  {"engaged":true,"reason":"…"}` aborts every active run within seconds.
+  Pending approvals are denied and in-flight model calls are cancelled.
+  New runs are refused (`503 KILL_SWITCH`) until released with
+  `{"engaged":false}`. This switch is in process memory, so a restart
+  releases it.
+- `AGENT_DISABLED=true`: durable off switch. It can't be released from the
+  UI.
+- `HARNESS_ADMINS=alice,bob`: only these users (from the auth proxy's
+  `x-harness-user`) may engage or release it. Unset means anyone.
+- `GET /api/admin/kill-switch` lists active runs.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be

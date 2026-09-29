@@ -32,6 +32,7 @@ import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
+import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -150,6 +151,11 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: 'Invalid JSON in request body', code: 'INVALID_JSON' } as ApiError, { status: 400 });
   }
 
+  const blocked = runsBlockedReason();
+  if (blocked) {
+    return Response.json({ error: blocked, code: 'KILL_SWITCH' } as ApiError, { status: 503 });
+  }
+
   const validation = validateRequest(body);
   if (!validation.ok) {
     return Response.json(validation.error, { status: validation.status });
@@ -166,6 +172,13 @@ export async function POST(request: Request): Promise<Response> {
   // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
   const abort = new AbortController();
   request.signal.addEventListener('abort', () => abort.abort(), { once: true });
+  // The kill switch aborts runs through this same controller.
+  const unregister = registerRun(runId, {
+    abort,
+    startedAt,
+    user: request.headers.get('x-harness-user') || 'anonymous',
+    description: req.description,
+  });
 
   // TASK 8: Create a ReadableStream that pushes NDJSON events
   const stream = new ReadableStream({
@@ -258,7 +271,10 @@ export async function POST(request: Request): Promise<Response> {
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
       } catch (error) {
         const cancelled = abort.signal.aborted;
-        const message = cancelled ? 'Cancelled by client' : error instanceof Error ? error.message : String(error);
+        const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
+        const message = cancelled
+          ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
+          : error instanceof Error ? error.message : String(error);
         if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
         else console.error('[BUILD] Agent run failed:', error);
 
@@ -277,6 +293,8 @@ export async function POST(request: Request): Promise<Response> {
           error: message,
         };
         saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
+      } finally {
+        unregister();
       }
     },
     cancel() {

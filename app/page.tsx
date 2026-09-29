@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { AgentStepDTO, BuildStreamEvent, ModelOption, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import KillSwitch from '@/components/KillSwitch';
 
 // ── Streaming state ───────────────────────────────────────────────────────────
 
@@ -196,6 +197,7 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
       <div className="max-w-3xl mx-auto">
+        <KillSwitch />
         {/* Header */}
         <div className="mb-12 pt-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
           <div className="text-center sm:text-left">
