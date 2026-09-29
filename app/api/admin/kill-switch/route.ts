@@ -10,6 +10,7 @@
 
 import { engageKillSwitch, killSwitchStatus, releaseKillSwitch } from '@/lib/kill-switch';
 import type { ApiError } from '@/lib/types';
+import { recordAudit } from '@/lib/audit-log';
 
 function caller(request: Request): string {
   return request.headers.get('x-harness-user') || 'anonymous';
@@ -44,6 +45,7 @@ export async function POST(request: Request): Promise<Response> {
     const reason = typeof body.reason === 'string' ? body.reason.slice(0, 200) : '';
     const aborted = engageKillSwitch(user, reason);
     console.warn(`[KILL-SWITCH] Engaged by ${user}${reason ? ` (${reason})` : ''}; aborted ${aborted} run(s).`);
+    void recordAudit([{ type: 'kill_switch', actor: user, outcome: 'engaged', input: { reason, aborted } }]);
     return Response.json({ ...killSwitchStatus(), aborted });
   }
 
@@ -55,5 +57,6 @@ export async function POST(request: Request): Promise<Response> {
   }
   releaseKillSwitch();
   console.warn(`[KILL-SWITCH] Released by ${user}.`);
+  void recordAudit([{ type: 'kill_switch', actor: user, outcome: 'released' }]);
   return Response.json(killSwitchStatus());
 }
