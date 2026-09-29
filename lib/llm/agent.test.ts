@@ -107,6 +107,17 @@ vi.mock('./tool-catalog', () => ({
 
 vi.mock('./tool-retrieval', () => ({ shortlistTools: async () => ['adobe_list_segments'] }));
 
+// Deployment memory: scripted facts; saved facts recorded.
+let memoryFacts: Array<{ key: string; value: string }> = [];
+const savedFacts: unknown[] = [];
+vi.mock('../memory-store', () => ({
+  memoryEnabled: () => process.env.MEMORY_ENABLED !== 'false',
+  listFacts: async () => memoryFacts,
+  memoryPreamble: (facts: Array<{ key: string; value: string }>) =>
+    facts.length ? `Known facts:\n${facts.map((f) => `- ${f.key}: ${f.value}`).join('\n')}\n` : '',
+  saveFact: async (f: { key: string; value: string }) => (savedFacts.push(f), f),
+}));
+
 const { runAgent } = await import('./agent');
 
 beforeEach(() => {
@@ -321,5 +332,40 @@ describe('runAgent token streaming (TASK 1)', () => {
     // The streamed chunks reassemble into the final answer text.
     expect(deltas.join('')).toContain('here is the answer');
     expect(result.finalText).toBe('here is the answer');
+  });
+});
+
+describe('runAgent deployment memory', () => {
+  beforeEach(() => {
+    memoryFacts = [];
+    savedFacts.length = 0;
+  });
+
+  it('starts the run with remembered facts and offers remember_fact', async () => {
+    memoryFacts = [{ key: 'aep.prod_sandbox', value: 'prod' }];
+    script = [
+      { toolCall: { toolName: 'remember_fact', input: { key: 'launch.web_property_id', value: 'PR99' } } },
+      { text: 'done' },
+    ];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', runId: 'run-1', actor: 'alice' });
+    expect(JSON.stringify(calls[0].prompt)).toContain('- aep.prod_sandbox: prod');
+    expect(JSON.stringify(calls[0].prompt)).toContain('remember_fact');
+    expect(savedFacts).toEqual([expect.objectContaining({ key: 'launch.web_property_id', value: 'PR99', sourceRunId: 'run-1' })]);
+  });
+
+  it('does not offer remember_fact on a read-only run', async () => {
+    script = [{ text: 'done' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', policy: 'read-only' });
+    expect(calls[0].tools?.map((t) => t.name)).not.toContain('remember_fact');
+  });
+
+  it('is off with MEMORY_ENABLED=false', async () => {
+    process.env.MEMORY_ENABLED = 'false';
+    memoryFacts = [{ key: 'aep.prod_sandbox', value: 'prod' }];
+    script = [{ text: 'done' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    delete process.env.MEMORY_ENABLED;
+    expect(JSON.stringify(calls[0].prompt)).not.toContain('aep.prod_sandbox');
+    expect(calls[0].tools?.map((t) => t.name)).not.toContain('remember_fact');
   });
 });

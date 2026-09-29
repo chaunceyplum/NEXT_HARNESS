@@ -263,6 +263,8 @@ export async function POST(request: Request): Promise<Response> {
           // TASK 1: stream assistant text token-by-token as it's generated
           onTextDelta: (delta) => push({ type: 'text_delta', delta }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
+          runId,
+          actor: request.headers.get('x-harness-user') || 'anonymous',
           // TASK 9: flagged calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
             push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });

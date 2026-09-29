@@ -33,7 +33,7 @@
  *      RunAgentOptions.approveTool; without an approver they're denied.
  */
 
-import { streamText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
+import { jsonSchema, streamText, stepCountIs, tool, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
@@ -42,6 +42,7 @@ import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './age
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
+import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import {
   budgetFinalNote,
   resolveBudget,
@@ -156,6 +157,9 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
+  /** Run id and requesting user, recorded on facts the run saves to memory. */
+  runId?: string;
+  actor?: string;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -191,7 +195,7 @@ export interface RunAgentOptions {
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-function buildSystemMessage(modelKey: string, toolDiscovery: boolean): SystemModelMessage {
+function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = false): SystemModelMessage {
   const entry = tryGetModelEntry(modelKey);
   const providerOptions: SystemModelMessage['providerOptions'] =
     entry?.provider === 'anthropic'
@@ -199,7 +203,7 @@ function buildSystemMessage(modelKey: string, toolDiscovery: boolean): SystemMod
       : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
         ? { bedrock: { cachePoint: { type: 'default' } } }
         : undefined;
-  return { role: 'system', content: systemPrompt({ toolDiscovery }), ...(providerOptions ? { providerOptions } : {}) };
+  return { role: 'system', content: systemPrompt({ toolDiscovery, memory }), ...(providerOptions ? { providerOptions } : {}) };
 }
 
 function tryGetModelEntry(modelKey: string) {
@@ -496,6 +500,28 @@ function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string
   return { stepNumber, text: step.text, toolCalls, toolResults };
 }
 
+/** Lets the agent save a verified, stable deployment fact for later runs. */
+function rememberFactTool(runId: string | undefined, actor: string | undefined) {
+  return tool({
+    description:
+      'Save a stable deployment fact for future runs, e.g. key "aep.prod_sandbox", value "prod". Overwrites the same key. Only identifiers you verified with a tool; never credentials or personal data. Lowercase key with letters, digits, "_", "." or "-".',
+    inputSchema: jsonSchema<{ key: string; value: string; note?: string }>({
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'e.g. "launch.web_property_id"' },
+        value: { type: 'string', description: 'The identifier or short fact (max 300 chars).' },
+        note: { type: 'string', description: 'Optional: where it came from.' },
+      },
+      required: ['key', 'value'],
+      additionalProperties: false,
+    }),
+    execute: async ({ key, value, note }) => {
+      const fact = await saveFact({ key, value, note, sourceRunId: runId, updatedBy: `agent (${actor ?? 'anonymous'})` });
+      return { stored: fact.key, value: fact.value };
+    },
+  });
+}
+
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
@@ -532,6 +558,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     );
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
+  }
+
+  // Deployment memory (memory-store.ts), live runs only: stored facts lead
+  // the first message, and remember_fact saves new ones (not in read-only runs).
+  let userMessage = userInput;
+  if (!opts.tools && memoryEnabled()) {
+    try {
+      userMessage = memoryPreamble(await listFacts()) + userInput;
+    } catch (err) {
+      console.warn('[agent] Memory unavailable; running without it:', err instanceof Error ? err.message : err);
+    }
+    if (resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun }).mode !== 'read-only') {
+      tools = { ...tools, remember_fact: rememberFactTool(opts.runId, opts.actor) };
+    }
   }
 
   // TASK 9: gate risky calls on a human decision (live runs only).
@@ -598,8 +638,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
-        messages: [{ role: 'user', content: userInput }],
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools),
+        messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
         abortSignal: opts.abortSignal,

@@ -340,6 +340,28 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
+## Deployment memory (`lib/memory-store.ts`)
+
+Stable facts every live run starts with (sandbox names, Launch property
+ids, repos, merge policy ids), so the agent doesn't rediscover them:
+
+- **Read:** stored facts go at the top of the run's first message, marked
+  as possibly stale. They're not in the system prompt, so the cached
+  prefix stays stable.
+- **Write:** the agent calls `remember_fact(key, value)` when it has
+  verified a stable identifier. Not offered on read-only runs; assisted
+  rollout mode asks before each write, as for any other write. Keys look
+  like `aep.prod_sandbox`, values are at most 300 characters, there are at
+  most 100 facts, and credentials and personal data are refused.
+- **People:** `/memory` lists, adds, edits and deletes facts
+  (`GET/POST/DELETE /api/memory`; writes limited to `HARNESS_ADMINS` when
+  set). Each fact records who set it and the run it came from.
+- `MEMORY_ENABLED=false` turns both paths off. Stored in `harness_memory`.
+  If memory is unavailable, runs continue without it.
+
+`HARNESS_CONTEXT` (static, in the system prompt) still works for facts
+that never change.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
