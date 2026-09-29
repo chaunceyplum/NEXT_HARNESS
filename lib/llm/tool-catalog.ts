@@ -144,6 +144,39 @@ export function isNonRetryableError(message: string): boolean {
 }
 
 /**
+ * TASK 7: Validation errors — 4xx responses that are NOT auth/permission
+ * failures. These mean the arguments are wrong and retrying with the same
+ * args will always fail. We still do the RAG grounding lookup (so the model
+ * knows what went wrong), but we return the findings immediately as a rich
+ * error object rather than burning a retry attempt on a call that cannot
+ * succeed.
+ *
+ * Pattern: any 4xx status code that isn't already caught by
+ * isNonRetryableError (401/403/forbidden/unauthorized/permission denied).
+ */
+const VALIDATION_ERROR_PATTERNS = [
+  /\b400\b/,   // Bad Request — invalid field, missing required param
+  /\b404\b/,   // Not Found — referenced resource doesn't exist
+  /\b409\b/,   // Conflict — duplicate name, state machine violation
+  /\b410\b/,   // Gone — resource was deleted
+  /\b422\b/,   // Unprocessable Entity — schema/constraint violation (most common)
+  /\b429\b/,   // Too Many Requests — rate limit (don't retry immediately)
+  /bad request/i,
+  /not found/i,
+  /unprocessable/i,
+  /invalid.*field/i,
+  /validation.*error/i,
+  /constraint.*violation/i,
+  /already exists/i,
+  /duplicate/i,
+];
+
+export function isValidationError(message: string): boolean {
+  if (isNonRetryableError(message)) return false; // auth errors take priority
+  return VALIDATION_ERROR_PATTERNS.some((re) => re.test(message));
+}
+
+/**
  * Tool arguments embedded in a RAG lookup query so it's bounded regardless
  * of payload size — e.g. a CJA project definition can be tens of KB, and
  * that has no bearing on searching docs for "what's the correct usage."
@@ -266,15 +299,25 @@ export interface ExecuteMcpToolWithRetryOptions {
  * Calls one MCP (or local) tool with the RAG-consulting retry behavior,
  * independent of the AI SDK tool wrapper below.
  *
- * On failure, before retrying, this consults the relevant knowledge-search
- * tool (query built from the tool name, its arguments, and the error) so
- * the retry — and the model's own next move if the retry also fails — has
- * more to go on than "it errored." Retry history (including what the RAG
- * lookup found) rides along on the eventual result/error so it's visible
- * in the trace, not just to the model.
+ * Error handling has three tiers (TASK 7):
  *
- * RAG tools call themselves — never retry-with-RAG-lookup those, or a
- * failing search would try to "ground itself" recursively.
+ *   1. Auth/permission errors (401/403/forbidden/etc): throw immediately —
+ *      no retry, no RAG lookup. These are permanent for this credential.
+ *
+ *   2. Validation errors (400/404/409/422/etc): the arguments are wrong and
+ *      retrying the same call cannot fix that. Do the RAG grounding lookup
+ *      once to get relevant docs, then return a structured error object with
+ *      the findings attached so the model can correct its arguments on the
+ *      next step — don't waste a retry attempt.
+ *
+ *   3. Transient errors (5xx, timeouts, network): retry with exponential
+ *      back-off, doing a RAG lookup before each retry attempt so the model
+ *      has context even if all retries fail.
+ *
+ * Retry history (including what the RAG lookup found) rides along on the
+ * eventual result/error so it's visible in the trace, not just to the model.
+ *
+ * RAG tools never go through this path — they call themselves once and return.
  */
 export async function executeMcpToolWithRetry(
   toolName: string,
@@ -307,11 +350,41 @@ export async function executeMcpToolWithRetry(
       lastError = err;
       const message = err instanceof Error ? err.message : String(err);
 
-      // Permanent for this credential — no retry, no RAG lookup, fail now.
+      // Tier 1: permanent auth/permission error — fail immediately.
       if (isNonRetryableError(message)) {
         throw err;
       }
 
+      // TASK 7 — Tier 2: validation error — arguments are wrong, retrying
+      // the same call is pointless. Do the RAG grounding lookup once to give
+      // the model context for fixing its arguments, then return a structured
+      // error object (not a throw) so the AI SDK surfaces it as a tool result
+      // the model can read and act on rather than an exception that stops the run.
+      if (isValidationError(message)) {
+        const ragTool = pickRagTool(toolName, availableNames);
+        const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
+        if (ragTool) {
+          const query = `Tool "${toolName}" failed with validation error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What are the correct argument values or constraints?`;
+          record.raggedBefore = { tool: ragTool, query };
+          try {
+            const findings = await callMcpTool(ragTool, { query });
+            record.raggedBefore.judgment = await judgeRagResult(query, findings);
+            record.raggedBefore.findings = summarizeFindingsForRetryHistory(findings);
+          } catch (ragErr) {
+            record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
+          }
+        }
+        // Return as a structured object so the model sees the error + docs and
+        // can correct its arguments — throwing would bypass the model entirely.
+        return {
+          _error: message,
+          _validationError: true,
+          _hint: 'This is an argument/validation error, not a transient failure. Fix the arguments and call the tool again.',
+          _ragFindings: record.raggedBefore?.findings,
+        };
+      }
+
+      // Tier 3: transient error — retry with a RAG grounding lookup first.
       if (attempt < maxRetries) {
         const ragTool = pickRagTool(toolName, availableNames);
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
@@ -320,9 +393,6 @@ export async function executeMcpToolWithRetry(
           record.raggedBefore = { tool: ragTool, query };
           try {
             const findings = await callMcpTool(ragTool, { query });
-            // Judge against the real findings (still bounded on its own —
-            // see rag-judge.ts's own cap), but only ever store/throw the
-            // capped version below.
             record.raggedBefore.judgment = await judgeRagResult(query, findings);
             record.raggedBefore.findings = summarizeFindingsForRetryHistory(findings);
           } catch (ragErr) {
@@ -344,11 +414,41 @@ export async function executeMcpToolWithRetry(
 }
 
 /**
+ * Universal cap applied to every tool's result before it's returned to the
+ * model. Prevents large list/read payloads from accumulating in context the
+ * same way capRagResult() already does for knowledge-search results.
+ *
+ * 12 000 chars covers a large list_* response or a moderate read (e.g. a
+ * CJA project definition) without truncating typical narrow-tool results
+ * (create/update confirmation objects, short list pages) at all. The
+ * truncation note tells the model to narrow its query rather than retry
+ * blind.
+ *
+ * RAG results are already capped at 6 000 chars by capRagResult(), which
+ * fires before this wrapper — the two caps don't conflict, this one is just
+ * a backstop for every other tool.
+ */
+const MAX_CHARS_PER_TOOL_RESULT = 12_000;
+
+export function capToolResult(toolName: string, result: unknown): unknown {
+  const json = JSON.stringify(result);
+  if (json.length <= MAX_CHARS_PER_TOOL_RESULT) return result;
+  return (
+    `${json.slice(0, MAX_CHARS_PER_TOOL_RESULT)}… (truncated — ${json.length} chars total. ` +
+    `Use more specific arguments to ${toolName} to get a smaller, focused result.)`
+  );
+}
+
+/**
  * Wrap a set of MCP tool definitions as an AI SDK ToolSet. Each tool's
  * `execute` calls straight through to executeMcpToolWithRetry — the model
  * only ever sees the schemas you hand it here, which is what makes
  * tool-shortlisting (lib/llm/tool-retrieval.ts) effective: pass a narrow
  * `defs` list and the model literally cannot call anything outside it.
+ *
+ * Every result is capped at MAX_CHARS_PER_TOOL_RESULT before being returned
+ * to the model, so that large list/read payloads don't accumulate unbounded
+ * in context across a multi-step run.
  */
 export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions = {}): ToolSet {
   const maxRetries = opts.maxRetries ?? 1;
@@ -361,8 +461,14 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       // MCP inputSchema is already JSON Schema; jsonSchema() takes it as-is
       // without requiring a hand-written Zod schema per tool.
       inputSchema: jsonSchema(def.inputSchema as never),
-      execute: async (input: unknown) =>
-        executeMcpToolWithRetry(def.name, (input as Record<string, unknown>) ?? {}, { maxRetries, availableNames }),
+      execute: async (input: unknown) => {
+        const result = await executeMcpToolWithRetry(
+          def.name,
+          (input as Record<string, unknown>) ?? {},
+          { maxRetries, availableNames }
+        );
+        return capToolResult(def.name, result);
+      },
     });
   }
   return tools;

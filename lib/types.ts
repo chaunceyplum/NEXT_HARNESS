@@ -47,19 +47,32 @@ export interface BuildRequest {
   toolRetries?: number;
   /**
    * How many tools the semantic shortlist pulls in, on top of the always-on
-   * set. Omit for the server default. Raise this for requests that need a
-   * less obvious tool (e.g. a "list"/lookup tool the request text doesn't
-   * closely resemble) — the tradeoff is a larger prompt per tool-call turn.
+   * set. Omit for the server default.
    */
   toolShortlistSize?: number;
   /**
    * Tool-call round trips before the agent loop is forced to stop. Omit for
-   * the server default. Raise this for requests that chain many dependent
-   * lookups/writes (e.g. find a property, then its rules, then add a rule
-   * component) — if the run ends with finishReason "tool-calls" instead of
-   * "stop", it hit this limit mid-task rather than reaching a real answer.
+   * the server default.
    */
   maxSteps?: number;
+  /**
+   * TASK 9: Tool policy. 'read-only' removes all write and destructive tools
+   * so the model structurally cannot call them. Defaults to BUILD_POLICY env
+   * var, or 'full' if unset.
+   */
+  policy?: 'full' | 'read-only';
+  /**
+   * TASK 9: When true, destructive tools describe what they would do instead
+   * of executing. Defaults to TOOL_DRY_RUN env var.
+   */
+  dryRun?: boolean;
+  /**
+   * TASK 10: Token budget for extended thinking (Anthropic/Bedrock only).
+   * When set, enables the model's internal reasoning before responding.
+   * Minimum 1 000. Good starting point: 8 000–16 000 for complex tasks.
+   * Can also be set globally via THINKING_BUDGET_TOKENS env var.
+   */
+  thinkingBudget?: number;
 }
 
 export interface BuildResponse {
@@ -71,6 +84,17 @@ export interface BuildResponse {
   finishReason: string;
   usage: TokenUsage;
 }
+
+// ── TASK 8: Streaming event types ─────────────────────────────────────────────
+// POST /api/build returns a streaming response of newline-delimited JSON events.
+// Each line is one BuildStreamEvent. The client accumulates step events and
+// replaces the trace on each update; the 'done' event carries the final summary.
+
+export type BuildStreamEvent =
+  | { type: 'run_start'; runId: string; toolsConsidered: string[] }
+  | { type: 'step'; step: AgentStepDTO }
+  | { type: 'done'; finalText: string; finishReason: string; usage: TokenUsage; runId: string }
+  | { type: 'error'; error: string; code?: string };
 
 export interface ModelOption {
   key: string;
