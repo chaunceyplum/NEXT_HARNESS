@@ -230,6 +230,9 @@ export default function Home() {
             <Link href="/memory" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               Deployment memory →
             </Link>
+            <Link href="/metrics" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
+              Production metrics →
+            </Link>
             <Link href="/evals" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               View evals →
             </Link>

@@ -35,8 +35,10 @@ import { waitForApproval } from '@/lib/llm/approvals';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
-import { checkInput, redactOutput } from '@/lib/llm/guardrails';
+import { checkInput, createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
 import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
+import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
+import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -206,6 +208,17 @@ export async function POST(request: Request): Promise<Response> {
   const runId = newRunId();
   const startedAt = Date.now();
   const createdAt = new Date(startedAt).toISOString();
+  const actor = request.headers.get('x-harness-user') || 'anonymous';
+  // Who started the run, persisted with it (server-set, never from the body).
+  req.requestedBy = actor;
+  void recordAudit([{ type: 'run_start', runId, actor, input: { description: req.description, model: req.model } }]);
+  // Tool outcomes are buffered per step and written in one insert.
+  let pendingAudit: AuditEvent[] = [];
+  const flushAudit = () => {
+    const batch = pendingAudit;
+    pendingAudit = [];
+    void recordAudit(batch);
+  };
 
   // Aborts the agent run when the client goes away — the request's own signal
   // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
@@ -215,7 +228,7 @@ export async function POST(request: Request): Promise<Response> {
   const unregister = registerRun(runId, {
     abort,
     startedAt,
-    user: request.headers.get('x-harness-user') || 'anonymous',
+    user: actor,
     description: req.description,
   });
 
@@ -233,6 +246,12 @@ export async function POST(request: Request): Promise<Response> {
         } catch {
           closed = true;
         }
+      };
+      // Streamed tokens pass through the output guardrail too. A credential can
+      // span several deltas, so text is held back until it's safe to redact.
+      const textRedactor = createStreamRedactor();
+      const pushDelta = (delta: string) => {
+        if (delta) push({ type: 'text_delta', delta });
       };
       const close = () => {
         if (closed) return;
@@ -259,9 +278,28 @@ export async function POST(request: Request): Promise<Response> {
           thinkingBudget: req.thinkingBudget,
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
-          onStep: (step) => push({ type: 'step', step: redactOutput(step) }),
+          onStep: (step) => {
+            pushDelta(textRedactor.flush());
+            push({ type: 'step', step: redactOutput(step) });
+            flushAudit();
+          },
+          // Audit log: every write/destructive call's outcome (reads with AUDIT_READS=true)
+          onToolOutcome: (o) => {
+            if (o.level === 'read' && !o.approvalReason && !auditReads()) return;
+            pendingAudit.push({
+              type: 'tool_call',
+              runId,
+              actor,
+              tool: o.toolName,
+              level: o.level,
+              reason: o.approvalReason,
+              input: o.input,
+              outcome: o.outcome,
+              error: o.error,
+            });
+          },
           // TASK 1: stream assistant text token-by-token as it's generated
-          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
+          onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
           runId,
           actor: request.headers.get('x-harness-user') || 'anonymous',
@@ -269,7 +307,20 @@ export async function POST(request: Request): Promise<Response> {
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
             push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
             const decision = await waitForApproval(runId, toolCallId, abort.signal);
-            push({ type: 'approval_resolved', toolCallId, ...decision });
+            push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
+            void recordAudit([
+              {
+                type: 'approval',
+                runId,
+                // Who decided; timeouts and cancellations are the system's call.
+                actor: decision.decidedBy ?? 'system',
+                tool: toolName,
+                reason,
+                input,
+                outcome: decision.approved ? 'approved' : 'denied',
+                error: decision.approved ? undefined : decision.reason,
+              },
+            ]);
             return decision;
           },
         });
@@ -284,6 +335,7 @@ export async function POST(request: Request): Promise<Response> {
           usage: agentResult.usage,
         });
 
+        pushDelta(textRedactor.flush());
         push({
           type: 'done',
           finalText: agentResult.finalText,
@@ -321,7 +373,14 @@ export async function POST(request: Request): Promise<Response> {
             ragJudgments: agentResult.ragJudgments,
           },
         };
-        saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
+        saveExecution(completedRecord)
+          .then(() => {
+            // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.
+            if (shouldJudgeRun()) {
+              void judgeRun({ runId, task: req.description, answer: agentResult.finalText, steps: agentResult.steps });
+            }
+          })
+          .catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
       } catch (error) {
         const cancelled = abort.signal.aborted;
         const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
@@ -349,6 +408,7 @@ export async function POST(request: Request): Promise<Response> {
         };
         saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
       } finally {
+        flushAudit();
         unregister();
       }
     },

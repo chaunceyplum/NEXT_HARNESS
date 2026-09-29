@@ -62,6 +62,17 @@ export interface TokenUsage {
   totalTokens?: number;
 }
 
+export interface ToolOutcome {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  level: 'read' | 'write' | 'destructive';
+  outcome: 'ok' | 'error' | 'denied';
+  error?: string;
+  /** Set when the call went through the approval gate. */
+  approvalReason?: ApprovalReason;
+}
+
 export interface AgentRunResult {
   finalText: string;
   steps: AgentStepTrace[];
@@ -177,6 +188,12 @@ export interface RunAgentOptions {
    * run without an approver, flagged calls are denied. The eval path
    * (opts.tools) is never gated.
    */
+  /**
+   * Called once per tool call after it finishes, is denied, or fails — with
+   * the effective tool (call_tool unwrapped), its access level, and why it
+   * needed approval if it did. Feeds the audit log (lib/audit-log.ts).
+   */
+  onToolOutcome?: (outcome: ToolOutcome) => void;
   approveTool?: (call: {
     toolCallId: string;
     toolName: string;
@@ -522,6 +539,56 @@ function rememberFactTool(runId: string | undefined, actor: string | undefined) 
   });
 }
 
+/** One ToolOutcome per finished, failed, or denied call in a step's content. */
+function toolOutcomes(content: ReadonlyArray<{ type: string }>, reasons: Map<string, ApprovalReason>): ToolOutcome[] {
+  type Part = {
+    type: string;
+    toolCallId?: string;
+    toolName?: string;
+    input?: unknown;
+    error?: unknown;
+    approved?: boolean;
+    reason?: string;
+    toolCall?: { toolCallId?: string; toolName: string; input?: unknown };
+  };
+  const out: ToolOutcome[] = [];
+  for (const part of content as ReadonlyArray<Part>) {
+    let id: string | undefined;
+    let raw: { toolName: string; input: unknown } | undefined;
+    let outcome: ToolOutcome['outcome'];
+    let error: string | undefined;
+    if (part.type === 'tool-result' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'ok';
+    } else if (part.type === 'tool-error' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'error';
+      error = part.error instanceof Error ? part.error.message : String(part.error);
+    } else if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
+      id = part.toolCall.toolCallId;
+      raw = { toolName: part.toolCall.toolName, input: part.toolCall.input };
+      outcome = 'denied';
+      error = part.reason;
+    } else {
+      continue;
+    }
+    const call = effectiveToolCall(raw.toolName, raw.input);
+    const approvalReason = id ? reasons.get(id) : undefined;
+    out.push({
+      toolCallId: id ?? '',
+      toolName: call.toolName,
+      input: call.input,
+      level: classifyTool(call.toolName),
+      outcome,
+      ...(error !== undefined ? { error } : {}),
+      ...(approvalReason ? { approvalReason } : {}),
+    });
+  }
+  return out;
+}
+
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
@@ -575,6 +642,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   }
 
   // TASK 9: gate risky calls on a human decision (live runs only).
+  const approvalReasons = new Map<string, ApprovalReason>();
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = opts.tools
     ? undefined
@@ -582,6 +650,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
         const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
         if (!reason) return 'not-applicable' as const;
+        approvalReasons.set(toolCall.toolCallId, reason);
         if (!opts.approveTool) {
           return {
             type: 'denied' as const,
@@ -702,6 +771,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           for (const part of step.content) {
             if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
             if (classifyTool(effectiveToolCall(part.toolName, part.input).toolName) !== 'read') attemptHadSideEffects = true;
+          }
+          if (opts.onToolOutcome) {
+            for (const outcome of toolOutcomes(step.content, approvalReasons)) opts.onToolOutcome(outcome);
           }
           opts.onStep?.(trace);
         },
