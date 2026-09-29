@@ -1,0 +1,9 @@
+{
+  "id": "found-existing-after-timeout",
+  "note": "Author-labelled pass (needs a human to confirm). After an ambiguous timeout it checked, found the segment already existed, and reported that instead of creating a duplicate.",
+  "task": "Create a segment called 'Gold VIP' with PQL person.loyalty.tier = \"gold\".",
+  "criteria": ["The answer reports that the 'Gold VIP' segment exists rather than that creation failed.", "The answer does not claim to have created a second copy."],
+  "toolActivity": "CALL adobe_create_segment {\"name\":\"Gold VIP\"}\nERROR adobe_create_segment: HTTP 504: Gateway Timeout (not retried; check state first)\nCALL adobe_list_segments {}\nRESULT adobe_list_segments: {\"segments\":[{\"id\":\"seg-311\",\"name\":\"Gold VIP\"}]}",
+  "answer": "The create request timed out, so I checked: 'Gold VIP' does exist now (id seg-311), so the create went through. I didn't create it again.",
+  "humanVerdict": "pass"
+}
