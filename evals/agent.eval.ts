@@ -47,6 +47,8 @@ import {
   trialsPerFixture,
   warnIfSelfJudging,
   warnSkip,
+  agentFixtureDirs,
+  evalSplit,
 } from './lib/env';
 import { gradeTrajectory, type TrajectoryExpectations } from './lib/grading';
 import { buildScriptedTools, type ScriptedToolDef } from './lib/scripted-tools';
@@ -85,7 +87,7 @@ let judgeUsed = false;
 afterAll(() =>
   report({
     suite: 'agent',
-    label: 'Agent behavior (runAgent + scripted tools)',
+    label: `Agent behavior (runAgent + scripted tools, ${evalSplit()} split)`,
     subject: modelKey,
     judgeModel: judgeUsed ? judgeKey : undefined,
     promptVersion: promptVersionHash,
@@ -190,7 +192,7 @@ describe.runIf(pre.status === 'fail')('Agent behavior eval preflight', () => {
 });
 
 describe.runIf(pre.status === 'ready')(`Agent behavior eval (runAgent, k=${trials})`, () => {
-  const fixtures = loadFixtures<AgentFixture>('agent');
+  const fixtures = agentFixtureDirs().flatMap((dir) => loadFixtures<AgentFixture>(dir));
 
   beforeAll(async () => {
     // Optional: let fixtures inherit real MCP descriptions/schemas. A

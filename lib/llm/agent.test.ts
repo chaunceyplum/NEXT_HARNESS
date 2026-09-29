@@ -107,6 +107,17 @@ vi.mock('./tool-catalog', () => ({
 
 vi.mock('./tool-retrieval', () => ({ shortlistTools: async () => ['adobe_list_segments'] }));
 
+// Deployment memory: scripted facts; saved facts recorded.
+let memoryFacts: Array<{ key: string; value: string }> = [];
+const savedFacts: unknown[] = [];
+vi.mock('../memory-store', () => ({
+  memoryEnabled: () => process.env.MEMORY_ENABLED !== 'false',
+  listFacts: async () => memoryFacts,
+  memoryPreamble: (facts: Array<{ key: string; value: string }>) =>
+    facts.length ? `Known facts:\n${facts.map((f) => `- ${f.key}: ${f.value}`).join('\n')}\n` : '',
+  saveFact: async (f: { key: string; value: string }) => (savedFacts.push(f), f),
+}));
+
 const { runAgent } = await import('./agent');
 
 beforeEach(() => {
@@ -329,9 +340,9 @@ describe('runAgent version fingerprints (item #8)', () => {
     script = [{ text: 'done' }];
     const result = await runAgent({ userInput: 'hello', modelKey: 'test:plain' });
 
-    expect(result.versions.prompt).toMatch(/^[0-9a-f]{12}$/);
-    expect(result.versions.toolset).toMatch(/^[0-9a-f]{12}$/);
-    expect(typeof result.versions.app).toBe('string');
+    expect(result.versions!.prompt).toMatch(/^[0-9a-f]{12}$/);
+    expect(result.versions!.toolset).toMatch(/^[0-9a-f]{12}$/);
+    expect(typeof result.versions!.app).toBe('string');
   });
 
   it('computes the same prompt hash across runs and a different toolset hash when the tools differ', async () => {
@@ -340,8 +351,8 @@ describe('runAgent version fingerprints (item #8)', () => {
     script = [{ text: 'b' }];
     const b = await runAgent({ userInput: 'y', modelKey: 'test:plain' });
     // Same live prompt + same shortlist → identical fingerprints.
-    expect(a.versions.prompt).toBe(b.versions.prompt);
-    expect(a.versions.toolset).toBe(b.versions.toolset);
+    expect(a.versions!.prompt).toBe(b.versions!.prompt);
+    expect(a.versions!.toolset).toBe(b.versions!.toolset);
 
     // A scripted (eval-path) tool set is a different set → different toolset hash,
     // and the eval prompt (no tool-discovery rule) → different prompt hash.
@@ -353,7 +364,140 @@ describe('runAgent version fingerprints (item #8)', () => {
         only_one: tool({ description: 'the only tool', inputSchema: jsonSchema({ type: 'object' } as never), execute: async () => ({}) }),
       },
     });
-    expect(scripted.versions.toolset).not.toBe(a.versions.toolset);
-    expect(scripted.versions.prompt).not.toBe(a.versions.prompt);
+    expect(scripted.versions!.toolset).not.toBe(a.versions!.toolset);
+    expect(scripted.versions!.prompt).not.toBe(a.versions!.prompt);
+  });
+});
+
+describe('runAgent deployment memory', () => {
+  beforeEach(() => {
+    memoryFacts = [];
+    savedFacts.length = 0;
+  });
+
+  it('starts the run with remembered facts and offers remember_fact', async () => {
+    memoryFacts = [{ key: 'aep.prod_sandbox', value: 'prod' }];
+    script = [
+      { toolCall: { toolName: 'remember_fact', input: { key: 'launch.web_property_id', value: 'PR99' } } },
+      { text: 'done' },
+    ];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', runId: 'run-1', actor: 'alice' });
+    expect(JSON.stringify(calls[0].prompt)).toContain('- aep.prod_sandbox: prod');
+    expect(JSON.stringify(calls[0].prompt)).toContain('remember_fact');
+    expect(savedFacts).toEqual([expect.objectContaining({ key: 'launch.web_property_id', value: 'PR99', sourceRunId: 'run-1' })]);
+  });
+
+  it('does not offer remember_fact on a read-only run', async () => {
+    script = [{ text: 'done' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', policy: 'read-only' });
+    expect(calls[0].tools?.map((t) => t.name)).not.toContain('remember_fact');
+  });
+
+  it('is off with MEMORY_ENABLED=false', async () => {
+    process.env.MEMORY_ENABLED = 'false';
+    memoryFacts = [{ key: 'aep.prod_sandbox', value: 'prod' }];
+    script = [{ text: 'done' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    delete process.env.MEMORY_ENABLED;
+    expect(JSON.stringify(calls[0].prompt)).not.toContain('aep.prod_sandbox');
+    expect(calls[0].tools?.map((t) => t.name)).not.toContain('remember_fact');
+  });
+});
+
+describe('runAgent plan-first', () => {
+  const plan = {
+    goal: 'List segments',
+    steps: [
+      { id: 1, description: 'List the segments', tool: 'adobe_list_segments', expectedOutput: 'segment names', dependsOn: [] },
+      { id: 2, description: 'Answer', tool: null, expectedOutput: 'the list', dependsOn: [1] },
+    ],
+  };
+
+  it('plans, gives the executor the plan and the plan tools, and returns the tracked plan', async () => {
+    script = [
+      { text: JSON.stringify(plan) },
+      { toolCall: { toolName: 'update_plan', input: { stepId: 1, status: 'done', note: '2 segments' } } },
+      { text: 'There are 2 segments.' },
+    ];
+    const updates: unknown[] = [];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true, onPlan: (p) => updates.push(JSON.parse(JSON.stringify(p))) });
+
+    const executorPrompt = JSON.stringify(calls[1].prompt);
+    expect(executorPrompt).toContain('Execute this plan');
+    expect(executorPrompt).toContain('1. [pending] List the segments');
+    expect(calls[1].tools?.map((t) => t.name)).toEqual(expect.arrayContaining(['update_plan', 'revise_plan']));
+    expect(result.plan?.steps[0]).toMatchObject({ status: 'done', note: '2 segments' });
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('runs nothing when the plan is denied', async () => {
+    script = [{ text: JSON.stringify(plan) }];
+    const result = await runAgent({
+      userInput: 'list segments',
+      modelKey: 'test:plain',
+      planFirst: true,
+      approvePlan: async () => ({ approved: false, reason: 'Denied by "bob".' }),
+    });
+    expect(result.finalText).toMatch(/plan wasn't approved/);
+    expect(calls).toHaveLength(1);
+    expect(executed).toEqual([]);
+  });
+
+  it('falls back to running without a plan when planning fails', async () => {
+    script = [{ text: 'not json' }, { text: 'done anyway' }];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true });
+    warn.mockRestore();
+    expect(result.plan).toBeUndefined();
+    expect(result.finalText).toBe('done anyway');
+  });
+});
+
+describe('runAgent with model "auto"', () => {
+  it('routes a clear change request by rules and records the decision, without pinning', async () => {
+    script = [{ text: 'done' }];
+    const routes: unknown[] = [];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', onRoute: (r) => routes.push(r) });
+    expect(result.route).toMatchObject({ category: 'change', via: 'rules', tier: 'balanced', modelKey: 'test:plain' });
+    expect(routes).toHaveLength(1);
+    expect(result.modelKey).toBe('test:plain');
+  });
+});
+
+describe('runAgent tool outcomes (audit log feed)', () => {
+  it('reports each call with its effective tool, level, outcome and approval reason', async () => {
+    script = [
+      { toolCall: { toolName: 'adobe_list_segments', input: {} } },
+      deleteViaProxy,
+      { text: 'done' },
+    ];
+    const outcomes: unknown[] = [];
+    await runAgent({
+      userInput: 'delete segment s1',
+      modelKey: 'test:plain',
+      approveTool: async () => ({ approved: false, reason: 'Denied by "bob".' }),
+      onToolOutcome: (o) => outcomes.push(o),
+    });
+    expect(outcomes).toEqual([
+      expect.objectContaining({ toolName: 'adobe_list_segments', level: 'read', outcome: 'ok' }),
+      expect.objectContaining({
+        toolName: 'adobe_delete_segment',
+        input: { id: 's1' },
+        level: 'destructive',
+        outcome: 'denied',
+        approvalReason: 'destructive',
+        error: 'Denied by "bob".',
+      }),
+    ]);
+  });
+});
+
+describe('runAgent plan-first with model "auto"', () => {
+  it('plans on the routed model rather than the literal "auto"', async () => {
+    const plan = { goal: 'g', steps: [{ id: 1, description: 'Answer', tool: null, expectedOutput: 'x', dependsOn: [] }] };
+    script = [{ text: JSON.stringify(plan) }, { text: 'done' }];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', planFirst: true });
+    expect(result.route?.modelKey).toBe('test:plain');
+    expect(result.plan?.goal).toBe('g');
   });
 });

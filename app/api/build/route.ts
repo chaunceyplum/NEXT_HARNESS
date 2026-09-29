@@ -26,18 +26,26 @@
  *   {"type":"error","error":"...","code":"..."}
  *
  * The client reads the stream with a ReadableStream reader, parsing each
- * newline-delimited JSON line as it arrives. If the client disconnects (or
- * hits Stop), the agent run is aborted rather than left running tools.
+ * newline-delimited JSON line as it arrives. Every event carries a `seq`.
+ *
+ * The run is a job (lib/run-jobs.ts, lib/build-run.ts), not part of this
+ * request: if the client disconnects, the run keeps going, and the client
+ * can reconnect with GET /api/runs/:id/events (buffered events replay).
+ * Stop it with POST /api/runs/:id/cancel (or the kill switch). The run
+ * record is checkpointed as 'running' after every step; a run cut off by a
+ * server restart is marked 'interrupted' and can be resumed from
+ * /results/[id] (POST /api/runs/:id/resume).
  */
 
-import { runAgent } from '@/lib/llm/agent';
-import { waitForApproval } from '@/lib/llm/approvals';
-import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
-import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
-import { newRunId, saveExecution } from '@/lib/execution-store';
-import { checkInput, redactOutput } from '@/lib/llm/guardrails';
-import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
-import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
+import { parseRolloutMode } from '@/lib/llm/approval-policy';
+import { planFirstByDefault } from '@/lib/llm/planner';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
+import { getModelRegistry } from '@/lib/llm/model-registry';
+import { checkInput } from '@/lib/llm/guardrails';
+import { runsBlockedReason } from '@/lib/kill-switch';
+import { streamJob } from '@/lib/run-jobs';
+import { startBuildRun } from '@/lib/build-run';
+import { ApiError, BuildRequest } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -81,7 +89,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
   }
   const description = input.text;
 
-  if (b.model !== undefined) {
+  if (b.model !== undefined && b.model !== AUTO_MODEL) {
     const known = getModelRegistry().some((e) => e.key === b.model);
     if (!known) {
       return {
@@ -166,7 +174,8 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     ok: true,
     req: {
       description,
-      model: typeof b.model === 'string' ? b.model : undefined,
+      // "auto" routes per request (lib/llm/model-router.ts); MODEL_ROUTING=true makes it the default.
+      model: typeof b.model === 'string' ? b.model : routingEnabledByDefault() ? AUTO_MODEL : undefined,
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
       maxSteps: typeof b.maxSteps === 'number' ? b.maxSteps : undefined,
@@ -174,6 +183,9 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
+      planFirst: typeof b.planFirst === 'boolean' ? b.planFirst : planFirstByDefault(),
+      // A request can ask for plan approval; PLAN_APPROVAL=true requires it for every planned run.
+      requirePlanApproval: b.requirePlanApproval === true || process.env.PLAN_APPROVAL?.trim().toLowerCase() === 'true',
       rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
     },
@@ -201,172 +213,5 @@ export async function POST(request: Request): Promise<Response> {
   }
   const req = validation.req;
 
-  console.log('[BUILD] Running agent for:', req.description.slice(0, 80));
-
-  const runId = newRunId();
-  const startedAt = Date.now();
-  const createdAt = new Date(startedAt).toISOString();
-
-  // Aborts the agent run when the client goes away — the request's own signal
-  // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
-  const abort = new AbortController();
-  request.signal.addEventListener('abort', () => abort.abort(), { once: true });
-  // The kill switch aborts runs through this same controller.
-  const unregister = registerRun(runId, {
-    abort,
-    startedAt,
-    user: request.headers.get('x-harness-user') || 'anonymous',
-    description: req.description,
-  });
-
-  // TASK 8: Create a ReadableStream that pushes NDJSON events
-  const stream = new ReadableStream({
-    async start(controller) {
-      const enc = new TextEncoder();
-      let closed = false;
-      // Writing to a stream the client has cancelled throws; after a
-      // disconnect, events just have nowhere to go.
-      const push = (event: BuildStreamEvent) => {
-        if (closed) return;
-        try {
-          controller.enqueue(enc.encode(JSON.stringify(event) + '\n'));
-        } catch {
-          closed = true;
-        }
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        try { controller.close(); } catch { /* already closed/cancelled */ }
-      };
-
-      try {
-        // Emit run_start immediately so the client can show a run ID before
-        // any steps. The tool list isn't known until tool selection resolves
-        // inside runAgent, so it's sent on `done` instead.
-        push({ type: 'run_start', runId, toolsConsidered: [] });
-
-        const rawResult = await runAgent({
-          userInput: req.description,
-          // Item #8: correlate the run's trace spans with the persisted run.
-          runId,
-          modelKey: req.model,
-          toolRetries: req.toolRetries,
-          toolShortlistSize: req.toolShortlistSize,
-          maxSteps: req.maxSteps,
-          budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
-          policy: req.policy,
-          dryRun: req.dryRun,
-          rolloutMode: req.rolloutMode,
-          thinkingBudget: req.thinkingBudget,
-          abortSignal: abort.signal,
-          // TASK 8: stream each step as it completes
-          onStep: (step) => push({ type: 'step', step: redactOutput(step) }),
-          // TASK 1: stream assistant text token-by-token as it's generated
-          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
-          onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
-          // TASK 9: flagged calls wait here for the user's decision
-          approveTool: async ({ toolCallId, toolName, input, reason }) => {
-            push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
-            const decision = await waitForApproval(runId, toolCallId, abort.signal);
-            push({ type: 'approval_resolved', toolCallId, ...decision });
-            return decision;
-          },
-        });
-
-        // Output guardrail: nothing leaves the server (stream or run history) unredacted.
-        const agentResult = redactOutput(rawResult);
-
-        console.log('[BUILD] Agent finished:', {
-          runId,
-          steps: agentResult.steps.length,
-          finishReason: agentResult.finishReason,
-          usage: agentResult.usage,
-        });
-
-        push({
-          type: 'done',
-          finalText: agentResult.finalText,
-          finishReason: agentResult.finishReason,
-          usage: agentResult.usage,
-          runId,
-          modelKey: agentResult.modelKey,
-          toolsConsidered: agentResult.toolsConsidered,
-          stopReason: agentResult.stopReason,
-          budgetUsage: agentResult.budgetUsage,
-          versions: agentResult.versions,
-        });
-
-        close();
-
-        // Persist after streaming so we don't delay the response
-        const completedRecord: ExecutionRecord = {
-          id: runId,
-          createdAt,
-          description: req.description,
-          model: agentResult.modelKey,
-          allowFullBuild: false,
-          status: 'completed',
-          durationMs: Date.now() - startedAt,
-          toolsConsidered: agentResult.toolsConsidered,
-          request: req,
-          result: {
-            runId,
-            finalText: agentResult.finalText,
-            steps: agentResult.steps,
-            toolsConsidered: agentResult.toolsConsidered,
-            finishReason: agentResult.finishReason,
-            usage: agentResult.usage,
-            stopReason: agentResult.stopReason,
-            budgetUsage: agentResult.budgetUsage,
-            ragJudgments: agentResult.ragJudgments,
-            versions: agentResult.versions,
-          },
-        };
-        saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
-      } catch (error) {
-        const cancelled = abort.signal.aborted;
-        const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
-        const message = redactOutput(
-          cancelled
-            ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
-            : error instanceof Error ? error.message : String(error),
-        );
-        if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
-        else console.error('[BUILD] Agent run failed:', error);
-
-        push({ type: 'error', error: `Agent run failed: ${message}`, code: cancelled ? 'CANCELLED' : 'AGENT_ERROR' });
-        close();
-
-        const failedRecord: ExecutionRecord = {
-          id: runId,
-          createdAt,
-          description: req.description,
-          model: req.model || getDefaultModelKey(),
-          allowFullBuild: false,
-          status: 'failed',
-          durationMs: Date.now() - startedAt,
-          request: req,
-          error: message,
-        };
-        saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
-      } finally {
-        unregister();
-      }
-    },
-    cancel() {
-      abort.abort();
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/x-ndjson',
-      'Transfer-Encoding': 'chunked',
-      'Cache-Control': 'no-cache',
-      // Allow the client to read the stream cross-origin if needed
-      'X-Content-Type-Options': 'nosniff',
-    },
-  });
+  return streamJob(startBuildRun(req, request.headers.get('x-harness-user') || 'anonymous'));
 }

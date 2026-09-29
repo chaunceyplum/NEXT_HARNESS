@@ -74,6 +74,15 @@ export interface BuildRequest {
    * the server default.
    */
   maxSteps?: number;
+  /**
+   * Server-set when this run resumes an interrupted one: what the earlier
+   * attempt already did, appended to the request. Never read from the body.
+   */
+  resumeContext?: string;
+  /** Server-set: the interrupted run this one resumes. */
+  resumedFrom?: string;
+  /** Set by the server from the authenticated user; ignored if sent in the body. */
+  requestedBy?: string;
   /** Token budget for this run. Can only tighten RUN_MAX_TOKENS. */
   maxTokens?: number;
   /** Estimated-cost ceiling (USD) for this run. Can only tighten RUN_MAX_COST_USD. */
@@ -90,6 +99,10 @@ export interface BuildRequest {
    * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
+  /** Plan before acting (lib/llm/planner.ts). Defaults to PLAN_FIRST. */
+  planFirst?: boolean;
+  /** Pause for a person to approve the plan before anything runs. PLAN_APPROVAL=true forces it on. */
+  requirePlanApproval?: boolean;
   /**
    * Rollout stage: 'assisted' asks before every write, 'shadow' dry-runs
    * every write. Can only tighten the ROLLOUT_MODE env var.
@@ -130,6 +143,14 @@ export interface BuildResponse {
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /** Present on a record saved mid-run (status 'running' or 'interrupted'). */
+  checkpoint?: { schemaVersion: number; step: number; savedAt: string };
+  /** The plan as executed, when the run planned first. */
+  plan?: PlanInfo;
+  /** Grounding check on the final answer, when it ran. */
+  critique?: CritiqueInfo;
+  /** Set when the run asked for model "auto". */
+  route?: RouteInfo;
   /**
    * Quality judgments for a sample of the run's knowledge searches, scored
    * off the critical path by the RAG judge. Absent on runs from before this
@@ -155,6 +176,10 @@ export type BuildStreamEvent =
   // still arrives on 'done'. Discard accumulated deltas on 'restart'.
   | { type: 'text_delta'; delta: string }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  /** The run's plan: sent when made (awaitingApproval while a person decides) and on every status change or revision. */
+  | { type: 'plan'; plan: PlanInfo; awaitingApproval?: boolean }
+  /** The request asked for model "auto": which model it was routed to, and why. */
+  | { type: 'route'; route: RouteInfo }
   | {
       type: 'approval_request';
       toolCallId: string;
@@ -179,8 +204,47 @@ export type BuildStreamEvent =
       budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
       /** Version fingerprints (prompt/toolset/app) for this run. */
       versions?: RunVersions;
+      critique?: CritiqueInfo;
     }
   | { type: 'error'; error: string; code?: string };
+
+/** Mirrors lib/llm/planner.ts Plan, for client code. */
+export interface PlanInfo {
+  goal: string;
+  version: number;
+  steps: Array<{
+    id: number;
+    description: string;
+    tool: string | null;
+    expectedOutput: string;
+    dependsOn: number[];
+    status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+    note?: string;
+  }>;
+}
+
+/** Grounding check on the final answer (lib/llm/answer-critic.ts). */
+export interface CritiqueInfo {
+  passed: boolean;
+  grounded: boolean;
+  answersRequest: boolean;
+  unsupportedClaims: string[];
+  issues: string[];
+  revised: boolean;
+  originalAnswer?: string;
+  model: string;
+}
+
+/** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
+export interface RouteInfo {
+  category: 'lookup' | 'change' | 'build' | 'unclear';
+  confidence: number;
+  reason: string;
+  via: 'rules' | 'model' | 'fallback';
+  modelKey: string;
+  tier?: 'cheap' | 'balanced' | 'expensive';
+  clarifyingQuestion?: string;
+}
 
 export interface ModelOption {
   key: string;
@@ -198,7 +262,12 @@ export interface RunSummary {
   description: string;
   model: string;
   allowFullBuild: boolean;
-  status: 'completed' | 'failed';
+  /**
+   * running: in progress (checkpointed after every step). interrupted: the
+   * server stopped while it was running (marked on the next start); it can
+   * be resumed from /results/[id].
+   */
+  status: 'completed' | 'failed' | 'running' | 'interrupted';
   durationMs: number;
   toolsConsidered?: string[];
   executionId?: string;
@@ -250,7 +319,7 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration';
+export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
 
 export interface EvalRunSummary {
   id: string;

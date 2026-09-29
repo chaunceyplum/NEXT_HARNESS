@@ -33,7 +33,7 @@
  *      RunAgentOptions.approveTool; without an approver they're denied.
  */
 
-import { streamText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
+import { jsonSchema, streamText, stepCountIs, tool, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
@@ -42,6 +42,9 @@ import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './age
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
+import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
+import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
+import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
   resolveBudget,
@@ -61,6 +64,17 @@ export interface TokenUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+}
+
+export interface ToolOutcome {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  level: 'read' | 'write' | 'destructive';
+  outcome: 'ok' | 'error' | 'denied';
+  error?: string;
+  /** Set when the call went through the approval gate. */
+  approvalReason?: ApprovalReason;
 }
 
 export interface AgentRunResult {
@@ -90,7 +104,8 @@ export interface AgentRunResult {
    * Version fingerprints for this run (lib/version.ts), so a stored trace or
    * score can be tied to the exact prompt, tool set and build it came from.
    */
-  versions: {
+  /** Absent when the run ended before any model call (an unclear request, a denied plan). */
+  versions?: {
     /** sha256(system prompt), first 12 hex — matches the eval's promptVersion. */
     prompt: string;
     /** sha256(sorted tool name+description lines), first 12 hex. */
@@ -98,6 +113,10 @@ export interface AgentRunResult {
     /** GIT_SHA / APP_VERSION / package version, or 'dev'. */
     app: string;
   };
+  /** The plan as executed (statuses and revisions included), when planFirst was set. */
+  plan?: Plan;
+  /** Set when the request asked for model "auto": how the model was chosen. */
+  route?: RouteDecision;
 }
 
 export interface RunAgentOptions {
@@ -105,7 +124,8 @@ export interface RunAgentOptions {
   /**
    * Persisted run id (from the route). Recorded on the trace's run span as
    * `harness.run.id` so a trace can be correlated with the stored run and its
-   * replay view. Omit (e.g. the eval path) and the trace still works.
+   * replay view, and on facts the run saves to memory. Omit (e.g. the eval
+   * path) and the trace still works.
    */
   runId?: string;
   /** Model registry key, e.g. "anthropic:haiku". Defaults to DEFAULT_MODEL env var. */
@@ -176,6 +196,16 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
+  /** Requesting user, recorded on facts the run saves to memory. */
+  actor?: string;
+  /** Plan before acting (planner.ts). */
+  planFirst?: boolean;
+  /** Called with the plan when it's made and whenever a step's status or the plan changes. */
+  onPlan?: (plan: Plan) => void;
+  /** Ask a person to approve the plan before anything runs. A denial ends the run without tool calls. */
+  approvePlan?: (plan: Plan) => Promise<{ approved: boolean; reason?: string }>;
+  /** Called once with the routing decision when modelKey is "auto". */
+  onRoute?: (route: RouteDecision) => void;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -193,6 +223,12 @@ export interface RunAgentOptions {
    * run without an approver, flagged calls are denied. The eval path
    * (opts.tools) is never gated.
    */
+  /**
+   * Called once per tool call after it finishes, is denied, or fails — with
+   * the effective tool (call_tool unwrapped), its access level, and why it
+   * needed approval if it did. Feeds the audit log (lib/audit-log.ts).
+   */
+  onToolOutcome?: (outcome: ToolOutcome) => void;
   approveTool?: (call: {
     toolCallId: string;
     toolName: string;
@@ -211,7 +247,7 @@ export interface RunAgentOptions {
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-function buildSystemMessage(modelKey: string, toolDiscovery: boolean): SystemModelMessage {
+function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = false): SystemModelMessage {
   const entry = tryGetModelEntry(modelKey);
   const providerOptions: SystemModelMessage['providerOptions'] =
     entry?.provider === 'anthropic'
@@ -219,7 +255,7 @@ function buildSystemMessage(modelKey: string, toolDiscovery: boolean): SystemMod
       : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
         ? { bedrock: { cachePoint: { type: 'default' } } }
         : undefined;
-  return { role: 'system', content: systemPrompt({ toolDiscovery }), ...(providerOptions ? { providerOptions } : {}) };
+  return { role: 'system', content: systemPrompt({ toolDiscovery, memory }), ...(providerOptions ? { providerOptions } : {}) };
 }
 
 function tryGetModelEntry(modelKey: string) {
@@ -613,17 +649,113 @@ function toStepTrace(step: StepForTrace, stepNumber: number): AgentStepTrace {
   };
 }
 
+/** Lets the agent save a verified, stable deployment fact for later runs. */
+function rememberFactTool(runId: string | undefined, actor: string | undefined) {
+  return tool({
+    description:
+      'Save a stable deployment fact for future runs, e.g. key "aep.prod_sandbox", value "prod". Overwrites the same key. Only identifiers you verified with a tool; never credentials or personal data. Lowercase key with letters, digits, "_", "." or "-".',
+    inputSchema: jsonSchema<{ key: string; value: string; note?: string }>({
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'e.g. "launch.web_property_id"' },
+        value: { type: 'string', description: 'The identifier or short fact (max 300 chars).' },
+        note: { type: 'string', description: 'Optional: where it came from.' },
+      },
+      required: ['key', 'value'],
+      additionalProperties: false,
+    }),
+    execute: async ({ key, value, note }) => {
+      const fact = await saveFact({ key, value, note, sourceRunId: runId, updatedBy: `agent (${actor ?? 'anonymous'})` });
+      return { stored: fact.key, value: fact.value };
+    },
+  });
+}
+
+/** One ToolOutcome per finished, failed, or denied call in a step's content. */
+function toolOutcomes(content: ReadonlyArray<{ type: string }>, reasons: Map<string, ApprovalReason>): ToolOutcome[] {
+  type Part = {
+    type: string;
+    toolCallId?: string;
+    toolName?: string;
+    input?: unknown;
+    error?: unknown;
+    approved?: boolean;
+    reason?: string;
+    toolCall?: { toolCallId?: string; toolName: string; input?: unknown };
+  };
+  const out: ToolOutcome[] = [];
+  for (const part of content as ReadonlyArray<Part>) {
+    let id: string | undefined;
+    let raw: { toolName: string; input: unknown } | undefined;
+    let outcome: ToolOutcome['outcome'];
+    let error: string | undefined;
+    if (part.type === 'tool-result' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'ok';
+    } else if (part.type === 'tool-error' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'error';
+      error = part.error instanceof Error ? part.error.message : String(part.error);
+    } else if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
+      id = part.toolCall.toolCallId;
+      raw = { toolName: part.toolCall.toolName, input: part.toolCall.input };
+      outcome = 'denied';
+      error = part.reason;
+    } else {
+      continue;
+    }
+    const call = effectiveToolCall(raw.toolName, raw.input);
+    const approvalReason = id ? reasons.get(id) : undefined;
+    out.push({
+      toolCallId: id ?? '',
+      toolName: call.toolName,
+      input: call.input,
+      level: classifyTool(call.toolName),
+      outcome,
+      ...(error !== undefined ? { error } : {}),
+      ...(approvalReason ? { approvalReason } : {}),
+    });
+  }
+  return out;
+}
+
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const {
     userInput,
-    modelKey,
     maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
     modelHealth = defaultModelHealth,
   } = opts;
+
+  // Model routing (model-router.ts): "auto" picks a tier per request. A
+  // routed model isn't pinned, so the same-tier fallback still applies.
+  let modelKey = opts.modelKey;
+  let route: RouteDecision | undefined;
+  if (modelKey === AUTO_MODEL) {
+    route = await routeRequest(userInput, { health: modelHealth });
+    opts.onRoute?.(route);
+    if (route.category === 'unclear' && route.clarifyingQuestion) {
+      // Don't guess at an unclear request: ask instead of running tools.
+      return {
+        finalText: route.clarifyingQuestion,
+        steps: [],
+        toolsConsidered: [],
+        finishReason: 'stop',
+        modelKey: route.modelKey,
+        budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+        usage: {},
+        ragJudgments: [],
+        route,
+      };
+    }
+    modelKey = undefined;
+  }
+  const startModelKey = route?.modelKey ?? modelKey;
 
   let tools: ToolSet;
   let toolsConsidered: string[];
@@ -651,7 +783,56 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     toolsConsidered = live.toolsConsidered;
   }
 
+  // Deployment memory (memory-store.ts), live runs only: stored facts lead
+  // the first message, and remember_fact saves new ones (not in read-only runs).
+  let userMessage = userInput;
+  if (!opts.tools && memoryEnabled()) {
+    try {
+      userMessage = memoryPreamble(await listFacts()) + userInput;
+    } catch (err) {
+      console.warn('[agent] Memory unavailable; running without it:', err instanceof Error ? err.message : err);
+    }
+    if (resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun }).mode !== 'read-only') {
+      tools = { ...tools, remember_fact: rememberFactTool(opts.runId, opts.actor) };
+    }
+  }
+
+  // Plan-and-execute (planner.ts): plan first, optionally have a person
+  // approve it, then execute with update_plan / revise_plan available.
+  let planTracker: PlanTracker | undefined;
+  if (opts.planFirst) {
+    const planModel = startModelKey || getDefaultModelKey();
+    try {
+      const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
+      planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
+    } catch (err) {
+      console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+    }
+    if (planTracker) {
+      opts.onPlan?.(planTracker.plan);
+      if (opts.approvePlan) {
+        const decision = await opts.approvePlan(planTracker.plan);
+        if (!decision.approved) {
+          return {
+            finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
+            steps: [],
+            toolsConsidered,
+            finishReason: 'stop',
+            modelKey: planModel,
+            budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+            usage: {},
+            ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
+            plan: planTracker.plan,
+          };
+        }
+      }
+      tools = { ...tools, ...buildPlanTools(planTracker) };
+      userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userMessage}`;
+    }
+  }
+
   // TASK 9: gate risky calls on a human decision (live runs only).
+  const approvalReasons = new Map<string, ApprovalReason>();
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = opts.tools
     ? undefined
@@ -659,6 +840,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
         const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
         if (!reason) return 'not-applicable' as const;
+        approvalReasons.set(toolCall.toolCallId, reason);
         if (!opts.approveTool) {
           return {
             type: 'denied' as const,
@@ -673,7 +855,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // how the prompt is actually built: live runs include the find_tools rule.
   const toolDiscovery = 'find_tools' in tools;
   const versions = {
-    prompt: promptVersion({ toolDiscovery }),
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools }),
     toolset: toolsetVersion(
       Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
     ),
@@ -704,7 +886,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const runStartedAt = Date.now();
   const budgetLimits = resolveBudget(opts.budget);
   // Per model attempt, like stepIndex (a fallback restarts the run).
-  let budget = new RunBudgetTracker(budgetLimits, modelKey || getDefaultModelKey(), runStartedAt);
+  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt);
   let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
@@ -743,8 +925,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
-        messages: [{ role: 'user', content: userInput }],
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools),
+        messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
         abortSignal: opts.abortSignal,
@@ -811,6 +993,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           }
           // Item #8: record a trace span for this step from what the SDK reports.
           recordStepSpan(tracer, step, stepNumber, resolvedModelKey);
+          if (opts.onToolOutcome) {
+            for (const outcome of toolOutcomes(step.content, approvalReasons)) opts.onToolOutcome(outcome);
+          }
           opts.onStep?.(trace);
         },
       });
@@ -839,7 +1024,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     });
   };
 
-  let resolvedModelKey = modelKey || getDefaultModelKey();
+  let resolvedModelKey = startModelKey || getDefaultModelKey();
   if (!isPinned && modelHealth.isUnhealthy(resolvedModelKey)) {
     const healthy = modelHealth.pickFallback(resolvedModelKey, registry);
     if (healthy) resolvedModelKey = healthy;
@@ -941,5 +1126,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     },
     ragJudgments,
     versions,
+    ...(planTracker ? { plan: planTracker.plan } : {}),
+    ...(route ? { route } : {}),
   };
 }

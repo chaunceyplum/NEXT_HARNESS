@@ -1,0 +1,5 @@
+{
+  "id": "add-a-page-load-rule-to-launch-property-pr1234abcd",
+  "request": "Add a page-load rule to Launch property PR1234abcd that fires the Adobe Analytics beacon",
+  "expected": "change"
+}

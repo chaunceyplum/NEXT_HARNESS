@@ -11,6 +11,8 @@
  * truth for whoever ran the command.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { computeRunMetrics, groupByFixture, type EvalRunMetrics } from '@/lib/eval-metrics';
 import { saveEvalRun } from '@/lib/eval-store';
 import type { EvalSuite, EvalTrialRecord } from '@/lib/types';
@@ -85,6 +87,8 @@ export async function report(opts: ReportOptions): Promise<void> {
   // Every fixture skipped (describe.skipIf) — nothing ran, nothing to record.
   if (results.length === 0) return;
 
+  writeMetricsFile(suite, subject, promptVersion, metrics);
+
   try {
     const id = await saveEvalRun({
       suite,
@@ -101,5 +105,21 @@ export async function report(opts: ReportOptions): Promise<void> {
       `[evals] Could not save these results (${err instanceof Error ? err.message : String(err)}). ` +
         'The table above is still accurate — only the /evals history is affected.'
     );
+  }
+}
+
+/**
+ * EVAL_METRICS_DIR: also write this suite's metrics to <dir>/<suite>.json,
+ * for scripts/check-eval-baseline.mjs (the CI regression gate) to compare
+ * against evals/baseline.json.
+ */
+function writeMetricsFile(suite: EvalSuite, subject: string, promptVersion: string | undefined, metrics: EvalRunMetrics): void {
+  const dir = process.env.EVAL_METRICS_DIR;
+  if (!dir) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${suite}.json`), JSON.stringify({ suite, subject, promptVersion, metrics }, null, 2));
+  } catch (err) {
+    console.error(`[evals] Could not write metrics to ${dir}:`, err instanceof Error ? err.message : err);
   }
 }

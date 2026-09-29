@@ -58,6 +58,22 @@ function ensureTable(): Promise<void> {
   return ensureTablePromise;
 }
 
+/** Version of the checkpoint shape saved mid-run (BuildResponse.checkpoint); bump when it changes. */
+export const CHECKPOINT_SCHEMA_VERSION = 1;
+
+/**
+ * Mark runs left 'running' by a previous server process as 'interrupted'.
+ * Called once at startup (instrumentation.ts): with runs executing in
+ * this process, nothing else can still be working on them.
+ */
+export async function markInterruptedRuns(): Promise<number> {
+  await ensureTable();
+  const result = await execSql(
+    `UPDATE ${TABLE} SET status = 'interrupted' WHERE status = 'running' RETURNING id`
+  );
+  return result.rows?.length ?? 0;
+}
+
 export function newRunId(): string {
   return randomUUID();
 }

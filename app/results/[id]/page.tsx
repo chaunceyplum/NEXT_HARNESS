@@ -5,10 +5,41 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import PlanView from '@/components/PlanView';
+import RunFeedback from '@/components/RunFeedback';
+import AuditTrail from '@/components/AuditTrail';
+
+/** Status badge colors; the badge text always carries the status too. */
+const STATUS_BADGE: Record<string, string> = {
+  completed: 'bg-green-100 text-green-800',
+  failed: 'bg-red-100 text-red-800',
+  running: 'bg-blue-100 text-blue-800',
+  interrupted: 'bg-amber-100 text-amber-800',
+};
 
 export default function RunDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const [resuming, setResuming] = useState(false);
+
+  /** Start the continuation run, then follow it live on the home page. */
+  async function handleResume() {
+    setResuming(true);
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+      const newId = res.headers.get('X-Run-Id');
+      if (!res.ok || !newId) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? `HTTP ${res.status}`);
+      }
+      // The run continues on the server; the home page reattaches to it.
+      await res.body?.cancel();
+      router.push(`/?run=${newId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setResuming(false);
+    }
+  }
   const id = params.id as string;
 
   const [record, setRecord] = useState<ExecutionRecord | null>(null);
@@ -115,7 +146,7 @@ export default function RunDetailPage() {
                     <p className="text-gray-500 font-medium">Status</p>
                     <span
                       className={`inline-block mt-1 px-2 py-0.5 rounded text-xs font-bold ${
-                        record.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                        STATUS_BADGE[record.status] ?? 'bg-red-100 text-red-800'
                       }`}
                     >
                       {record.status}
@@ -136,12 +167,42 @@ export default function RunDetailPage() {
               <p className="text-xs text-gray-400 mt-4">{new Date(record.createdAt).toLocaleString()}</p>
             </div>
 
+            {record.status === 'running' && (
+              <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg text-sm text-blue-900">
+                This run is still in progress; the trace below is its latest checkpoint.{' '}
+                <Link href={`/?run=${record.id}`} className="font-semibold underline">
+                  Watch it live
+                </Link>
+              </div>
+            )}
+
+            {(record.status === 'interrupted' || record.status === 'failed') && (
+              <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-lg text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center gap-3">
+                <p className="flex-1">
+                  {record.status === 'interrupted'
+                    ? `The server stopped while this run was in progress, after ${record.result?.steps.length ?? 0} step(s).`
+                    : 'This run failed.'}{' '}
+                  Resuming starts a new run with the same request, told what this one already did so it doesn&apos;t repeat completed changes.
+                </p>
+                <button
+                  type="button"
+                  disabled={resuming}
+                  onClick={handleResume}
+                  className="px-4 py-2 bg-amber-600 text-white font-semibold rounded hover:bg-amber-700 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {resuming ? 'Starting…' : 'Resume'}
+                </button>
+              </div>
+            )}
+
             {record.status === 'failed' && (
               <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
                 <p className="text-red-800 font-medium">Run Error</p>
                 <p className="text-red-700 text-sm mt-2 font-mono whitespace-pre-wrap">{record.error}</p>
               </div>
             )}
+
+            {record.result?.plan && <PlanView plan={record.result.plan} />}
 
             {record.result && (
               <AgentTrace
@@ -153,8 +214,13 @@ export default function RunDetailPage() {
                 stopReason={record.result.stopReason}
                 budgetUsage={record.result.budgetUsage}
                 versions={record.result.versions}
+                critique={record.result.critique}
               />
             )}
+
+            {record.status === 'completed' && <RunFeedback runId={record.id} />}
+
+            <AuditTrail runId={record.id} />
           </>
         )}
       </div>

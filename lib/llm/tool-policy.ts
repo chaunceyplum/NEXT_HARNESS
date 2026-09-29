@@ -46,6 +46,8 @@ const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
   find_tools: 'read',                      // synthetic (agent.ts)
   call_tool: 'write',                      // synthetic proxy (agent.ts) — classify its target via effectiveToolName
   policy_info: 'read',                     // synthetic (below)
+  update_plan: 'read',                     // synthetic (planner.ts) — only updates in-memory plan state
+  revise_plan: 'read',                     // synthetic (planner.ts)
 };
 
 const DESTRUCTIVE_VERBS = new Set(['delete', 'abort', 'trash', 'purge']);

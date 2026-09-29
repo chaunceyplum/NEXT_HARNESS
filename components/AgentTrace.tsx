@@ -1,6 +1,6 @@
 'use client';
 
-import { AgentStepDTO, TokenUsage, RunVersions } from '@/lib/types';
+import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage } from '@/lib/types';
 
 export interface AgentTraceProps {
   steps: AgentStepDTO[];
@@ -15,6 +15,8 @@ export interface AgentTraceProps {
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
   /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
   versions?: RunVersions;
+  /** Grounding check on the final answer, when it ran. */
+  critique?: CritiqueInfo;
 }
 
 /** Compact ms → "820ms" / "1.4s" / "2m 05s". */
@@ -35,7 +37,7 @@ const STOP_REASON_LABEL: Record<string, string> = {
 };
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, budgetUsage, versions }: AgentTraceProps) {
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, budgetUsage, versions }: AgentTraceProps) {
   // "stop" means the model decided it was done. "running" means we're still
   // streaming. Anything else (most commonly "tool-calls") means the run was
   // cut off at the step limit, and finalText is not a real conclusion.
@@ -174,6 +176,21 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
               <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 align-text-bottom animate-pulse" />
             )}
           </p>
+        )}
+        {!isRunning && critique && (
+          <div className="mt-3 text-xs border-t border-gray-200 pt-2">
+            <p className={critique.passed ? 'text-gray-600' : 'text-amber-800 font-semibold'}>
+              {critique.passed ? '✓ Checked against the tool results' : '⚠ Not fully supported by the tool results'}
+              {critique.revised && ' (answer revised once by the grounding check)'}
+            </p>
+            {!critique.passed && (
+              <ul className="list-disc ml-5 mt-1 text-amber-900">
+                {[...critique.unsupportedClaims.map((c) => `Unsupported: ${c}`), ...critique.issues].map((issue, i) => (
+                  <li key={i}>{issue}</li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
       </div>
 

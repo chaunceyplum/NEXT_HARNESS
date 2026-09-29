@@ -92,3 +92,10 @@ describe('appVersion', () => {
     expect(appVersion()).toBe('dev');
   });
 });
+
+describe('promptVersion with deployment memory', () => {
+  it('changes when the memory rule is in the prompt, so versions track the prompt actually sent', () => {
+    expect(promptVersion({ toolDiscovery: true, memory: true })).not.toBe(promptVersion({ toolDiscovery: true }));
+    expect(promptVersion({ toolDiscovery: true, memory: false })).toBe(promptVersion({ toolDiscovery: true }));
+  });
+});

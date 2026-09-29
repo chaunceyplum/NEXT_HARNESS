@@ -1,0 +1,5 @@
+{
+  "id": "is-the-web-events-schema-profile-enabled",
+  "request": "Is the Web Events schema profile-enabled?",
+  "expected": "lookup"
+}

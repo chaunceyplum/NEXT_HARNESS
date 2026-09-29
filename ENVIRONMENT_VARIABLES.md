@@ -177,6 +177,31 @@ OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
 OPENAI_BALANCED_MODEL_ID=gpt-4o
 ```
 
+### Model routing (optional — `lib/llm/model-router.ts`)
+
+Pick **Auto** in the model picker (or send `"model": "auto"`) to route each
+request to a model tier instead of using one model for everything:
+
+- Clear cases are decided by keyword rules at no cost. The rest go to one
+  structured call on the cheap tier, which returns lookup, change, build or
+  unclear.
+- Default mapping: lookup → cheap, change → balanced, build → expensive,
+  on the default model's provider (unhealthy models skipped).
+- **unclear** → the run returns the router's clarifying question instead
+  of guessing. Low confidence → the default model.
+- A request that names a specific model is never re-routed. Routed runs
+  keep the same-tier fallback.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_ROUTING` | `false` | `true` makes Auto the default when a request names no model |
+| `ROUTE_TIERS` | `{"lookup":"cheap","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
+| `ROUTER_MIN_CONFIDENCE` | `0.6` | Below this, use the default model |
+| `ROUTER_CLARIFY` | `true` | `false` sends unclear requests to the default model instead of asking |
+
+Measure routing accuracy with `npm run eval:routing` (labelled requests in
+`evals/fixtures/routing/`).
+
 ### `MODEL_REGISTRY_JSON` (optional escape hatch)
 
 Add arbitrary extra entries (more Bedrock foundation models — Llama, Nova,
@@ -339,6 +364,130 @@ tool that falls back to a server-side default sandbox isn't caught.
 - **Read cache:** identical reads share a result for `READ_CACHE_TTL_MS`
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
+
+## Durable runs (`lib/run-jobs.ts`, `lib/build-run.ts`)
+
+Runs are jobs, not HTTP requests:
+
+- **Detached:** `POST /api/build` starts the run and streams its events,
+  but closing the tab or losing the connection doesn't stop it. The page
+  reconnects automatically. `/?run=<id>` attaches to a live run, and
+  `GET /api/runs/:id/events?after=<seq>` replays the buffered events and
+  then streams live ones.
+- **Explicit stop:** the Stop button calls `POST /api/runs/:id/cancel`; the
+  kill switch still stops everything.
+- **Checkpoints:** the run record is saved as `running` after every step.
+  On startup, `instrumentation.ts` marks runs left `running` by the
+  previous process as `interrupted`.
+- **Resume:** interrupted and failed runs show **Resume** on
+  `/results/[id]` (`POST /api/runs/:id/resume`). This starts a new run with
+  the same request plus what the earlier attempt already did, told not to
+  repeat completed changes (continuation by context, not by replaying the
+  model's exact messages).
+- Finished runs stay reconnectable for 15 minutes, then only the saved
+  record remains.
+
+This assumes a single Node process (like approvals and the kill switch).
+Running several app instances needs a shared queue and event store (e.g.
+Postgres or Redis) behind the same interfaces.
+
+## Deployment memory (`lib/memory-store.ts`)
+
+Stable facts every live run starts with (sandbox names, Launch property
+ids, repos, merge policy ids), so the agent doesn't rediscover them:
+
+- **Read:** stored facts go at the top of the run's first message, marked
+  as possibly stale. They're not in the system prompt, so the cached
+  prefix stays stable.
+- **Write:** the agent calls `remember_fact(key, value)` when it has
+  verified a stable identifier. Not offered on read-only runs; assisted
+  rollout mode asks before each write, as for any other write. Keys look
+  like `aep.prod_sandbox`, values are at most 300 characters, there are at
+  most 100 facts, and credentials and personal data are refused.
+- **People:** `/memory` lists, adds, edits and deletes facts
+  (`GET/POST/DELETE /api/memory`; writes limited to `HARNESS_ADMINS` when
+  set). Each fact records who set it and the run it came from.
+- `MEMORY_ENABLED=false` turns both paths off. Stored in `harness_memory`.
+  If memory is unavailable, runs continue without it.
+
+`HARNESS_CONTEXT` (static, in the system prompt) still works for facts
+that never change.
+
+## Plan-and-execute (`lib/llm/planner.ts`)
+
+Tick **Plan first** on the home page (or send `"planFirst": true`) for
+multi-step work:
+
+1. A planner call produces the minimum plan: at most 8 steps, each naming
+   the tool it will call and a checkable expected output.
+2. With **Ask me to approve the plan** (`"requirePlanApproval": true`), the
+   run pauses on the plan until someone approves or denies it (through the
+   same `/api/build/approve` endpoint, `toolCallId: "plan"`). A denied plan
+   runs nothing.
+3. The agent executes with two extra tools: `update_plan` marks steps
+   running, done, failed or skipped, and `revise_plan` replaces the
+   unfinished steps when something fails or changes the approach. The plan
+   card updates live, and the final plan is saved with the run.
+
+If planning fails, the run continues without a plan.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PLAN_FIRST` | `false` | Plan every run unless the request says otherwise |
+| `PLAN_APPROVAL` | `false` | Require plan approval for every planned run |
+
+## Grounded answers (`lib/llm/answer-critic.ts`, `lib/llm/retrieval-hints.ts`)
+
+- **Answer critic:** after a run that used tools, a critic checks the final
+  answer against the tool results. Every claim must be supported, the
+  request must be answered or a blocker stated, and nothing that failed may
+  be claimed as done. The result shows under the answer.
+  - `CRITIC_MODE=flag` (default): check and flag, never rewrite (+1 model call)
+  - `CRITIC_MODE=revise`: on failure, rewrite once from the critic's
+    issues, then re-check. Hard cap of one revision. A revision that still
+    fails is returned flagged (up to +3 calls).
+  - `CRITIC_MODE=off`
+  - `CRITIC_MODEL`: model for the critic and the revision (default: the run's model)
+- **Retrieval hints:** a knowledge search that returns nothing, or results
+  sharing almost none of the query's key terms, gets a `_retrievalHint`
+  telling the model to rewrite the query and search once more (or say
+  there's no documentation), instead of answering from memory. The system
+  prompt also asks for source titles when the answer relies on the
+  knowledge base.
+
+## Production metrics, feedback and the online judge
+
+- **/metrics** (`GET /api/metrics?days=7`): success rate, p50/p95 latency,
+  steps, cost per success, escalation rate (runs with a denied tool call),
+  how runs ended, a per-model breakdown, and a review queue.
+- **Feedback**: 👍/👎 + comment on each run page (`POST /api/runs/:id/feedback`).
+  A 👎 counts the run as unsuccessful.
+- **Online judge** (`lib/online-judge.ts`): grades a sample of completed
+  runs off the request path, with the same rubric judge as the evals.
+  - `ONLINE_JUDGE_SAMPLE_RATE` (default `0.1`; `0` disables)
+  - `ONLINE_JUDGE_MODEL` (default: the eval judge, which is the strongest
+    tier of the default provider; `EVAL_JUDGE_MODEL` also applies)
+
+Signals are stored in `harness_run_quality`. See `OPERATIONS.md` for the
+weekly review that uses them.
+
+## Audit log (`lib/audit-log.ts`)
+
+Every consequential action is recorded in `harness_audit_log` (the MCP
+server's Postgres, created on first use). Rows are only ever inserted:
+
+- `run_start`: who started a run, and the request
+- `tool_call`: every write/destructive call (and any call that needed
+  approval), with the effective tool, redacted and truncated input, and
+  outcome `ok` / `error` / `denied`
+- `approval`: every approve/deny, with who decided (`system` for timeouts
+  and cancellations)
+- `kill_switch`: engage/release, with who and why
+
+View a run's trail on `/results/[id]`, or query `GET /api/audit?runId=&actor=&tool=&type=`.
+Without `runId`, only `HARNESS_ADMINS` may query when it's set.
+`AUDIT_READS=true` also records read calls (noisy). Writes are
+best-effort: a failed insert is logged and never breaks a run.
 
 ## Execution history / replay (lib/execution-store.ts)
 
