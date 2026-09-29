@@ -113,6 +113,8 @@ export interface BuildResponse {
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /** Grounding check on the final answer, when it ran. */
+  critique?: CritiqueInfo;
   /** Set when the run asked for model "auto". */
   route?: RouteInfo;
   /**
@@ -162,8 +164,21 @@ export type BuildStreamEvent =
       toolsConsidered: string[];
       stopReason?: string;
       budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+      critique?: CritiqueInfo;
     }
   | { type: 'error'; error: string; code?: string };
+
+/** Grounding check on the final answer (lib/llm/answer-critic.ts). */
+export interface CritiqueInfo {
+  passed: boolean;
+  grounded: boolean;
+  answersRequest: boolean;
+  unsupportedClaims: string[];
+  issues: string[];
+  revised: boolean;
+  originalAnswer?: string;
+  model: string;
+}
 
 /** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
 export interface RouteInfo {
