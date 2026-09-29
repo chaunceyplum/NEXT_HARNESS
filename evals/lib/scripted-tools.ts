@@ -10,7 +10,7 @@
  * model is real. Fixture descriptions should be copied from the live
  * catalog (tools/list) so the model sees what it sees in production.
  *
- * Scripted tools bypass executeMcpToolWithRetry's RAG-consulting retry
+ * Scripted tools bypass executeMcpToolWithRetry's retry / grounding
  * (tool-catalog.ts) — that path makes live knowledge-base calls, and it's
  * the model's own retry behavior being graded here, not the harness's.
  */

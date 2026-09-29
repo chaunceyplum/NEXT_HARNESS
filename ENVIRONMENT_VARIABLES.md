@@ -189,20 +189,31 @@ EMBEDDING_PROVIDER=openai        # or "bedrock" — auto-detected if unset
 EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model id
 ```
 
-### RAG judge (optional — on by default, `lib/llm/rag-judge.ts`)
+### RAG judge (optional — samples by default, `lib/llm/rag-judge.ts`)
 
-Every `search_adobe_knowledge`/`search_all_agents` call is independently
-scored by a second LLM call for relevance and sufficiency, and the
-judgment rides along on the tool result as `_ragJudgment` (or, when a RAG
-lookup grounds a retry, as `raggedBefore.judgment` in the retry history).
-The knowledge base already reranks its own results server-side — this
-judge doesn't re-rank or second-guess that ordering, it only grades
-whether what actually came back is good enough to act on. A judge failure
-(bad credentials, model error) is logged and swallowed; it never fails the
-underlying RAG call.
+A sample of the agent's own `search_adobe_knowledge`/`search_all_agents`
+calls (10% by default) is scored by a second LLM call for relevance and
+sufficiency, and the judgment rides along on the tool result as
+`_ragJudgment`. It's for monitoring retrieval quality — the agent doesn't
+act on it — so it doesn't run on every search. Empty results are never
+judged, and neither are the knowledge-base lookups attached to tool
+failures (below). The knowledge base already reranks its own results
+server-side — this judge doesn't re-rank or second-guess that ordering, it
+only grades whether what actually came back is good enough to act on. A
+judge failure (bad credentials, model error) is logged and swallowed; it
+never fails the underlying RAG call. The rag-judge eval calls the judge
+directly and is unaffected by sampling.
+
+On a tool failure, a knowledge-base lookup is attached to the error only
+when it's needed: a validation error on a tool that already failed
+validation earlier in the run, or one whose message names nothing the model
+could fix (e.g. a bare `400: Bad Request`). Identical lookups in a run are
+made once. Transient errors (5xx, timeouts, 429) are retried with back-off
+and never looked up.
 
 ```bash
 RAG_JUDGE_ENABLED=false     # disable entirely
+RAG_JUDGE_SAMPLE_RATE=0.1   # share of searches judged, 0–1 (1 = every search)
 RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 ```
 

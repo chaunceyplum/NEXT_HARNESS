@@ -61,6 +61,36 @@ function isJudgeEnabled(): boolean {
   return process.env.RAG_JUDGE_ENABLED !== 'false';
 }
 
+/** Default share of the agent's own knowledge searches that get judged. */
+const DEFAULT_SAMPLE_RATE = 0.1;
+
+/**
+ * Whether to judge one knowledge search the agent made during a live run.
+ * The judgment is for monitoring retrieval quality — it rides along on the
+ * result for the trace, and the agent doesn't act on it — so it doesn't need
+ * a second LLM call on every search. Scores a random RAG_JUDGE_SAMPLE_RATE
+ * share (0–1, default 0.1; 1 = every search), and never an empty result,
+ * which is trivially poor. judgeRagResult itself stays unconditional, so the
+ * rag-judge eval is unaffected.
+ */
+export function shouldJudgeLiveResult(output: unknown, random: () => number = Math.random): boolean {
+  if (!isJudgeEnabled() || isEmptyResult(output)) return false;
+  const raw = process.env.RAG_JUDGE_SAMPLE_RATE;
+  const rate = raw === undefined || raw.trim() === '' ? DEFAULT_SAMPLE_RATE : Number(raw);
+  if (!Number.isFinite(rate) || rate <= 0) return false;
+  return rate >= 1 || random() < rate;
+}
+
+function isEmptyResult(output: unknown): boolean {
+  if (output == null || output === '') return true;
+  if (Array.isArray(output)) return output.length === 0;
+  if (typeof output === 'object') {
+    const values = Object.values(output as Record<string, unknown>);
+    return values.length === 0 || values.every((v) => v == null || v === '' || (Array.isArray(v) && v.length === 0));
+  }
+  return false;
+}
+
 /** Defaults to the harness's own default chat model (guaranteed to have working credentials) rather than a hardcoded cheap tier — override with RAG_JUDGE_MODEL to spend less per lookup. */
 function judgeModelKey(): string {
   return process.env.RAG_JUDGE_MODEL || getDefaultModelKey();

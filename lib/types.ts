@@ -14,7 +14,7 @@ export interface AgentToolCallDTO {
 export interface AgentToolResultDTO {
   toolName: string;
   output: unknown;
-  /** Present when this tool call failed (after exhausting its RAG-consulting retries, if any). */
+  /** Present when this tool call failed (after exhausting its transient-error retries, if any). */
   error?: string;
 }
 
@@ -43,7 +43,7 @@ export interface BuildRequest {
   description: string;
   /** Model registry key, e.g. "anthropic:sonnet". Omit to use the server default. */
   model?: string;
-  /** Extra attempts per failed tool call, each preceded by a RAG lookup. Omit for the server default (1). */
+  /** Extra attempts after a transient (5xx/timeout/429) tool failure. Omit for the server default (1). */
   toolRetries?: number;
   /**
    * How many tools the semantic shortlist pulls in, on top of the always-on
