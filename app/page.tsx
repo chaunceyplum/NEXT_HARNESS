@@ -16,6 +16,16 @@ interface RunState {
   usage: TokenUsage;
   done: boolean;
   error?: string;
+  /** Destructive tool calls the run is paused on, waiting for Approve/Deny. */
+  pendingApprovals: PendingApproval[];
+}
+
+interface PendingApproval {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  /** Set while the decision POST is in flight. */
+  submitting?: boolean;
 }
 
 export default function Home() {
@@ -41,6 +51,33 @@ export default function Home() {
 
   function handleStop() {
     abortRef.current?.abort();
+  }
+
+  async function handleApproval(runId: string, toolCallId: string, approved: boolean) {
+    setRunState((prev) =>
+      prev
+        ? { ...prev, pendingApprovals: prev.pendingApprovals.map((p) => (p.toolCallId === toolCallId ? { ...p, submitting: true } : p)) }
+        : prev
+    );
+    try {
+      const res = await fetch('/api/build/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId, toolCallId, approved }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? `HTTP ${res.status}`);
+      }
+      // The card is removed when the stream's approval_resolved event arrives.
+    } catch (err) {
+      setError(`Could not send decision: ${err instanceof Error ? err.message : String(err)}`);
+      setRunState((prev) =>
+        prev
+          ? { ...prev, pendingApprovals: prev.pendingApprovals.map((p) => (p.toolCallId === toolCallId ? { ...p, submitting: false } : p)) }
+          : prev
+      );
+    }
   }
 
   async function handleBuild(e: React.FormEvent) {
@@ -92,10 +129,27 @@ export default function Home() {
             finishReason: 'running',
             usage: {},
             done: false,
+            pendingApprovals: [],
           });
         } else if (event.type === 'step') {
           setRunState((prev) =>
             prev ? { ...prev, steps: [...prev.steps, event.step] } : prev
+          );
+        } else if (event.type === 'approval_request') {
+          setRunState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  pendingApprovals: [
+                    ...prev.pendingApprovals,
+                    { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input },
+                  ],
+                }
+              : prev
+          );
+        } else if (event.type === 'approval_resolved') {
+          setRunState((prev) =>
+            prev ? { ...prev, pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId) } : prev
           );
         } else if (event.type === 'restart') {
           // A fallback model is re-running from scratch — the steps so far
@@ -286,6 +340,35 @@ export default function Home() {
                 <span className="ml-2 inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin align-middle" />
               )}
             </p>
+            {runState.pendingApprovals.map((p) => (
+              <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
+                <p className="text-amber-900 font-semibold">Approval needed: destructive action</p>
+                <p className="text-amber-800 text-sm mt-1">
+                  The agent wants to run <code className="bg-white px-1.5 py-0.5 rounded">{p.toolName}</code> with:
+                </p>
+                <pre className="bg-white text-xs text-gray-800 p-3 rounded mt-2 overflow-x-auto max-h-60">
+                  {JSON.stringify(p.input, null, 2)}
+                </pre>
+                <div className="flex gap-3 mt-3">
+                  <button
+                    type="button"
+                    disabled={p.submitting}
+                    onClick={() => handleApproval(runState.runId, p.toolCallId, true)}
+                    className="px-4 py-2 bg-red-600 text-white font-semibold rounded hover:bg-red-700 disabled:opacity-50"
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    disabled={p.submitting}
+                    onClick={() => handleApproval(runState.runId, p.toolCallId, false)}
+                    className="px-4 py-2 bg-gray-200 text-gray-800 font-semibold rounded hover:bg-gray-300 disabled:opacity-50"
+                  >
+                    Deny
+                  </button>
+                </div>
+              </div>
+            ))}
             <AgentTrace
               steps={runState.steps}
               toolsConsidered={runState.toolsConsidered}
