@@ -1,10 +1,11 @@
 /**
- * What an eval file needs configured before it's worth running, so a suite
- * with nothing configured skips itself with a clear reason instead of
- * failing every fixture on the same missing credential.
+ * What an eval file needs configured, which models it grades with, and
+ * where each choice came from — so a misconfiguration shows up as one clear
+ * line before any fixture runs, not as dozens of identical failures.
  */
 
-import { getDefaultModelKey, getModelEntry, getModelRegistry } from '@/lib/llm/model-registry';
+import { generateText } from 'ai';
+import { getDefaultModelKey, getModelEntry, getModelRegistry, resolveModel } from '@/lib/llm/model-registry';
 
 /** Model under test for the agent suite. EVAL_MODEL overrides DEFAULT_MODEL, so two models can be compared on the same fixtures. */
 export function evalModelKey(): string {
@@ -29,6 +30,14 @@ export function judgeModelKey(): string {
   }
 }
 
+/** Where a role's model key came from, for the config line each suite prints. */
+export function modelSource(role: 'model' | 'judge' | 'rag-judge'): string {
+  const fromDefault = process.env.DEFAULT_MODEL ? 'DEFAULT_MODEL' : "built-in default (DEFAULT_MODEL unset)";
+  if (role === 'model') return process.env.EVAL_MODEL ? 'EVAL_MODEL' : fromDefault;
+  if (role === 'rag-judge') return process.env.RAG_JUDGE_MODEL ? 'RAG_JUDGE_MODEL' : fromDefault;
+  return process.env.EVAL_JUDGE_MODEL ? 'EVAL_JUDGE_MODEL' : `strongest tier of ${fromDefault}'s provider`;
+}
+
 /** A judge grading its own output favors it; say so rather than silently reporting an inflated score. */
 export function warnIfSelfJudging(modelUnderTest: string, judge: string): void {
   if (modelUnderTest === judge) {
@@ -51,10 +60,26 @@ export function isMcpConfigured(): boolean {
 }
 
 /**
- * Best-effort "are this model's provider credentials present" check. Not a
- * guarantee the call will succeed (Bedrock model access, for one, is
- * granted per model outside IAM) — just enough to tell "nothing configured"
- * apart from "configured, but failing", which the fixtures themselves report.
+ * Values copied from .env.local.example without being filled in ("...",
+ * "<api-gateway-key>", "sk-ant-...") — set, but not a credential.
+ */
+export function isPlaceholder(value: string | undefined): boolean {
+  if (!value) return false;
+  const v = value.trim();
+  return v.includes('...') || /^<.*>$/.test(v) || /^(your[-_]|changeme|xxx|todo)/i.test(v);
+}
+
+function hasCredential(value: string | undefined): boolean {
+  return Boolean(value) && !isPlaceholder(value);
+}
+
+/**
+ * "Nothing configured for this model's provider" — the suite should skip,
+ * not fail. Not a guarantee a call will succeed; preflight() checks that.
+ *
+ * Bedrock counts as configured unless explicit keys are placeholders: the
+ * AWS SDK's default credential chain also covers an EC2 instance role,
+ * ECS/EKS task roles and SSO, none of which show up as env vars.
  */
 export function isModelConfigured(modelKey: string): boolean {
   let provider: string;
@@ -66,24 +91,86 @@ export function isModelConfigured(modelKey: string): boolean {
   const env = process.env;
   switch (provider) {
     case 'anthropic':
-      return Boolean(env.ANTHROPIC_API_KEY);
+      return hasCredential(env.ANTHROPIC_API_KEY);
     case 'openai':
-      return Boolean(env.OPENAI_API_KEY);
+      return hasCredential(env.OPENAI_API_KEY);
     case 'bedrock':
-      return Boolean(
-        env.AWS_BEARER_TOKEN_BEDROCK ||
-          (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY) ||
-          env.AWS_PROFILE ||
-          env.AWS_CONTAINER_CREDENTIALS_FULL_URI ||
-          env.AWS_CONTAINER_CREDENTIALS_RELATIVE_URI ||
-          env.AWS_WEB_IDENTITY_TOKEN_FILE
-      );
+      return !isPlaceholder(env.AWS_ACCESS_KEY_ID) && !isPlaceholder(env.AWS_SECRET_ACCESS_KEY);
     default:
       return false;
   }
 }
 
-/** Print once per file why a suite is being skipped, since describe.skipIf alone says nothing. */
+/**
+ * Say once per file why a suite is being skipped, since describe.skipIf
+ * alone says nothing. Written straight to stderr: vitest drops console output
+ * from a file whose tests were all skipped, which is exactly this case.
+ */
 export function warnSkip(suite: string, reason: string): void {
-  console.warn(`[evals] Skipping ${suite}: ${reason}`);
+  process.stderr.write(`[evals] Skipping ${suite}: ${reason}\n`);
+}
+
+const CREDENTIAL_HINT: Record<string, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  bedrock: 'real AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (or remove them to use an instance role)',
+};
+
+export interface ModelRole {
+  /** Shown in messages, e.g. "model under test", "judge". */
+  role: string;
+  key: string;
+  source: string;
+}
+
+export type PreflightResult =
+  | { status: 'ready' }
+  /** Nothing configured — skip quietly, as before. */
+  | { status: 'skip'; reason: string }
+  /** Configured but failing — fail once, loudly, and record nothing. */
+  | { status: 'fail'; reason: string };
+
+/**
+ * One tiny real call per distinct model a suite needs, before any fixture
+ * runs. A bad key, an unknown model id, or a model the account can't use
+ * then shows up as one line naming the setting to fix — instead of every
+ * fixture × trial failing identically and a 0% run being saved to /evals.
+ */
+export async function preflight(suite: string, roles: ModelRole[]): Promise<PreflightResult> {
+  process.stderr.write(`[evals] ${suite}: ${roles.map((r) => `${r.role} ${r.key} (from ${r.source})`).join('; ')}\n`);
+
+  for (const r of roles) {
+    try {
+      getModelEntry(r.key);
+    } catch (err) {
+      return { status: 'fail', reason: `${r.role} "${r.key}" (from ${r.source}): ${(err as Error).message}` };
+    }
+    if (!isModelConfigured(r.key)) {
+      const provider = getModelEntry(r.key).provider;
+      const credential = CREDENTIAL_HINT[provider] ?? `${provider} credentials`;
+      return {
+        status: 'skip',
+        reason: `no credentials for ${r.role} "${r.key}" (from ${r.source}) — set ${credential} in .env.local, or pick a model on a provider you do have.`,
+      };
+    }
+  }
+
+  const failures: string[] = [];
+  for (const key of [...new Set(roles.map((r) => r.key))]) {
+    try {
+      await generateText({ model: resolveModel(key), prompt: 'Reply with the single word OK.', maxOutputTokens: 256 });
+    } catch (err) {
+      const who = roles.filter((r) => r.key === key).map((r) => `${r.role} from ${r.source}`).join(', ');
+      failures.push(`"${key}" (${who}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (failures.length) {
+    return {
+      status: 'fail',
+      reason:
+        `model preflight failed — no fixtures were run and nothing was saved.\n  ${failures.join('\n  ')}\n` +
+        'Check DEFAULT_MODEL / EVAL_MODEL / EVAL_JUDGE_MODEL / RAG_JUDGE_MODEL in .env.local and that provider\'s credentials.',
+    };
+  }
+  return { status: 'ready' };
 }

@@ -19,7 +19,7 @@ import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
 import { allCriteria, formatJudgeNotes, judge } from './lib/judge';
-import { isModelConfigured, judgeModelKey, trialsPerFixture, warnSkip } from './lib/env';
+import { judgeModelKey, modelSource, preflight, trialsPerFixture, warnSkip } from './lib/env';
 
 type JudgeFixture = {
   id: string;
@@ -33,8 +33,9 @@ type JudgeFixture = {
 
 const judgeKey = judgeModelKey();
 const trials = trialsPerFixture();
-const configured = isModelConfigured(judgeKey);
-if (!configured) warnSkip('judge calibration eval', `no credentials found for judge model "${judgeKey}".`);
+const pre = await preflight('judge calibration eval', [{ role: 'judge', key: judgeKey, source: modelSource('judge') }]);
+if (pre.status === 'skip') warnSkip('judge calibration eval', pre.reason);
+const preflightError = pre.status === 'fail' ? pre.reason : '';
 
 const results: EvalTrialRecord[] = [];
 const startedAt = new Date();
@@ -48,7 +49,13 @@ afterAll(() =>
   })
 );
 
-describe.skipIf(!configured)(`Judge calibration eval (k=${trials})`, () => {
+describe.runIf(pre.status === 'fail')('Judge calibration eval preflight', () => {
+  it('configured judge is reachable', () => {
+    throw new Error(preflightError);
+  });
+});
+
+describe.runIf(pre.status === 'ready')(`Judge calibration eval (k=${trials})`, () => {
   const fixtures = loadFixtures<JudgeFixture>('judge-calibration');
 
   it.each(fixtures)('$id', async (fixture) => {

@@ -103,9 +103,9 @@ BEDROCK_CHEAP_MODEL_ID_LABEL=Claude Haiku 4.5
 # model access granted in AWS Console -> Bedrock -> Model access (separate
 # from IAM, opt-in per model per region).
 AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=...
+AWS_ACCESS_KEY_ID=AKIA...      # real values only; leave unset to use the default chain
 AWS_SECRET_ACCESS_KEY=...
-AWS_SESSION_TOKEN=...   # only if using temporary credentials
+AWS_SESSION_TOKEN=...          # only if using temporary credentials
 ```
 
 ### `DEFAULT_MODEL` (optional)
@@ -138,9 +138,18 @@ access), the underlying provider error is still surfaced; fix the grant.
 
 ### `ANTHROPIC_API_KEY` (optional — only for the `anthropic:*` entries)
 
-Used by the `anthropic:haiku` / `anthropic:sonnet` / `anthropic:opus`
-registry entries, which are still available as an alternative to Bedrock
-but are not the default and are not required to run the harness.
+Used by the `anthropic:*` registry entries: `anthropic:haiku` (Claude
+Haiku 4.5), `anthropic:sonnet` (Claude Sonnet 5), `anthropic:sonnet-5-5`
+(Claude Sonnet 5.5), `anthropic:opus` (Claude Opus 4.8) and
+`anthropic:opus-5-5` (Claude Opus 5.5). They're an alternative to Bedrock,
+not the default. To run on the Claude API, set **both** the key and
+`DEFAULT_MODEL`. The key alone still sends every request to
+`bedrock:balanced`:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+DEFAULT_MODEL=anthropic:sonnet
+```
 
 ### OpenAI entries (optional)
 

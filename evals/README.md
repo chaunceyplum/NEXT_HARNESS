@@ -20,8 +20,33 @@ trust on every PR.
 | `npm run eval:judge` | Judge calibration | The eval's own rubric judge against human-labelled answers. Run this before trusting `eval:agent` outcome grades, and again whenever the judge prompt or model changes. | Credentials for the judge model |
 | `npm run eval:all` | | All four. | |
 
-A suite with nothing configured skips itself with a printed reason instead
-of failing.
+Before any fixture runs, each suite prints which model it will use for
+each role and where that choice came from: `EVAL_MODEL`, `DEFAULT_MODEL`,
+or the built-in Bedrock default when `DEFAULT_MODEL` is unset. It then
+makes one tiny test call to each of those models:
+
+- **Nothing configured** for a model's provider (no key, or a
+  `.env.local.example` placeholder like `...` left in place): the suite
+  skips, and says which variable to set. Bedrock counts as configured with
+  no keys at all, because the AWS default credential chain also covers
+  instance and task roles.
+- **Configured but failing** (a revoked key, an unknown model id, a model
+  your account can't use): the suite fails **once** with the provider's
+  error and the setting to check. No fixtures run and nothing is saved to
+  `/evals`, instead of every fixture × trial failing identically and saving
+  a 0% run.
+
+### Using the Claude API
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+DEFAULT_MODEL=anthropic:sonnet     # or anthropic:sonnet-5-5 / anthropic:opus-5-5
+```
+
+With that, the agent suite tests `DEFAULT_MODEL`, and the judge defaults to
+the strongest Anthropic entry, `anthropic:opus-5-5`. Setting the key without
+`DEFAULT_MODEL` still sends everything to Bedrock. The printed config line
+makes that obvious.
 
 ## Trials and variance
 

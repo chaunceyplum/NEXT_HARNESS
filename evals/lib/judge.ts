@@ -99,7 +99,9 @@ export async function judge(modelKey: string, input: JudgeInput): Promise<JudgeR
       '',
       `The agent's final answer:\n${input.answer || '(empty)'}`,
     ].join('\n'),
-    temperature: 0,
+    // No temperature: current Claude models (Opus 4.8, Sonnet 5 and newer)
+    // reject sampling parameters with a 400. Grading stability comes from
+    // the fixed rubric and schema, and variance is measured with EVAL_TRIALS.
   });
 
   // A missing score counts as a fail rather than being silently skipped.

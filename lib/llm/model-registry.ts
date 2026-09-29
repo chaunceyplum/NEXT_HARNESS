@@ -92,6 +92,24 @@ function buildDefaultRegistry(): ModelRegistryEntry[] {
   }
 
   entries.push(
+    // Newest generation first: model-health fallback and the evals' default
+    // judge (strongest tier of the default provider) both take the first
+    // same-tier match, so these are preferred over the older ids below.
+    // Opt in as the chat model with DEFAULT_MODEL=anthropic:sonnet-5-5.
+    {
+      key: 'anthropic:sonnet-5-5',
+      label: 'Claude Sonnet 5.5 (Anthropic direct — balanced)',
+      provider: 'anthropic',
+      modelId: 'claude-sonnet-5-5',
+      tier: 'balanced',
+    },
+    {
+      key: 'anthropic:opus-5-5',
+      label: 'Claude Opus 5.5 (Anthropic direct — expensive)',
+      provider: 'anthropic',
+      modelId: 'claude-opus-5-5',
+      tier: 'expensive',
+    },
     {
       key: 'anthropic:haiku',
       label: 'Claude Haiku 4.5 (Anthropic direct — cheap)',
