@@ -177,6 +177,31 @@ OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
 OPENAI_BALANCED_MODEL_ID=gpt-4o
 ```
 
+### Model routing (optional — `lib/llm/model-router.ts`)
+
+Pick **Auto** in the model picker (or send `"model": "auto"`) to route each
+request to a model tier instead of using one model for everything:
+
+- Clear cases are decided by keyword rules at no cost. The rest go to one
+  structured call on the cheap tier, which returns lookup, change, build or
+  unclear.
+- Default mapping: lookup → cheap, change → balanced, build → expensive,
+  on the default model's provider (unhealthy models skipped).
+- **unclear** → the run returns the router's clarifying question instead
+  of guessing. Low confidence → the default model.
+- A request that names a specific model is never re-routed. Routed runs
+  keep the same-tier fallback.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MODEL_ROUTING` | `false` | `true` makes Auto the default when a request names no model |
+| `ROUTE_TIERS` | `{"lookup":"cheap","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
+| `ROUTER_MIN_CONFIDENCE` | `0.6` | Below this, use the default model |
+| `ROUTER_CLARIFY` | `true` | `false` sends unclear requests to the default model instead of asking |
+
+Measure routing accuracy with `npm run eval:routing` (labelled requests in
+`evals/fixtures/routing/`).
+
 ### `MODEL_REGISTRY_JSON` (optional escape hatch)
 
 Add arbitrary extra entries (more Bedrock foundation models — Llama, Nova,
@@ -361,6 +386,48 @@ ids, repos, merge policy ids), so the agent doesn't rediscover them:
 
 `HARNESS_CONTEXT` (static, in the system prompt) still works for facts
 that never change.
+
+## Plan-and-execute (`lib/llm/planner.ts`)
+
+Tick **Plan first** on the home page (or send `"planFirst": true`) for
+multi-step work:
+
+1. A planner call produces the minimum plan: at most 8 steps, each naming
+   the tool it will call and a checkable expected output.
+2. With **Ask me to approve the plan** (`"requirePlanApproval": true`), the
+   run pauses on the plan until someone approves or denies it (through the
+   same `/api/build/approve` endpoint, `toolCallId: "plan"`). A denied plan
+   runs nothing.
+3. The agent executes with two extra tools: `update_plan` marks steps
+   running, done, failed or skipped, and `revise_plan` replaces the
+   unfinished steps when something fails or changes the approach. The plan
+   card updates live, and the final plan is saved with the run.
+
+If planning fails, the run continues without a plan.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PLAN_FIRST` | `false` | Plan every run unless the request says otherwise |
+| `PLAN_APPROVAL` | `false` | Require plan approval for every planned run |
+
+## Grounded answers (`lib/llm/answer-critic.ts`, `lib/llm/retrieval-hints.ts`)
+
+- **Answer critic:** after a run that used tools, a critic checks the final
+  answer against the tool results. Every claim must be supported, the
+  request must be answered or a blocker stated, and nothing that failed may
+  be claimed as done. The result shows under the answer.
+  - `CRITIC_MODE=flag` (default): check and flag, never rewrite (+1 model call)
+  - `CRITIC_MODE=revise`: on failure, rewrite once from the critic's
+    issues, then re-check. Hard cap of one revision. A revision that still
+    fails is returned flagged (up to +3 calls).
+  - `CRITIC_MODE=off`
+  - `CRITIC_MODEL`: model for the critic and the revision (default: the run's model)
+- **Retrieval hints:** a knowledge search that returns nothing, or results
+  sharing almost none of the query's key terms, gets a `_retrievalHint`
+  telling the model to rewrite the query and search once more (or say
+  there's no documentation), instead of answering from memory. The system
+  prompt also asks for source titles when the answer relies on the
+  knowledge base.
 
 ## Production metrics, feedback and the online judge
 

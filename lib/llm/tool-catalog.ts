@@ -13,6 +13,7 @@
 
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { classifyTool } from './tool-policy';
+import { withRetrievalHint } from './retrieval-hints';
 import {
   cachedRead,
   duplicateWriteResult,
@@ -402,9 +403,12 @@ function withRagJudgment(
   result: unknown,
   sink?: RagJudgmentSink
 ): unknown {
-  const capped = capRagResult(result);
-  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return capped;
   const query = typeof args.query === 'string' ? args.query : undefined;
+  // Weak retrieval (empty or off-topic) gets a rewrite-and-retry hint the model sees (retrieval-hints.ts).
+  const capped = JUDGEABLE_RAG_TOOLS.has(toolName)
+    ? withRetrievalHint(toolName, query, capRagResult(result))
+    : capRagResult(result);
+  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return capped;
   if (!query || !shouldJudgeLiveResult(result)) return capped;
 
   // Fire-and-forget: kick off the judge on the UNCAPPED result (it has its

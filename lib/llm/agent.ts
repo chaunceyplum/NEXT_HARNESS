@@ -43,6 +43,8 @@ import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from 
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
+import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
+import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
   resolveBudget,
@@ -96,6 +98,10 @@ export interface AgentRunResult {
    * nothing was sampled, judging is disabled, or the eval path was used.
    */
   ragJudgments: RagJudgmentEntry[];
+  /** The plan as executed (statuses and revisions included), when planFirst was set. */
+  plan?: Plan;
+  /** Set when the request asked for model "auto": how the model was chosen. */
+  route?: RouteDecision;
 }
 
 export interface RunAgentOptions {
@@ -171,6 +177,14 @@ export interface RunAgentOptions {
   /** Run id and requesting user, recorded on facts the run saves to memory. */
   runId?: string;
   actor?: string;
+  /** Plan before acting (planner.ts). */
+  planFirst?: boolean;
+  /** Called with the plan when it's made and whenever a step's status or the plan changes. */
+  onPlan?: (plan: Plan) => void;
+  /** Ask a person to approve the plan before anything runs. A denial ends the run without tool calls. */
+  approvePlan?: (plan: Plan) => Promise<{ approved: boolean; reason?: string }>;
+  /** Called once with the routing decision when modelKey is "auto". */
+  onRoute?: (route: RouteDecision) => void;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -594,12 +608,36 @@ function toolOutcomes(content: ReadonlyArray<{ type: string }>, reasons: Map<str
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const {
     userInput,
-    modelKey,
     maxSteps = 20,
     toolShortlistSize = 24,
     toolRetries = 1,
     modelHealth = defaultModelHealth,
   } = opts;
+
+  // Model routing (model-router.ts): "auto" picks a tier per request. A
+  // routed model isn't pinned, so the same-tier fallback still applies.
+  let modelKey = opts.modelKey;
+  let route: RouteDecision | undefined;
+  if (modelKey === AUTO_MODEL) {
+    route = await routeRequest(userInput, { health: modelHealth });
+    opts.onRoute?.(route);
+    if (route.category === 'unclear' && route.clarifyingQuestion) {
+      // Don't guess at an unclear request: ask instead of running tools.
+      return {
+        finalText: route.clarifyingQuestion,
+        steps: [],
+        toolsConsidered: [],
+        finishReason: 'stop',
+        modelKey: route.modelKey,
+        budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+        usage: {},
+        ragJudgments: [],
+        route,
+      };
+    }
+    modelKey = undefined;
+  }
+  const startModelKey = route?.modelKey ?? modelKey;
 
   let tools: ToolSet;
   let toolsConsidered: string[];
@@ -641,6 +679,40 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     }
   }
 
+  // Plan-and-execute (planner.ts): plan first, optionally have a person
+  // approve it, then execute with update_plan / revise_plan available.
+  let planTracker: PlanTracker | undefined;
+  if (opts.planFirst) {
+    const planModel = startModelKey || getDefaultModelKey();
+    try {
+      const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
+      planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
+    } catch (err) {
+      console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+    }
+    if (planTracker) {
+      opts.onPlan?.(planTracker.plan);
+      if (opts.approvePlan) {
+        const decision = await opts.approvePlan(planTracker.plan);
+        if (!decision.approved) {
+          return {
+            finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
+            steps: [],
+            toolsConsidered,
+            finishReason: 'stop',
+            modelKey: planModel,
+            budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+            usage: {},
+            ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
+            plan: planTracker.plan,
+          };
+        }
+      }
+      tools = { ...tools, ...buildPlanTools(planTracker) };
+      userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userMessage}`;
+    }
+  }
+
   // TASK 9: gate risky calls on a human decision (live runs only).
   const approvalReasons = new Map<string, ApprovalReason>();
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
@@ -670,7 +742,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const runStartedAt = Date.now();
   const budgetLimits = resolveBudget(opts.budget);
   // Per model attempt, like stepIndex (a fallback restarts the run).
-  let budget = new RunBudgetTracker(budgetLimits, modelKey || getDefaultModelKey(), runStartedAt);
+  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt);
   let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
@@ -803,7 +875,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     });
   };
 
-  let resolvedModelKey = modelKey || getDefaultModelKey();
+  let resolvedModelKey = startModelKey || getDefaultModelKey();
   if (!isPinned && modelHealth.isUnhealthy(resolvedModelKey)) {
     const healthy = modelHealth.pickFallback(resolvedModelKey, registry);
     if (healthy) resolvedModelKey = healthy;
@@ -866,5 +938,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       totalTokens: result.usage.totalTokens,
     },
     ragJudgments,
+    ...(planTracker ? { plan: planTracker.plan } : {}),
+    ...(route ? { route } : {}),
   };
 }

@@ -1,0 +1,5 @@
+{
+  "id": "build-an-end-to-end-pipeline-from-the-snowflake-so",
+  "request": "Build an end-to-end pipeline from the Snowflake source into a profile-enabled dataset with a daily dataflow",
+  "expected": "build"
+}
