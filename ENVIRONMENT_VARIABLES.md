@@ -340,6 +340,40 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
+## Production metrics, feedback and the online judge
+
+- **/metrics** (`GET /api/metrics?days=7`): success rate, p50/p95 latency,
+  steps, cost per success, escalation rate (runs with a denied tool call),
+  how runs ended, a per-model breakdown, and a review queue.
+- **Feedback**: 👍/👎 + comment on each run page (`POST /api/runs/:id/feedback`).
+  A 👎 counts the run as unsuccessful.
+- **Online judge** (`lib/online-judge.ts`): grades a sample of completed
+  runs off the request path, with the same rubric judge as the evals.
+  - `ONLINE_JUDGE_SAMPLE_RATE` (default `0.1`; `0` disables)
+  - `ONLINE_JUDGE_MODEL` (default: the eval judge, which is the strongest
+    tier of the default provider; `EVAL_JUDGE_MODEL` also applies)
+
+Signals are stored in `harness_run_quality`. See `OPERATIONS.md` for the
+weekly review that uses them.
+
+## Audit log (`lib/audit-log.ts`)
+
+Every consequential action is recorded in `harness_audit_log` (the MCP
+server's Postgres, created on first use). Rows are only ever inserted:
+
+- `run_start`: who started a run, and the request
+- `tool_call`: every write/destructive call (and any call that needed
+  approval), with the effective tool, redacted and truncated input, and
+  outcome `ok` / `error` / `denied`
+- `approval`: every approve/deny, with who decided (`system` for timeouts
+  and cancellations)
+- `kill_switch`: engage/release, with who and why
+
+View a run's trail on `/results/[id]`, or query `GET /api/audit?runId=&actor=&tool=&type=`.
+Without `runId`, only `HARNESS_ADMINS` may query when it's set.
+`AUDIT_READS=true` also records read calls (noisy). Writes are
+best-effort: a failed insert is logged and never breaks a run.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be

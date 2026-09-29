@@ -227,6 +227,9 @@ export default function Home() {
             <Link href="/results" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               View past runs →
             </Link>
+            <Link href="/metrics" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
+              Production metrics →
+            </Link>
             <Link href="/evals" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               View evals →
             </Link>
