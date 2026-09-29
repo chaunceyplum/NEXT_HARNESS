@@ -77,10 +77,10 @@ vi.mock('./model-registry', () => {
   };
 });
 
-const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment'].map((name) => ({
+const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment', 'execute_sql', 'adobe_create_export_job'].map((name) => ({
   name,
   description: name.replace(/_/g, ' '),
-  inputSchema: { type: 'object', properties: { id: { type: 'string' } } },
+  inputSchema: { type: 'object', properties: { id: { type: 'string' }, sql: { type: 'string' } } },
 }));
 
 vi.mock('./tool-catalog', () => ({
@@ -115,6 +115,7 @@ beforeEach(() => {
   executed = [];
   delete process.env.TOOL_DRY_RUN;
   delete process.env.BUILD_POLICY;
+  delete process.env.ROLLOUT_MODE;
 });
 
 const deleteViaProxy: Scripted = {
@@ -157,6 +158,47 @@ describe('runAgent approval gate', () => {
     await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', approveTool });
     expect(approveTool).not.toHaveBeenCalled();
     expect(executed.map((e) => e.name)).toEqual(['adobe_create_segment']);
+  });
+
+  it('asks before SQL that is not a single read-only query, with the reason', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'execute_sql', arguments: { sql: 'DROP TABLE harness_agent_runs' } } } }, { text: 'no' }];
+    const approveTool = vi.fn(async () => ({ approved: false, reason: 'Denied by the user.' }));
+    await runAgent({ userInput: 'clean up the runs table', modelKey: 'test:plain', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ toolName: 'execute_sql', reason: 'sql-write' }));
+    expect(executed).toEqual([]);
+  });
+
+  it('runs a read-only SELECT through execute_sql without asking', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'execute_sql', arguments: { sql: 'SELECT count(*) FROM runs' } } } }, { text: '3' }];
+    const approveTool = vi.fn();
+    await runAgent({ userInput: 'how many runs?', modelKey: 'test:plain', approveTool });
+    expect(approveTool).not.toHaveBeenCalled();
+    expect(executed.map((e) => e.name)).toEqual(['execute_sql']);
+  });
+
+  it('asks before an outbound call such as an export job', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_export_job', arguments: { id: 'x' } } } }, { text: 'no' }];
+    const approveTool = vi.fn(async () => ({ approved: true, reason: 'ok' }));
+    await runAgent({ userInput: 'export the audience', modelKey: 'test:plain', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ reason: 'outbound' }));
+  });
+
+  it('asks before every write in assisted rollout mode', async () => {
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_segment', arguments: { id: 'n' } } } }, { text: 'made' }];
+    const approveTool = vi.fn(async () => ({ approved: true, reason: 'ok' }));
+    await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', rolloutMode: 'assisted', approveTool });
+    expect(approveTool).toHaveBeenCalledWith(expect.objectContaining({ reason: 'assisted-mode' }));
+    expect(executed.map((e) => e.name)).toEqual(['adobe_create_segment']);
+  });
+
+  it('dry-runs writes in shadow rollout mode, and a request cannot loosen ROLLOUT_MODE', async () => {
+    process.env.ROLLOUT_MODE = 'shadow';
+    script = [{ toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_create_segment', arguments: { id: 'n' } } } }, { text: 'shadow' }];
+    const approveTool = vi.fn();
+    const result = await runAgent({ userInput: 'create a segment', modelKey: 'test:plain', rolloutMode: 'autonomous', approveTool });
+    expect(approveTool).not.toHaveBeenCalled();
+    expect(executed).toEqual([]);
+    expect(result.steps[0].toolResults[0].output).toMatchObject({ _dryRun: true });
   });
 
   it('skips approval in dry-run mode, where destructive tools do not execute', async () => {

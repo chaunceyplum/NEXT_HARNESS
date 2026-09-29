@@ -219,6 +219,23 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
+
+These calls pause for Approve/Deny on the home page before they run:
+
+| Reason | Calls |
+| --- | --- |
+| destructive | `delete_*`, `abort_*`, `msb_github_merge_pr`, privacy jobs |
+| sql-write | `execute_sql` unless the SQL is one read-only statement (`SELECT`/`WITH`/`EXPLAIN`/`SHOW`, no write keywords, no side-effect functions) |
+| outbound | commits, PRs, branches, export jobs, destination connections/dataflows, Launch callbacks/hosts, Launch library build/transition |
+| credentials | `flow_get_landing_zone_credentials`, `reactor_get_secret`, `reactor_list_secrets` |
+
+- `APPROVAL_TIMEOUT_MS` (default `600000`): how long a call waits before it's denied.
+- `ROLLOUT_MODE` (default `autonomous`): `assisted` also asks before every
+  write; `shadow` dry-runs every write (nothing executes, nothing to
+  approve except credential reads). A request's `rolloutMode` can pick a
+  stricter mode, never a looser one.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
