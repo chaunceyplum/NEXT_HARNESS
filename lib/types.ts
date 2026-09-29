@@ -134,3 +134,46 @@ export class ValidationError extends Error {
     this.name = 'ValidationError';
   }
 }
+
+// ============================================================================
+// Eval history (lib/eval-store.ts, written by evals/lib/report.ts)
+// ============================================================================
+
+/** Which eval suite a run came from — one per `npm run eval:*` file. */
+export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge';
+
+export interface EvalRunSummary {
+  id: string;
+  suite: EvalSuite;
+  /**
+   * What was actually graded: a model registry key for the agent/RAG-judge
+   * suites, or the retrieval mode ("embeddings:openai", "lexical-fallback")
+   * for the tool-shortlist suite.
+   */
+  subject: string;
+  /** Model registry key that graded rubric questions, when any fixture needed one. */
+  judgeModel?: string;
+  passedCount: number;
+  totalCount: number;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface EvalResultRecord {
+  fixtureId: string;
+  passed: boolean;
+  /** Why — the mismatch detail, a judge's reasoning, a recall breakdown. */
+  notes: string;
+  durationMs?: number;
+  /** Chat-model tokens spent on this fixture (agent suite only). */
+  totalTokens?: number;
+}
+
+export interface EvalRunDetail extends EvalRunSummary {
+  results: EvalResultRecord[];
+}
+
+export interface EvalRunsListResponse {
+  evalRuns: EvalRunSummary[];
+  total: number;
+}

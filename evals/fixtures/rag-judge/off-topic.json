@@ -1,0 +1,12 @@
+{
+  "id": "off-topic",
+  "note": "Results are real Adobe content but about a different product entirely.",
+  "query": "How do I create a calculated metric for average order value in Customer Journey Analytics?",
+  "output": {
+    "results": [
+      { "title": "Installing extensions in Adobe Experience Platform Tags", "content": "To install an extension, open your tag property, select Extensions > Catalog, find the extension, and select Install." },
+      { "title": "Data elements", "content": "Data elements are variables that map to pieces of data on your site, such as a page name or a cookie value." }
+    ]
+  },
+  "expected": { "verdictOneOf": ["poor"], "sufficient": false, "relevanceMax": 1 }
+}

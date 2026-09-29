@@ -75,12 +75,20 @@ export default function Home() {
               no fixed pipeline, no full rebuild for a narrow ask.
             </p>
           </div>
-          <Link
-            href="/results"
-            className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
-          >
-            View past runs →
-          </Link>
+          <div className="flex flex-col items-center sm:items-end gap-1">
+            <Link
+              href="/results"
+              className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
+            >
+              View past runs →
+            </Link>
+            <Link
+              href="/evals"
+              className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
+            >
+              View evals →
+            </Link>
+          </div>
         </div>
 
         {/* Main Card */}

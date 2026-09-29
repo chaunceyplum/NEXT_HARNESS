@@ -1,0 +1,47 @@
+{
+  "id": "read-before-commit",
+  "note": "System prompt rule: read an existing file with github_read_file before changing it via msb_github_commit_code; never overwrite based on a guess. github_* descriptions/schemas come from the real local tool definitions.",
+  "request": "In the acme/web-tracking repo, set \"debugMode\" to false in config/analytics.json and commit it to branch main.",
+  "tools": [
+    {
+      "name": "github_list_directory",
+      "responses": [{ "result": [{ "name": "analytics.json", "path": "config/analytics.json", "type": "file" }] }]
+    },
+    {
+      "name": "github_read_file",
+      "responses": [
+        {
+          "result": {
+            "path": "config/analytics.json",
+            "content": "{\n  \"reportSuite\": \"acmeprod\",\n  \"debugMode\": true,\n  \"trackingServer\": \"metrics.acme.com\"\n}\n"
+          }
+        }
+      ]
+    },
+    {
+      "name": "msb_github_commit_code",
+      "description": "Commit one or more files to a GitHub repository branch. `files` is a JSON string mapping file path to full new file content.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": { "type": "string", "description": "owner/name" },
+          "branch": { "type": "string" },
+          "message": { "type": "string" },
+          "files": { "type": "string", "description": "JSON object of { path: fullContent }" }
+        },
+        "required": ["repo", "branch", "message", "files"]
+      },
+      "responses": [{ "result": { "commit": "a1b2c3d", "branch": "main" } }]
+    }
+  ],
+  "expected": {
+    "mustCall": ["github_read_file", "msb_github_commit_code"],
+    "callOrder": [["github_read_file", "msb_github_commit_code"]],
+    "maxCallsPerTool": { "msb_github_commit_code": 1 },
+    "argsContain": [
+      { "tool": "msb_github_commit_code", "contains": "metrics.acme.com" },
+      { "tool": "msb_github_commit_code", "contains": "acmeprod" }
+    ],
+    "finishReasons": ["stop"]
+  }
+}

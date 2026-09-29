@@ -1,0 +1,6 @@
+{
+  "id": "empty-results",
+  "query": "Which merge policy should I use for a real-time edge segment?",
+  "output": { "results": [] },
+  "expected": { "verdictOneOf": ["poor"], "sufficient": false, "relevanceMax": 1 }
+}

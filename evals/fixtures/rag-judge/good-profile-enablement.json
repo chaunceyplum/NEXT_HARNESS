@@ -1,0 +1,18 @@
+{
+  "id": "good-profile-enablement",
+  "note": "On-topic and complete: results directly answer the question with the concrete steps.",
+  "query": "How do I enable an XDM schema for Real-Time Customer Profile?",
+  "output": {
+    "results": [
+      {
+        "title": "Enable a schema for use in Real-Time Customer Profile",
+        "content": "To enable a schema for Profile, the schema must have a primary identity field defined. In the Schema Editor, select the schema, then toggle 'Profile' in the schema properties panel and confirm. Via the API, PATCH the schema with {\"op\": \"add\", \"path\": \"/meta:immutableTags\", \"value\": [\"union\"]}. Once enabled for Profile, a schema cannot be disabled and fields can only be added, not removed."
+      },
+      {
+        "title": "Union schemas",
+        "content": "Every schema enabled for Profile contributes its fields to the union schema for its class."
+      }
+    ]
+  },
+  "expected": { "verdictOneOf": ["good"], "sufficient": true, "relevanceMin": 4 }
+}

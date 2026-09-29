@@ -16,57 +16,15 @@
  * against a live table.
  *
  * execute_sql takes a raw SQL string with no parameter binding, so every
- * value below is escaped by hand (sqlStr/sqlJson/etc.) rather than using
- * placeholders — see those helpers for exactly how.
+ * value below is escaped by hand (sqlStr/sqlJson/etc., lib/mcp-sql.ts)
+ * rather than using placeholders — see those helpers for exactly how.
  */
 
 import { randomUUID } from 'crypto';
-import { callMcpTool } from './mcp-client';
+import { execSql, sqlBool, sqlInt, sqlJson, sqlJsonOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
 import type { ExecutionRecord, RunSummary } from './types';
 
 const TABLE = 'harness_agent_runs';
-
-interface ExecuteSqlResult {
-  sql: string;
-  returned_rows: boolean;
-  columns?: string[];
-  rows?: Array<Record<string, unknown>>;
-  count?: number;
-  truncated?: boolean;
-  rows_affected?: number;
-  status?: string;
-}
-
-async function execSql(sql: string): Promise<ExecuteSqlResult> {
-  return (await callMcpTool('execute_sql', { sql })) as ExecuteSqlResult;
-}
-
-// ── SQL literal escaping (execute_sql has no parameter binding) ──────────
-
-function sqlStr(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function sqlStrOrNull(value: string | null | undefined): string {
-  return value == null ? 'NULL' : sqlStr(value);
-}
-
-function sqlJson(value: unknown): string {
-  return `${sqlStr(JSON.stringify(value))}::jsonb`;
-}
-
-function sqlJsonOrNull(value: unknown): string {
-  return value === undefined || value === null ? 'NULL' : sqlJson(value);
-}
-
-function sqlBool(value: boolean): string {
-  return value ? 'TRUE' : 'FALSE';
-}
-
-function sqlInt(value: number): string {
-  if (!Number.isFinite(value)) throw new Error(`Invalid numeric value for SQL: ${value}`);
-  return String(Math.trunc(value));
-}
 
 // ── Schema ─────────────────────────────────────────────────────────────
 

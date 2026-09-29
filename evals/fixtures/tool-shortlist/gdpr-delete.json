@@ -1,0 +1,5 @@
+{
+  "id": "gdpr-delete",
+  "request": "A customer invoked their right to be forgotten — delete all data for jane.doe@example.com.",
+  "expectedTools": ["adobe_create_privacy_job"]
+}

@@ -1,0 +1,5 @@
+{
+  "id": "schema-with-field-group",
+  "request": "Create an XDM schema on the Individual Profile class and add a new field group for loyalty tier and points balance.",
+  "expectedTools": ["adobe_create_schema", "adobe_create_field_group"]
+}

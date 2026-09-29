@@ -8,7 +8,11 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval:agent": "vitest run --config evals/vitest.evals.config.mts evals/agent.eval.ts",
+    "eval:shortlist": "vitest run --config evals/vitest.evals.config.mts evals/tool-shortlist.eval.ts",
+    "eval:rag-judge": "vitest run --config evals/vitest.evals.config.mts evals/rag-judge.eval.ts",
+    "eval:all": "vitest run --config evals/vitest.evals.config.mts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.12",

@@ -1,0 +1,5 @@
+{
+  "id": "segment-size-estimate",
+  "request": "Roughly how many profiles would qualify for a segment of people who purchased in the last 30 days?",
+  "expectedTools": ["adobe_create_segment_estimate"]
+}

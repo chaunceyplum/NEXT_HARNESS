@@ -561,3 +561,16 @@ NODE_ENV=production
 ---
 
 That's it! Just set `MCP_ENDPOINT_URL` and you're good to go. 🚀
+
+## Eval Variables
+
+Only read by `npm run eval:*` (see `evals/README.md`), never by the app.
+
+```bash
+EVAL_MODEL=bedrock:cheap          # model under test for eval:agent; defaults to DEFAULT_MODEL
+EVAL_JUDGE_MODEL=bedrock:balanced # grades rubric questions; defaults to DEFAULT_MODEL
+```
+
+`eval:shortlist` needs `MCP_ENDPOINT_URL`; `eval:rag-judge` uses
+`RAG_JUDGE_MODEL`/`RAG_JUDGE_ENABLED` exactly as the app does. Results are
+saved via `MCP_ENDPOINT_URL` too (best-effort).
