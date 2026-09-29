@@ -568,7 +568,11 @@ Only read by `npm run eval:*` (see `evals/README.md`), never by the app.
 
 ```bash
 EVAL_MODEL=bedrock:cheap          # model under test for eval:agent; defaults to DEFAULT_MODEL
-EVAL_JUDGE_MODEL=bedrock:balanced # grades rubric questions; defaults to DEFAULT_MODEL
+EVAL_JUDGE_MODEL=bedrock:expensive # grades rubric questions; defaults to the strongest tier of DEFAULT_MODEL's provider
+EVAL_TRIALS=5                     # runs per fixture, for pass@k / pass^k (default 1, max 20)
+MODEL_PRICING_JSON='{"bedrock:balanced":{"input":2,"output":10}}'
+                                  # USD per 1M tokens, by registry key or model id; overrides the
+                                  # Anthropic list prices in lib/llm/pricing.ts (Bedrock bills separately)
 ```
 
 `eval:shortlist` needs `MCP_ENDPOINT_URL`; `eval:rag-judge` uses

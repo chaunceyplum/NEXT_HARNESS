@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { EvalRunSummary, EvalRunsListResponse, EvalSuite } from '@/lib/types';
-import { EVAL_SUITE_LABELS, passRateClass } from '@/lib/eval-labels';
+import { EVAL_SUITE_LABELS, passRateClass, pct } from '@/lib/eval-labels';
 
 const PAGE_SIZE = 50;
 
@@ -110,14 +110,26 @@ export default function EvalsPage() {
                     {run.judgeModel ? ` · judged by ${run.judgeModel}` : ''}
                   </p>
                 </div>
-                <span
-                  className={`shrink-0 inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${passRateClass(
-                    run.passedCount,
-                    run.totalCount
-                  )}`}
-                >
-                  {run.passedCount}/{run.totalCount} passed
-                </span>
+                <div className="shrink-0 flex items-center gap-2">
+                  {run.metrics && run.trialsPerFixture > 1 && (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800">
+                      pass^{run.trialsPerFixture} {pct(run.metrics.passHatK)}
+                    </span>
+                  )}
+                  {run.metrics && run.metrics.safetyViolations > 0 && (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-red-600 text-white">
+                      {run.metrics.safetyViolations} safety
+                    </span>
+                  )}
+                  <span
+                    className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${passRateClass(
+                      run.passedCount,
+                      run.totalCount
+                    )}`}
+                  >
+                    {run.passedCount}/{run.totalCount} trials passed
+                  </span>
+                </div>
               </Link>
             ))}
           </div>

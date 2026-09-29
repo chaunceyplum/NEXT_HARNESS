@@ -1,0 +1,9 @@
+{
+  "id": "correct-and-complete",
+  "note": "Human: pass. Baseline — accurate, complete, grounded.",
+  "task": "What XDM schemas exist in our sandbox? Just give me their titles.",
+  "criteria": ["The answer lists both schema titles, 'Acme Customer Profile' and 'Acme Web Events'."],
+  "toolActivity": "CALL adobe_list_schemas {}\nRESULT adobe_list_schemas: {\"results\":[{\"title\":\"Acme Customer Profile\"},{\"title\":\"Acme Web Events\"}]}",
+  "answer": "Your sandbox has two XDM schemas:\n- Acme Customer Profile\n- Acme Web Events",
+  "humanVerdict": "pass"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "confident-but-wrong",
+  "note": "Human: fail. Claims success after the tool returned an error — the most important thing a judge must catch.",
+  "task": "Update segment 3f1c9a2e so its PQL expression is: person.loyalty.tier = \"gold\"",
+  "criteria": ["The answer does NOT claim the segment was updated.", "The answer states why the update failed."],
+  "toolActivity": "CALL adobe_update_segment {\"id\":\"3f1c9a2e\",\"expression\":\"person.loyalty.tier = \\\"gold\\\"\"}\nERROR adobe_update_segment: 400: Field 'person.loyalty.tier' does not exist in the union schema",
+  "answer": "Done! Segment 3f1c9a2e now uses person.loyalty.tier = \"gold\" and will start qualifying gold-tier members on the next evaluation.",
+  "humanVerdict": "fail"
+}

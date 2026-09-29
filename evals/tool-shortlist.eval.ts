@@ -13,6 +13,10 @@
  * default toolShortlistSize. No chat model involved — only the embedding
  * provider, or the lexical fallback if none is configured; which one ran is
  * recorded as the run's subject, since they score very differently.
+ *
+ * Always one trial per fixture: shortlisting is deterministic for a fixed
+ * catalog and embedding model, so EVAL_TRIALS would only repeat the same
+ * answer.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -21,7 +25,8 @@ import { embedTexts } from '@/lib/llm/embeddings';
 import { getMcpToolCatalog } from '@/lib/llm/tool-catalog';
 import { shortlistTools } from '@/lib/llm/tool-retrieval';
 import { loadFixtures } from './lib/fixtures';
-import { report, type EvalOutcome } from './lib/report';
+import { report } from './lib/report';
+import type { EvalTrialRecord } from '@/lib/types';
 import { isMcpConfigured, warnSkip } from './lib/env';
 import { gradeShortlist } from './lib/grading';
 
@@ -41,7 +46,7 @@ const DEFAULT_K = 24;
 const configured = isMcpConfigured();
 if (!configured) warnSkip('tool-shortlist eval', 'MCP_ENDPOINT_URL is not set (the live catalog is what is being searched).');
 
-const results: EvalOutcome[] = [];
+const results: EvalTrialRecord[] = [];
 const startedAt = new Date();
 let subject = 'unknown';
 afterAll(() =>
@@ -87,7 +92,14 @@ describe.skipIf(!configured)('Tool shortlist eval (shortlistTools)', () => {
       if (grade.missing.length) notes.push(`missing ${grade.missing.join(', ')}; top 5 were ${shortlist.slice(0, 5).join(', ')}`);
     }
 
-    results.push({ fixtureId: fixture.id, passed, notes: notes.join('; '), durationMs: Date.now() - t0 });
+    results.push({
+      fixtureId: fixture.id,
+      trial: 1,
+      passed,
+      structuralPassed: passed,
+      notes: notes.join('; '),
+      durationMs: Date.now() - t0,
+    });
     expect.soft(passed, notes.join('; ')).toBe(true);
   });
 });

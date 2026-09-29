@@ -4,16 +4,46 @@
  * failing every fixture on the same missing credential.
  */
 
-import { getDefaultModelKey, getModelEntry } from '@/lib/llm/model-registry';
+import { getDefaultModelKey, getModelEntry, getModelRegistry } from '@/lib/llm/model-registry';
 
 /** Model under test for the agent suite. EVAL_MODEL overrides DEFAULT_MODEL, so two models can be compared on the same fixtures. */
 export function evalModelKey(): string {
   return process.env.EVAL_MODEL || getDefaultModelKey();
 }
 
-/** Model that grades rubric questions. Defaults to DEFAULT_MODEL rather than EVAL_MODEL, so an A/B run across models keeps a constant grader. */
+/**
+ * Model that grades rubric questions. EVAL_JUDGE_MODEL wins; otherwise the
+ * most capable ("expensive") tier of the default model's provider, since a
+ * judge should be at least as strong as what it grades. Independent of
+ * EVAL_MODEL, so an A/B run across models keeps a constant grader.
+ */
 export function judgeModelKey(): string {
-  return process.env.EVAL_JUDGE_MODEL || getDefaultModelKey();
+  if (process.env.EVAL_JUDGE_MODEL) return process.env.EVAL_JUDGE_MODEL;
+  const defaultKey = getDefaultModelKey();
+  try {
+    const provider = getModelEntry(defaultKey).provider;
+    const strongest = getModelRegistry().find((e) => e.provider === provider && e.tier === 'expensive');
+    return strongest?.key ?? defaultKey;
+  } catch {
+    return defaultKey;
+  }
+}
+
+/** A judge grading its own output favors it; say so rather than silently reporting an inflated score. */
+export function warnIfSelfJudging(modelUnderTest: string, judge: string): void {
+  if (modelUnderTest === judge) {
+    console.warn(
+      `[evals] The judge (${judge}) is the model under test, which biases rubric grades toward its own output. ` +
+        'Set EVAL_JUDGE_MODEL to a different, stronger model.'
+    );
+  }
+}
+
+/** Trials per fixture (EVAL_TRIALS, default 1, capped at 20). One run says little about a non-deterministic agent. */
+export function trialsPerFixture(): number {
+  const n = Number(process.env.EVAL_TRIALS);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(Math.floor(n), 20);
 }
 
 export function isMcpConfigured(): boolean {

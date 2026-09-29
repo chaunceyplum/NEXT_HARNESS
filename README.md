@@ -70,13 +70,19 @@ credentials this suite shouldn't require just to run.
 npm run eval:shortlist   # does tool shortlisting surface the right tools? (live MCP catalog)
 npm run eval:agent       # does the real agent loop behave? (real model, scripted tools)
 npm run eval:rag-judge   # does the RAG judge agree with a human?
+npm run eval:judge       # does the eval's own rubric judge agree with a human?
 npm run eval:all
+EVAL_TRIALS=5 npm run eval:agent   # repeat each case to measure pass@k / pass^k
 ```
 
 Separate from `npm test`: evals call the real, configured model / embedding
 provider / MCP endpoint against hand-reviewed fixtures in `evals/fixtures/`,
-so they cost money and aren't deterministic. Results print as a table and
-are saved to the MCP server's database, browsable at `/evals`. See
+so they cost money and aren't deterministic. The agent suite includes
+safety cases (prompt injection, credential exfiltration, ambiguous
+destructive requests). Each run reports success rate, pass@k/pass^k,
+tool-call accuracy, safety violation rate, steps, p50/p95 latency and cost
+per success, prints them as a table, and saves them to the MCP server's
+database, browsable at `/evals`. See
 [`evals/README.md`](./evals/README.md) for what each suite checks and how to
 add fixtures.
 

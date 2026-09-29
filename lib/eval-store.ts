@@ -5,15 +5,24 @@
  * lives next to the run history it's grading instead of needing a second
  * database.
  *
- * Tables (created idempotently by ensureTables() on first use, dedicated to
- * the harness like harness_agent_runs):
- *   harness_eval_runs     one row per eval-file invocation
- *   harness_eval_results  one row per fixture within that run
+ * Tables (created/migrated idempotently by ensureTables() on first use,
+ * dedicated to the harness like harness_agent_runs):
+ *   harness_eval_runs     one row per eval-file invocation, with its metrics
+ *   harness_eval_results  one row per fixture TRIAL within that run
  */
 
 import { randomUUID } from 'crypto';
-import { execSql, sqlBool, sqlInt, sqlIntOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
-import type { EvalResultRecord, EvalRunDetail, EvalRunSummary } from './types';
+import { computeRunMetrics, type EvalRunMetrics } from './eval-metrics';
+import {
+  execSql,
+  sqlBool,
+  sqlInt,
+  sqlIntOrNull,
+  sqlJsonOrNull,
+  sqlStr,
+  sqlStrOrNull,
+} from './mcp-sql';
+import type { EvalRunDetail, EvalRunSummary, EvalTrialRecord } from './types';
 
 const RUNS_TABLE = 'harness_eval_runs';
 const RESULTS_TABLE = 'harness_eval_results';
@@ -36,6 +45,15 @@ function ensureTables(): Promise<void> {
         )`.replace(/\s+/g, ' ')
       );
       await execSql(`CREATE INDEX IF NOT EXISTS ${RUNS_TABLE}_started_at_idx ON ${RUNS_TABLE} (started_at DESC)`);
+      // Added after the first release of these tables — ADD COLUMN IF NOT
+      // EXISTS so a table created by that release migrates in place.
+      await execSql(
+        `ALTER TABLE ${RUNS_TABLE}
+          ADD COLUMN IF NOT EXISTS trials_per_fixture INTEGER NOT NULL DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS prompt_version TEXT,
+          ADD COLUMN IF NOT EXISTS metrics JSONB`.replace(/\s+/g, ' ')
+      );
+
       await execSql(
         `CREATE TABLE IF NOT EXISTS ${RESULTS_TABLE} (
           eval_run_id TEXT NOT NULL REFERENCES ${RUNS_TABLE}(id) ON DELETE CASCADE,
@@ -43,9 +61,25 @@ function ensureTables(): Promise<void> {
           passed BOOLEAN NOT NULL,
           notes TEXT NOT NULL,
           duration_ms INTEGER,
-          total_tokens INTEGER,
-          PRIMARY KEY (eval_run_id, fixture_id)
+          total_tokens INTEGER
         )`.replace(/\s+/g, ' ')
+      );
+      await execSql(
+        `ALTER TABLE ${RESULTS_TABLE}
+          ADD COLUMN IF NOT EXISTS trial INTEGER NOT NULL DEFAULT 1,
+          ADD COLUMN IF NOT EXISTS category TEXT,
+          ADD COLUMN IF NOT EXISTS structural_passed BOOLEAN,
+          ADD COLUMN IF NOT EXISTS safety_violation BOOLEAN,
+          ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION,
+          ADD COLUMN IF NOT EXISTS steps INTEGER,
+          ADD COLUMN IF NOT EXISTS tool_calls INTEGER`.replace(/\s+/g, ' ')
+      );
+      // The first release keyed rows by (run, fixture); trials need
+      // (run, fixture, trial). Dropping a constraint that's already gone and
+      // creating an index that already exists are both no-ops.
+      await execSql(`ALTER TABLE ${RESULTS_TABLE} DROP CONSTRAINT IF EXISTS ${RESULTS_TABLE}_pkey`);
+      await execSql(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${RESULTS_TABLE}_trial_idx ON ${RESULTS_TABLE} (eval_run_id, fixture_id, trial)`
       );
     })().catch((err) => {
       ensureTablesPromise = null; // allow retry on next call
@@ -55,36 +89,60 @@ function ensureTables(): Promise<void> {
   return ensureTablesPromise;
 }
 
-export interface SaveEvalRunInput extends Omit<EvalRunSummary, 'id' | 'passedCount' | 'totalCount'> {
-  results: EvalResultRecord[];
+export interface SaveEvalRunInput {
+  suite: EvalRunSummary['suite'];
+  subject: string;
+  judgeModel?: string;
+  promptVersion?: string;
+  startedAt: string;
+  finishedAt: string;
+  results: EvalTrialRecord[];
 }
 
-/** Persist one eval run and all its fixture results. Returns the new run id. */
+function sqlFloatOrNull(value: number | null | undefined): string {
+  if (value == null) return 'NULL';
+  if (!Number.isFinite(value)) throw new Error(`Invalid numeric value for SQL: ${value}`);
+  return String(value);
+}
+
+function sqlBoolOrNull(value: boolean | null | undefined): string {
+  return value == null ? 'NULL' : sqlBool(value);
+}
+
+/** Persist one eval run and all its trial results. Returns the new run id. */
 export async function saveEvalRun(input: SaveEvalRunInput): Promise<string> {
   await ensureTables();
   const id = randomUUID();
+  const metrics = computeRunMetrics(input.results);
   const passedCount = input.results.filter((r) => r.passed).length;
 
   await execSql(
-    `INSERT INTO ${RUNS_TABLE} (id, suite, subject, judge_model, passed_count, total_count, started_at, finished_at)
+    `INSERT INTO ${RUNS_TABLE}
+       (id, suite, subject, judge_model, prompt_version, passed_count, total_count, trials_per_fixture, metrics, started_at, finished_at)
      VALUES (${sqlStr(id)}, ${sqlStr(input.suite)}, ${sqlStr(input.subject)}, ${sqlStrOrNull(input.judgeModel)},
-             ${sqlInt(passedCount)}, ${sqlInt(input.results.length)}, ${sqlStr(input.startedAt)}, ${sqlStr(input.finishedAt)})`.replace(
+             ${sqlStrOrNull(input.promptVersion)}, ${sqlInt(passedCount)}, ${sqlInt(input.results.length)},
+             ${sqlInt(metrics.k)}, ${sqlJsonOrNull(metrics)}, ${sqlStr(input.startedAt)}, ${sqlStr(input.finishedAt)})`.replace(
       /\s+/g,
       ' '
     )
   );
 
   if (input.results.length > 0) {
-    // One multi-row INSERT rather than a round trip (an MCP HTTP call) per fixture.
+    // One multi-row INSERT rather than a round trip (an MCP HTTP call) per trial.
     const values = input.results
       .map(
         (r) =>
-          `(${sqlStr(id)}, ${sqlStr(r.fixtureId)}, ${sqlBool(r.passed)}, ${sqlStr(r.notes)}, ` +
-          `${sqlIntOrNull(r.durationMs)}, ${sqlIntOrNull(r.totalTokens)})`
+          `(${sqlStr(id)}, ${sqlStr(r.fixtureId)}, ${sqlInt(r.trial)}, ${sqlBool(r.passed)}, ${sqlStr(r.notes)}, ` +
+          `${sqlStrOrNull(r.category)}, ${sqlBoolOrNull(r.structuralPassed)}, ${sqlBoolOrNull(r.safetyViolation)}, ` +
+          `${sqlIntOrNull(r.durationMs)}, ${sqlIntOrNull(r.totalTokens)}, ${sqlFloatOrNull(r.costUsd)}, ` +
+          `${sqlIntOrNull(r.steps)}, ${sqlIntOrNull(r.toolCalls)})`
       )
       .join(', ');
     await execSql(
-      `INSERT INTO ${RESULTS_TABLE} (eval_run_id, fixture_id, passed, notes, duration_ms, total_tokens) VALUES ${values}`
+      `INSERT INTO ${RESULTS_TABLE}
+         (eval_run_id, fixture_id, trial, passed, notes, category, structural_passed, safety_violation,
+          duration_ms, total_tokens, cost_usd, steps, tool_calls)
+       VALUES ${values}`.replace(/\s+/g, ' ')
     );
   }
 
@@ -97,12 +155,18 @@ function rowToSummary(row: Record<string, unknown>): EvalRunSummary {
     suite: row.suite as EvalRunSummary['suite'],
     subject: row.subject as string,
     judgeModel: (row.judge_model as string | null) ?? undefined,
+    promptVersion: (row.prompt_version as string | null) ?? undefined,
     passedCount: Number(row.passed_count),
     totalCount: Number(row.total_count),
+    trialsPerFixture: Number(row.trials_per_fixture ?? 1),
+    metrics: (row.metrics as EvalRunMetrics | null) ?? undefined,
     startedAt: new Date(row.started_at as string).toISOString(),
     finishedAt: new Date(row.finished_at as string).toISOString(),
   };
 }
+
+const num = (v: unknown): number | undefined => (v == null ? undefined : Number(v));
+const bool = (v: unknown): boolean | undefined => (v == null ? undefined : (v as boolean));
 
 /** Newest-first, paginated. */
 export async function listEvalRuns(
@@ -121,23 +185,30 @@ export async function listEvalRuns(
   };
 }
 
-/** One eval run plus every fixture-level result recorded for it. */
+/** One eval run plus every trial result recorded for it. */
 export async function getEvalRun(id: string): Promise<EvalRunDetail | null> {
   await ensureTables();
   const [runResult, resultsResult] = await Promise.all([
     execSql(`SELECT * FROM ${RUNS_TABLE} WHERE id = ${sqlStr(id)} LIMIT 1`),
-    execSql(`SELECT * FROM ${RESULTS_TABLE} WHERE eval_run_id = ${sqlStr(id)} ORDER BY fixture_id`),
+    execSql(`SELECT * FROM ${RESULTS_TABLE} WHERE eval_run_id = ${sqlStr(id)} ORDER BY fixture_id, trial`),
   ]);
   const row = runResult.rows?.[0];
   if (!row) return null;
-  return {
-    ...rowToSummary(row),
-    results: (resultsResult.rows ?? []).map((r) => ({
-      fixtureId: r.fixture_id as string,
-      passed: r.passed as boolean,
-      notes: r.notes as string,
-      durationMs: r.duration_ms == null ? undefined : Number(r.duration_ms),
-      totalTokens: r.total_tokens == null ? undefined : Number(r.total_tokens),
-    })),
-  };
+  const results: EvalTrialRecord[] = (resultsResult.rows ?? []).map((r) => ({
+    fixtureId: r.fixture_id as string,
+    trial: Number(r.trial ?? 1),
+    passed: r.passed as boolean,
+    notes: r.notes as string,
+    category: (r.category as string | null) ?? undefined,
+    structuralPassed: bool(r.structural_passed),
+    safetyViolation: bool(r.safety_violation),
+    durationMs: num(r.duration_ms),
+    totalTokens: num(r.total_tokens),
+    costUsd: num(r.cost_usd),
+    steps: num(r.steps),
+    toolCalls: num(r.tool_calls),
+  }));
+  const summary = rowToSummary(row);
+  // Runs saved before metrics existed get them computed on read.
+  return { ...summary, metrics: summary.metrics ?? computeRunMetrics(results), results };
 }

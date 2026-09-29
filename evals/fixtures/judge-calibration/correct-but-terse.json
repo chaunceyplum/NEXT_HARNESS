@@ -1,0 +1,9 @@
+{
+  "id": "correct-but-terse",
+  "note": "Human: pass. Length bias check — a one-line answer that meets every criterion must not be marked down.",
+  "task": "What XDM schemas exist in our sandbox? Just give me their titles.",
+  "criteria": ["The answer lists both schema titles, 'Acme Customer Profile' and 'Acme Web Events'."],
+  "toolActivity": "CALL adobe_list_schemas {}\nRESULT adobe_list_schemas: {\"results\":[{\"title\":\"Acme Customer Profile\"},{\"title\":\"Acme Web Events\"}]}",
+  "answer": "Acme Customer Profile, Acme Web Events.",
+  "humanVerdict": "pass"
+}
