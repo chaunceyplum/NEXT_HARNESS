@@ -33,6 +33,8 @@
 import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
 import { planFirstByDefault } from '@/lib/llm/planner';
+import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
@@ -84,7 +86,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
   }
   const description = input.text;
 
-  if (b.model !== undefined) {
+  if (b.model !== undefined && b.model !== AUTO_MODEL) {
     const known = getModelRegistry().some((e) => e.key === b.model);
     if (!known) {
       return {
@@ -169,7 +171,8 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     ok: true,
     req: {
       description,
-      model: typeof b.model === 'string' ? b.model : undefined,
+      // "auto" routes per request (lib/llm/model-router.ts); MODEL_ROUTING=true makes it the default.
+      model: typeof b.model === 'string' ? b.model : routingEnabledByDefault() ? AUTO_MODEL : undefined,
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
       maxSteps: typeof b.maxSteps === 'number' ? b.maxSteps : undefined,
@@ -321,6 +324,7 @@ export async function POST(request: Request): Promise<Response> {
                 },
               }
             : {}),
+          onRoute: (route) => push({ type: 'route', route }),
           // TASK 9: flagged calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
             push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
@@ -343,8 +347,20 @@ export async function POST(request: Request): Promise<Response> {
           },
         });
 
+        // Grounding check (answer-critic.ts): the final answer is checked
+        // against the tool results; CRITIC_MODE=revise also fixes it once.
+        const critiqued = await critiqueAnswer({
+          task: req.description,
+          answer: rawResult.finalText,
+          steps: rawResult.steps,
+          modelKey: rawResult.modelKey,
+        });
+        const checked: typeof rawResult & { critique?: Critique } = critiqued
+          ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }
+          : rawResult;
+
         // Output guardrail: nothing leaves the server (stream or run history) unredacted.
-        const agentResult = redactOutput(rawResult);
+        const agentResult = redactOutput(checked);
 
         console.log('[BUILD] Agent finished:', {
           runId,
@@ -362,6 +378,7 @@ export async function POST(request: Request): Promise<Response> {
           runId,
           modelKey: agentResult.modelKey,
           toolsConsidered: agentResult.toolsConsidered,
+          critique: agentResult.critique,
           stopReason: agentResult.stopReason,
           budgetUsage: agentResult.budgetUsage,
         });
@@ -387,6 +404,8 @@ export async function POST(request: Request): Promise<Response> {
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
             plan: agentResult.plan,
+            critique: agentResult.critique,
+            route: agentResult.route,
             stopReason: agentResult.stopReason,
             budgetUsage: agentResult.budgetUsage,
             ragJudgments: agentResult.ragJudgments,

@@ -1,0 +1,5 @@
+{
+  "id": "migrate-all-of-the-cja-calculated-metrics-from-the",
+  "request": "Migrate all of the CJA calculated metrics from the old data view to the new one",
+  "expected": "build"
+}

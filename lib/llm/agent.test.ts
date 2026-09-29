@@ -373,6 +373,17 @@ describe('runAgent plan-first', () => {
   });
 });
 
+describe('runAgent with model "auto"', () => {
+  it('routes a clear change request by rules and records the decision, without pinning', async () => {
+    script = [{ text: 'done' }];
+    const routes: unknown[] = [];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', onRoute: (r) => routes.push(r) });
+    expect(result.route).toMatchObject({ category: 'change', via: 'rules', tier: 'balanced', modelKey: 'test:plain' });
+    expect(routes).toHaveLength(1);
+    expect(result.modelKey).toBe('test:plain');
+  });
+});
+
 describe('runAgent tool outcomes (audit log feed)', () => {
   it('reports each call with its effective tool, level, outcome and approval reason', async () => {
     script = [
@@ -398,5 +409,15 @@ describe('runAgent tool outcomes (audit log feed)', () => {
         error: 'Denied by "bob".',
       }),
     ]);
+  });
+});
+
+describe('runAgent plan-first with model "auto"', () => {
+  it('plans on the routed model rather than the literal "auto"', async () => {
+    const plan = { goal: 'g', steps: [{ id: 1, description: 'Answer', tool: null, expectedOutput: 'x', dependsOn: [] }] };
+    script = [{ text: JSON.stringify(plan) }, { text: 'done' }];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', planFirst: true });
+    expect(result.route?.modelKey).toBe('test:plain');
+    expect(result.plan?.goal).toBe('g');
   });
 });

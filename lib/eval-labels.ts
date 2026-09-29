@@ -6,6 +6,7 @@ export const EVAL_SUITE_LABELS: Record<EvalSuite, string> = {
   tool_shortlist: 'Tool shortlisting',
   rag_judge: 'RAG judge calibration',
   judge_calibration: 'Eval judge calibration',
+  routing: 'Model routing',
 };
 
 export function passRateClass(passed: number, total: number): string {

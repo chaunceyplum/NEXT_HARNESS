@@ -1,0 +1,5 @@
+{
+  "id": "list-the-launch-rules-on-property-pr1234abcd",
+  "request": "List the Launch rules on property PR1234abcd",
+  "expected": "lookup"
+}

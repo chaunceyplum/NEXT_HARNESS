@@ -119,6 +119,10 @@ export interface BuildResponse {
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
   /** The plan as executed, when the run planned first. */
   plan?: PlanInfo;
+  /** Grounding check on the final answer, when it ran. */
+  critique?: CritiqueInfo;
+  /** Set when the run asked for model "auto". */
+  route?: RouteInfo;
   /**
    * Quality judgments for a sample of the run's knowledge searches, scored
    * off the critical path by the RAG judge. Absent on runs from before this
@@ -144,6 +148,8 @@ export type BuildStreamEvent =
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
   /** The run's plan: sent when made (awaitingApproval while a person decides) and on every status change or revision. */
   | { type: 'plan'; plan: PlanInfo; awaitingApproval?: boolean }
+  /** The request asked for model "auto": which model it was routed to, and why. */
+  | { type: 'route'; route: RouteInfo }
   | {
       type: 'approval_request';
       toolCallId: string;
@@ -166,6 +172,7 @@ export type BuildStreamEvent =
       toolsConsidered: string[];
       stopReason?: string;
       budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+      critique?: CritiqueInfo;
     }
   | { type: 'error'; error: string; code?: string };
 
@@ -182,6 +189,29 @@ export interface PlanInfo {
     status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
     note?: string;
   }>;
+}
+
+/** Grounding check on the final answer (lib/llm/answer-critic.ts). */
+export interface CritiqueInfo {
+  passed: boolean;
+  grounded: boolean;
+  answersRequest: boolean;
+  unsupportedClaims: string[];
+  issues: string[];
+  revised: boolean;
+  originalAnswer?: string;
+  model: string;
+}
+
+/** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
+export interface RouteInfo {
+  category: 'lookup' | 'change' | 'build' | 'unclear';
+  confidence: number;
+  reason: string;
+  via: 'rules' | 'model' | 'fallback';
+  modelKey: string;
+  tier?: 'cheap' | 'balanced' | 'expensive';
+  clarifyingQuestion?: string;
 }
 
 export interface ModelOption {
@@ -252,7 +282,7 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration';
+export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
 
 export interface EvalRunSummary {
   id: string;

@@ -156,6 +156,7 @@ export default function RunDetailPage() {
                 finalText={record.result.finalText}
                 usage={record.result.usage}
                 stopReason={record.result.stopReason}
+                critique={record.result.critique}
               />
             )}
 

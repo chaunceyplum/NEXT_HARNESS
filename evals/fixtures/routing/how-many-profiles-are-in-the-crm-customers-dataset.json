@@ -1,0 +1,5 @@
+{
+  "id": "how-many-profiles-are-in-the-crm-customers-dataset",
+  "request": "How many profiles are in the CRM Customers dataset?",
+  "expected": "lookup"
+}

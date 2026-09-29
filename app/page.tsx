@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, PlanInfo, ModelOption, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
@@ -15,6 +15,9 @@ interface RunState {
   plan?: PlanInfo;
   planAwaitingApproval?: boolean;
   planSubmitting?: boolean;
+  critique?: CritiqueInfo;
+  /** How an "auto" run picked its model. */
+  route?: RouteInfo;
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finalText: string;
@@ -182,6 +185,8 @@ export default function Home() {
                 }
               : prev
           );
+        } else if (event.type === 'route') {
+          setRunState((prev) => (prev ? { ...prev, route: event.route } : prev));
         } else if (event.type === 'restart') {
           // A fallback model is re-running from scratch — the steps so far
           // and any streamed text belong to the abandoned attempt.
@@ -197,6 +202,7 @@ export default function Home() {
                   finishReason: event.finishReason,
                   usage: event.usage,
                   stopReason: event.stopReason,
+                  critique: event.critique,
                   done: true,
                 }
               : prev
@@ -406,6 +412,13 @@ export default function Home() {
                 }}
               />
             )}
+            {runState.route && (
+              <p className="text-xs text-gray-600 mb-3">
+                Auto-routed to <code className="bg-white px-1 rounded">{runState.route.modelKey}</code> as a{' '}
+                <strong>{runState.route.category}</strong> request ({runState.route.via}, confidence{' '}
+                {Math.round(runState.route.confidence * 100)}%): {runState.route.reason}
+              </p>
+            )}
             {runState.pendingApprovals.map((p) => (
               <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
                 <p className="text-amber-900 font-semibold">Approval needed: {p.reasonText}</p>
@@ -444,6 +457,7 @@ export default function Home() {
               finalText={runState.done ? runState.finalText : runState.streamingText}
               usage={runState.done ? runState.usage : undefined}
               stopReason={runState.done ? runState.stopReason : undefined}
+              critique={runState.done ? runState.critique : undefined}
             />
           </div>
         )}

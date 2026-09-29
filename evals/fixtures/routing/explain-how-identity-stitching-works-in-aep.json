@@ -1,0 +1,5 @@
+{
+  "id": "explain-how-identity-stitching-works-in-aep",
+  "request": "Explain how identity stitching works in AEP",
+  "expected": "lookup"
+}
