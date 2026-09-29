@@ -1,0 +1,5 @@
+{
+  "id": "update-the-loyalty-members-segment-so-it-uses-pers",
+  "request": "Update the Loyalty Members segment so it uses person.loyalty.tier = \"gold\"",
+  "expected": "change"
+}

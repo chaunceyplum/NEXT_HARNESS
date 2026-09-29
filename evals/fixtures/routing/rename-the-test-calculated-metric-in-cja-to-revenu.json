@@ -1,0 +1,5 @@
+{
+  "id": "rename-the-test-calculated-metric-in-cja-to-revenu",
+  "request": "Rename the 'Test' calculated metric in CJA to 'Revenue per Visit'",
+  "expected": "change"
+}

@@ -113,6 +113,8 @@ export interface BuildResponse {
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /** Set when the run asked for model "auto". */
+  route?: RouteInfo;
   /**
    * Quality judgments for a sample of the run's knowledge searches, scored
    * off the critical path by the RAG judge. Absent on runs from before this
@@ -136,6 +138,8 @@ export type BuildStreamEvent =
   // still arrives on 'done'. Discard accumulated deltas on 'restart'.
   | { type: 'text_delta'; delta: string }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  /** The request asked for model "auto": which model it was routed to, and why. */
+  | { type: 'route'; route: RouteInfo }
   | {
       type: 'approval_request';
       toolCallId: string;
@@ -160,6 +164,17 @@ export type BuildStreamEvent =
       budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
     }
   | { type: 'error'; error: string; code?: string };
+
+/** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
+export interface RouteInfo {
+  category: 'lookup' | 'change' | 'build' | 'unclear';
+  confidence: number;
+  reason: string;
+  via: 'rules' | 'model' | 'fallback';
+  modelKey: string;
+  tier?: 'cheap' | 'balanced' | 'expensive';
+  clarifyingQuestion?: string;
+}
 
 export interface ModelOption {
   key: string;
@@ -229,7 +244,7 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration';
+export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
 
 export interface EvalRunSummary {
   id: string;
