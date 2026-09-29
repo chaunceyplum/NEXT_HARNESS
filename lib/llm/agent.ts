@@ -3,8 +3,9 @@
  *
  * Runtime optimisations layered on top of the basic generateText loop:
  *
- *   1. Prompt caching (TASK 1): the system prompt is sent as a messages-array
- *      system message with providerOptions.anthropic.cacheControl so Anthropic
+ *   1. Prompt caching (TASK 1): the system prompt is sent as a SystemModelMessage
+ *      via `instructions` (AI SDK v7 rejects system messages inside `messages`)
+ *      with providerOptions.anthropic.cacheControl so Anthropic
  *      and Bedrock cache it after the first step. Tool definitions are similarly
  *      cached via toolOrder stability (shortlist never shuffles). Cache-write on
  *      the first step, much-cheaper cache-read on every subsequent step.
@@ -12,26 +13,29 @@
  *   2. prepareStep context management (TASK 2): tool results from steps older
  *      than RESULT_SUMMARY_THRESHOLD are replaced with a compact one-line
  *      summary before each step, so they don't accumulate at full size across a
- *      long run. Results are already captured in the trace at call time, so
- *      nothing is lost for the user — only the in-flight model context shrinks.
+ *      long run. The trace keeps the uncompressed results (each already capped at
+ *      12K chars by capToolResult) — only the in-flight model context shrinks.
  *
  *   3. Last-step summary (TASK 3): toolChoice is forced to 'none' for the final
  *      allowed step so the model always writes a coherent closing answer rather
- *      than being cut off mid-tool-call when stepCountIs fires.
+ *      than being cut off mid-tool-call when stepCountIs fires. (So with
+ *      maxSteps=1 the run is text-only.)
  *
- *   6. find_tools mid-run expansion (TASK 6): a synthetic `find_tools` tool is
- *      always-on. When the model calls it, the returned names are added to the
- *      active set for the remaining steps via prepareStep's activeTools.
+ *   6. find_tools mid-run expansion (TASK 6): every catalog tool is built and
+ *      passed to generateText, but prepareStep's activeTools narrows what the
+ *      model sees to the shortlist plus the always-on synthetic `find_tools`.
+ *      When the model calls find_tools, the returned names join the active set
+ *      for the remaining steps.
  */
 
-import { generateText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
+import { generateText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { tool, jsonSchema } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
-import { applyToolPolicy } from './tool-policy';
+import { applyToolPolicy, classifyTool, type PolicyMode } from './tool-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -83,94 +87,108 @@ export interface RunAgentOptions {
    * TASK 9: Tool policy to apply before handing the tool set to the model.
    * 'read-only' removes all write and destructive tools structurally —
    * the model cannot call them at all, not just rule-based.
-   * Defaults to the BUILD_POLICY env var, or 'full' if unset.
+   * Can only tighten BUILD_POLICY: BUILD_POLICY=read-only wins over 'full' here.
    */
-  policy?: import('./tool-policy').PolicyMode;
+  policy?: PolicyMode;
   /**
    * TASK 9: When true, wraps destructive tools to return a dry-run description
-   * instead of executing. Defaults to TOOL_DRY_RUN env var.
+   * instead of executing. Can only tighten TOOL_DRY_RUN: false here does not
+   * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
   /**
-   * TASK 10: Enable extended thinking (Anthropic / Bedrock only).
-   * Sets a token budget for the model's internal reasoning before it responds.
-   * Ignored for non-Anthropic providers (OpenAI). Effective on balanced and
-   * expensive tiers; has limited benefit on cheap/haiku models.
+   * TASK 10: Enable extended thinking (Claude via Anthropic / Bedrock only).
+   * Ignored for other providers and non-Claude Bedrock models.
    *
-   * Minimum 1 000 tokens (Anthropic's documented minimum). A good starting
-   * point for complex multi-step tasks is 8 000–16 000. Higher budgets improve
-   * reasoning quality but increase cost and latency.
+   * Minimum 1 024 tokens. On Haiku 4.5 and older Claude models this is the
+   * thinking token budget (8 000–16 000 is a good start for multi-step
+   * tasks). Newer models (Sonnet 5, Opus 4.7+, Opus 5.x) reject fixed budgets,
+   * so there it just switches on adaptive thinking and the value is unused.
    *
    * Can also be set globally via THINKING_BUDGET_TOKENS env var (number).
    * Per-request value takes precedence over the env var.
    */
   thinkingBudget?: number;
+  /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
+  abortSignal?: AbortSignal;
+  /**
+   * Called when a provider failure makes the run restart from scratch on a
+   * same-tier fallback model. Steps already reported via onStep belong to the
+   * abandoned attempt and should be discarded.
+   */
+  onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
 
 /**
- * Anthropic / Bedrock cache_control marker. Applied to the system message so
- * the system prompt is cached after the first call. The AI SDK's `toolOrder`
- * stability (tools are never shuffled) means tool definitions are also cache-
- * eligible without per-tool markup.
+ * Cache markers for the system message, so the system prompt is cached after
+ * the first call. The AI SDK's `toolOrder` stability (tools are never
+ * shuffled) means tool definitions are also cache-eligible without per-tool
+ * markup. Anthropic reads `cacheControl`; @ai-sdk/amazon-bedrock reads
+ * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
+ * support it.
  */
-const CACHE_CONTROL = { type: 'ephemeral' } as const;
+function buildSystemMessage(modelKey: string): SystemModelMessage {
+  const entry = tryGetModelEntry(modelKey);
+  const providerOptions: SystemModelMessage['providerOptions'] =
+    entry?.provider === 'anthropic'
+      ? { anthropic: { cacheControl: { type: 'ephemeral' } } }
+      : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
+        ? { bedrock: { cachePoint: { type: 'default' } } }
+        : undefined;
+  return { role: 'system', content: systemPrompt(), ...(providerOptions ? { providerOptions } : {}) };
+}
 
-/** Build the system message as a ModelMessage with cache control attached. */
-function buildSystemMessage(): ModelMessage {
-  return {
-    role: 'system',
-    content: systemPrompt(),
-    providerOptions: {
-      anthropic: { cacheControl: CACHE_CONTROL },
-      // Bedrock uses the same providerOptions key name via @ai-sdk/amazon-bedrock
-      bedrock: { cacheControl: CACHE_CONTROL },
-    },
-  };
+function tryGetModelEntry(modelKey: string) {
+  try { return getModelEntry(modelKey); } catch { return undefined; }
+}
+
+function isClaudeModelId(modelId: string): boolean {
+  return /claude/i.test(modelId);
 }
 
 // ── TASK 10: Extended thinking ────────────────────────────────────────────────
 
-/** Minimum token budget Anthropic accepts for extended thinking. */
-const THINKING_MIN_TOKENS = 1_000;
+/** Minimum token budget Anthropic accepts for budget-based extended thinking. */
+const THINKING_MIN_TOKENS = 1_024;
 
 /**
- * Resolve the effective thinking budget for a run.
- * Per-request value takes precedence over the THINKING_BUDGET_TOKENS env var.
- * Returns undefined (thinking disabled) when the model is not Anthropic-family
- * or when no budget is configured.
+ * Claude models that still take `{type: 'enabled', budgetTokens}`: Haiku 4.5
+ * and older (Claude 3.x, Sonnet/Opus 4.0–4.5). Everything newer uses adaptive
+ * thinking — Sonnet 5, Opus 4.7/4.8 and Opus 5/5.5 reject budgetTokens with a
+ * 400 — so on those the budget only switches thinking on and the model sizes
+ * it itself.
  */
-function resolveThinkingBudget(
+const BUDGET_THINKING_MODEL_RE =
+  /claude-3|claude-(?:haiku|sonnet|opus)-4-[0-5](?:\b|[-.:])|claude-(?:sonnet|opus)-4-\d{8}/i;
+
+/**
+ * Resolve the providerOptions that enable extended thinking for this run, or
+ * undefined when it's off. Per-request budget takes precedence over the
+ * THINKING_BUDGET_TOKENS env var. Only Claude models (Anthropic direct, or
+ * Claude on Bedrock) are eligible.
+ */
+function resolveThinkingProviderOptions(
   modelKey: string,
   perRequestBudget?: number
-): number | undefined {
-  // Only Anthropic (direct) and Bedrock (Claude) support extended thinking.
-  const entry = (() => {
-    try { return getModelEntry(modelKey); } catch { return undefined; }
-  })();
-  if (!entry || (entry.provider !== 'anthropic' && entry.provider !== 'bedrock')) return undefined;
+): Record<string, Record<string, unknown>> | undefined {
+  const entry = tryGetModelEntry(modelKey);
+  if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
+  if (entry.provider !== 'anthropic' && entry.provider !== 'bedrock') return undefined;
 
   const budget =
     perRequestBudget ??
     (process.env.THINKING_BUDGET_TOKENS ? parseInt(process.env.THINKING_BUDGET_TOKENS, 10) : undefined);
-
   if (!budget || isNaN(budget) || budget < THINKING_MIN_TOKENS) return undefined;
-  return budget;
-}
 
-/**
- * Build the providerOptions block for extended thinking, or undefined if
- * thinking is not enabled for this run.
- */
-function buildThinkingProviderOptions(
-  budgetTokens: number
-): Record<string, Record<string, unknown>> {
-  const thinking = { thinking: { type: 'enabled', budgetTokens } };
-  return {
-    anthropic: thinking,
-    bedrock: thinking,
-  };
+  const config = BUDGET_THINKING_MODEL_RE.test(entry.modelId)
+    ? { type: 'enabled', budgetTokens: budget }
+    : { type: 'adaptive' };
+  // Anthropic takes `thinking`; @ai-sdk/amazon-bedrock takes `reasoningConfig`.
+  return entry.provider === 'anthropic'
+    ? { anthropic: { thinking: config } }
+    : { bedrock: { reasoningConfig: config } };
 }
 
 // ── TASK 2: prepareStep context compression ───────────────────────────────────
@@ -186,8 +204,9 @@ const RESULT_SUMMARY_THRESHOLD = 2;
  * Compress tool results in the conversation history for steps older than
  * RESULT_SUMMARY_THRESHOLD. Large list/read payloads otherwise accumulate at
  * full size in the context that's resent on every turn (the same mechanism
- * behind the documented 400K-token run). The full results remain in the trace
- * — only the model's in-flight context is shrunk.
+ * behind the documented 400K-token run). The trace keeps each result as the
+ * tool returned it (after capToolResult's 12K cap) — only the model's
+ * in-flight context is shrunk further.
  *
  * Returns a new messages array if anything was compressed, or undefined to
  * leave the messages untouched (so we only override when it actually helps).
@@ -312,16 +331,17 @@ function buildFindToolsTool(catalog: McpToolDefinition[]) {
 // ── Tool selection ────────────────────────────────────────────────────────────
 
 interface LiveToolSelection {
+  /** Every catalog tool that survived the policy, plus find_tools and policy_info. */
   tools: ToolSet;
+  /** The initial active set: always-on tools plus the semantic shortlist. */
   toolsConsidered: string[];
-  allCatalogNames: Set<string>;
-  catalog: McpToolDefinition[];
 }
 
 async function selectLiveTools(
   userInput: string,
   toolShortlistSize: number,
-  toolRetries: number
+  toolRetries: number,
+  policy: { mode?: PolicyMode; dryRun?: boolean }
 ): Promise<LiveToolSelection> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -331,22 +351,52 @@ async function selectLiveTools(
     shortlistTools(userInput, { k: toolShortlistSize, exclude: alwaysOn })
   );
 
-  const selectedNames = new Set<string>([...alwaysOn, ...shortlisted]);
-  const selectedDefs = [...selectedNames]
-    .map((name) => catalogByName.get(name))
-    .filter((d): d is McpToolDefinition => Boolean(d));
+  // TASK 6: build the whole catalog, not just the shortlist — activeTools can
+  // only select from tools passed to generateText, so a tool find_tools
+  // discovers must already exist here to be activated later. Only the active
+  // subset is sent to the model on each step.
+  //
+  // TASK 9: the policy runs over the whole catalog, so a tool activated
+  // mid-run via find_tools is filtered/dry-run-wrapped like any other.
+  const tools = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
 
-  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
-
-  // TASK 6: add find_tools to the always-on set
-  tools['find_tools'] = buildFindToolsTool(catalog);
+  // Index only tools that survived the policy, so find_tools never suggests
+  // one read-only mode removed.
+  tools['find_tools'] = buildFindToolsTool(catalog.filter((t) => t.name in tools));
 
   return {
     tools,
-    toolsConsidered: [...selectedNames],
-    allCatalogNames: new Set(catalog.map((t) => t.name)),
-    catalog,
+    toolsConsidered: [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in tools),
   };
+}
+
+// ── Step trace ────────────────────────────────────────────────────────────────
+
+/**
+ * Walk step.content directly — tool-error parts are NOT in step.toolResults
+ * but we want them visible in the trace.
+ */
+function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string }> }, stepNumber: number): AgentStepTrace {
+  const toolCalls: AgentStepTrace['toolCalls'] = [];
+  const toolResults: AgentStepTrace['toolResults'] = [];
+
+  for (const part of step.content as ReadonlyArray<{ type: string; toolName: string; input?: unknown; output?: unknown; result?: unknown; error?: unknown }>) {
+    if (part.type === 'tool-call') {
+      toolCalls.push({ toolName: part.toolName, input: part.input });
+    } else if (part.type === 'tool-result') {
+      // StaticToolResult uses .output; DynamicToolResult uses .result
+      toolResults.push({ toolName: part.toolName, output: part.output ?? part.result });
+    } else if (part.type === 'tool-error') {
+      const errVal = part.error;
+      toolResults.push({
+        toolName: part.toolName,
+        output: undefined,
+        error: errVal instanceof Error ? errVal.message : String(errVal),
+      });
+    }
+  }
+
+  return { stepNumber, text: step.text, toolCalls, toolResults };
 }
 
 // ── Main agent loop ───────────────────────────────────────────────────────────
@@ -363,58 +413,57 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
-  let allCatalogNames: Set<string>;
+  // TASK 6: names the model can see on each step; find_tools results are
+  // added mid-run. Undefined on the eval path (opts.tools), which has no
+  // find_tools and exposes its whole scripted set every step.
+  let activeToolNames: Set<string> | undefined;
 
   if (opts.tools) {
+    // Evals pass opts.tools and bypass the tool policy so scripted tool
+    // fixtures aren't accidentally filtered.
     tools = opts.tools;
     toolsConsidered = Object.keys(opts.tools);
-    allCatalogNames = new Set(toolsConsidered);
   } else {
-    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries);
+    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries, {
+      mode: opts.policy,
+      dryRun: opts.dryRun,
+    });
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
-    allCatalogNames = live.allCatalogNames;
+    activeToolNames = new Set([...toolsConsidered, 'find_tools', 'policy_info']);
   }
-
-  // TASK 9: apply tool policy (read-only mode, dry-run) before handing
-  // the tool set to the model. Evals pass opts.tools and bypass this so
-  // scripted tool fixtures aren't accidentally filtered.
-  if (!opts.tools) {
-    tools = applyToolPolicy(tools, { mode: opts.policy, dryRun: opts.dryRun });
-  }
-
-  // TASK 6: tracks tool names added mid-run by find_tools calls
-  const expandedToolNames = new Set<string>(toolsConsidered);
 
   const isPinned = Boolean(modelKey);
   const registry = getModelRegistry();
 
-  // TASK 1: system prompt as a cacheable messages-array entry
-  const systemMessage = buildSystemMessage();
-
-  // TASK 8: step counter for onStepEnd → onStep mapping
+  // TASK 8: step counter for onStepEnd → onStep mapping. Reset per model
+  // attempt, since a fallback restarts the run from scratch.
   let stepIndex = 0;
+  // Whether the current attempt has executed a write/destructive tool call —
+  // if so, falling back would re-run those side effects on the next model.
+  let attemptHadSideEffects = false;
 
   const callModel = (resolvedModelKey: string) => {
-    // TASK 10: resolve thinking budget for this model + request combination
-    const thinkingBudget = resolveThinkingBudget(resolvedModelKey, opts.thinkingBudget);
-    const thinkingProviderOptions = thinkingBudget
-      ? (buildThinkingProviderOptions(thinkingBudget) as Record<string, Record<string, never>>)
-      : undefined;
+    stepIndex = 0;
+    attemptHadSideEffects = false;
 
-    if (thinkingBudget) {
-      console.log(`[agent] extended thinking enabled: ${thinkingBudget} token budget (${resolvedModelKey})`);
+    // TASK 10: resolve thinking config for this model + request combination
+    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget) as
+      | Record<string, Record<string, never>>
+      | undefined;
+    if (thinkingProviderOptions) {
+      console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
 
     return stage(`chat model call (${resolvedModelKey})`, () =>
       generateText({
         model: resolveModel(resolvedModelKey),
-        messages: [
-          systemMessage,
-          { role: 'user', content: userInput },
-        ],
+        // TASK 1: system prompt with provider-specific cache markers
+        instructions: buildSystemMessage(resolvedModelKey),
+        messages: [{ role: 'user', content: userInput }],
         tools,
         stopWhen: stepCountIs(maxSteps),
+        abortSignal: opts.abortSignal,
         // TASK 10: merge thinking providerOptions when budget is set
         ...(thinkingProviderOptions ? { providerOptions: thinkingProviderOptions } : {}),
         prepareStep: ({ steps, messages }) => {
@@ -424,9 +473,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
               if (part.type === 'tool-result' && part.toolName === 'find_tools') {
                 const resultVal = (part as unknown as { output?: unknown; result?: unknown }).output
                   ?? (part as unknown as { result?: unknown }).result;
-                if (resultVal && typeof resultVal === 'object' && Array.isArray((resultVal as Record<string, unknown>).tools)) {
+                if (activeToolNames && resultVal && typeof resultVal === 'object' && Array.isArray((resultVal as Record<string, unknown>).tools)) {
                   for (const name of (resultVal as { tools: string[] }).tools) {
-                    if (allCatalogNames.has(name)) expandedToolNames.add(name);
+                    if (name in tools) activeToolNames.add(name);
                   }
                 }
               }
@@ -435,47 +484,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
           // TASK 2: compress tool results from steps older than the threshold
           // so large list/read payloads don't accumulate at full size in the
-          // context that's resent on every turn. The full results remain in
-          // the trace (captured via onStep / result.steps); only the in-flight
-          // model context is shrunk. Only compress when there's enough history
+          // context that's resent on every turn. The trace (onStep /
+          // result.steps) keeps the uncompressed (12K-capped) results; only
+          // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.
           const compressedMessages = compressOldToolMessages(messages, steps.length);
 
-          // TASK 3: force text-only on the last two steps
-          const isLastStep = steps.length >= maxSteps - 2;
+          // TASK 3: force text-only on the final allowed step
+          const isLastStep = steps.length >= maxSteps - 1;
           return {
             toolChoice: isLastStep ? 'none' : 'auto',
-            activeTools: expandedToolNames.size > 0
-              ? ([...expandedToolNames, 'find_tools'] as Array<keyof typeof tools>)
-              : undefined,
+            activeTools: activeToolNames ? [...activeToolNames] : undefined,
             ...(compressedMessages ? { messages: compressedMessages } : {}),
           };
         },
         // TASK 8: fire onStep callback after each step so the route can stream it
-        onStepEnd: opts.onStep
-          ? (step) => {
-              const toolCalls: AgentStepTrace['toolCalls'] = [];
-              const toolResults: AgentStepTrace['toolResults'] = [];
-              for (const part of step.content) {
-                if (part.type === 'tool-call') {
-                  toolCalls.push({ toolName: part.toolName, input: part.input });
-                } else if (part.type === 'tool-result') {
-                  const outputVal = (part as unknown as { output?: unknown }).output
-                    ?? (part as unknown as { result?: unknown }).result;
-                  toolResults.push({ toolName: part.toolName, output: outputVal });
-                } else if (part.type === 'tool-error') {
-                  const errVal = (part as { error?: unknown }).error;
-                  toolResults.push({
-                    toolName: part.toolName,
-                    output: undefined,
-                    error: errVal instanceof Error ? errVal.message : String(errVal),
-                  });
-                }
-              }
-              opts.onStep!({ stepNumber: stepIndex++, text: step.text, toolCalls, toolResults });
-            }
-          : undefined,
+        onStepEnd: (step) => {
+          const trace = toStepTrace(step, stepIndex++);
+          if (trace.toolCalls.some((c) => classifyTool(c.toolName) !== 'read')) attemptHadSideEffects = true;
+          opts.onStep?.(trace);
+        },
       })
     );
   };
@@ -496,48 +525,33 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       modelHealth.recordSuccess(resolvedModelKey);
       break;
     } catch (err) {
+      if (opts.abortSignal?.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
       const failureKind = classifyProviderFailure(message);
       if (failureKind) modelHealth.recordFailure(resolvedModelKey);
       const fallback =
         !isPinned && failureKind ? modelHealth.pickFallback(resolvedModelKey, registry, tried) : null;
       if (!fallback) throw err;
+      // A fallback restarts the whole run. If this attempt already ran a
+      // write/destructive tool, the new model would redo it — fail instead.
+      if (attemptHadSideEffects) {
+        throw new Error(
+          `${message}\n(Not falling back to "${fallback}": the failed attempt on "${resolvedModelKey}" ` +
+            `already executed write/destructive tool calls, which a restarted run would repeat.)`
+        );
+      }
       console.warn(
         `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
           `falling back to same-tier "${fallback}".`
       );
+      opts.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
       resolvedModelKey = fallback;
     }
   }
 
   if (!result) throw new Error('unreachable: chat model call produced no result');
 
-  // Walk step.content directly — tool-error parts are NOT in step.toolResults
-  // but we want them visible in the trace.
-  const steps: AgentStepTrace[] = result.steps.map((step, i) => {
-    const toolCalls: AgentStepTrace['toolCalls'] = [];
-    const toolResults: AgentStepTrace['toolResults'] = [];
-
-    for (const part of step.content) {
-      if (part.type === 'tool-call') {
-        toolCalls.push({ toolName: part.toolName, input: part.input });
-      } else if (part.type === 'tool-result') {
-        // StaticToolResult uses .output; DynamicToolResult uses .result
-        const outputVal = (part as unknown as { output?: unknown }).output
-          ?? (part as unknown as { result?: unknown }).result;
-        toolResults.push({ toolName: part.toolName, output: outputVal });
-      } else if (part.type === 'tool-error') {
-        const errVal = (part as { error?: unknown }).error;
-        toolResults.push({
-          toolName: part.toolName,
-          output: undefined,
-          error: errVal instanceof Error ? errVal.message : String(errVal),
-        });
-      }
-    }
-
-    return { stepNumber: i, text: step.text, toolCalls, toolResults };
-  });
+  const steps = result.steps.map((step, i) => toStepTrace(step, i));
 
   return {
     finalText: result.text,

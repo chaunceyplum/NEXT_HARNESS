@@ -3,20 +3,24 @@
  * destructive based on its name, and enforces per-request access controls
  * before tools reach the model.
  *
- * Three access levels:
+ * Classification (see classifyTool): MCP tool names carry a server prefix
+ * (adobe_delete_segment, reactor_create_rule, msb_github_merge_pr), so the
+ * name is split on "_" and the FIRST recognised verb token decides:
  *
- *   read        get_*, list_*, search_*, query_*, describe_*, health_*,
- *               github_read_file, github_list_directory, find_tools
+ *   read        get, list, search, read, preview, health, find, info, ...
+ *   write       create, update, upload, enable, disable, install, build,
+ *               commit, copy, cancel, execute, run, ...
+ *   destructive delete, abort, trash, purge, plus exact overrides for
+ *               msb_github_merge_pr (irreversible) and *_create_privacy_job
+ *               (submits an irreversible GDPR/CCPA delete)
  *
- *   write       create_*, update_*, upload_*, complete_*, enable_*, disable_*,
- *               install_*, build_*, publish_*, commit_code, create_branch,
- *               create_pr, add_resources_*, remove_resources_*, transition_*
+ * "First verb wins" keeps nouns from misclassifying a tool: adobe_list_merge_
+ * policies is a read (list comes before merge), flow_get_run is a read.
+ * A name with no recognised verb fails closed as 'write', so a new tool
+ * never silently slips through read-only mode.
  *
- *   destructive delete_*, abort_*, merge_* (merging a PR is irreversible),
- *               privacy jobs (create_privacy_job — irreversible data deletion),
- *               delete_profile_entity
- *
- * Two policy modes (set via BUILD_POLICY env var or per-request):
+ * Two policy modes (set via BUILD_POLICY env var or per-request; a request
+ * can only tighten the env setting, never loosen it):
  *
  *   'full'      All tools available (default).
  *   'read-only' Only read-classified tools are included in the tool set.
@@ -24,7 +28,7 @@
  *               ever sees them — it's structurally impossible to call them,
  *               not just rule-based.
  *
- * Additionally, TOOL_DRY_RUN=true wraps every destructive tool's execute
+ * Additionally, TOOL_DRY_RUN=true (or dryRun on the request) wraps every destructive tool's execute
  * function so it returns a description of what it *would* do without
  * actually calling the MCP server. Useful for demos and staging environments.
  */
@@ -35,44 +39,39 @@ import { tool, jsonSchema, type ToolSet } from 'ai';
 
 export type ToolAccessLevel = 'read' | 'write' | 'destructive';
 
-/** Name prefixes / exact matches for each access level. Checked in order: destructive first. */
-const DESTRUCTIVE_PREFIXES = [
-  'delete_',
-  'abort_',
-  'merge_',           // msb_github_merge_pr — irreversible once merged
-];
+/** Exact-name overrides, checked before verb detection. */
+const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
+  msb_github_merge_pr: 'destructive',      // merging a PR is irreversible
+  query_rag_db: 'read',                    // "query" is a verb here, but a server prefix in query_run etc.
+  find_tools: 'read',                      // synthetic (agent.ts)
+  policy_info: 'read',                     // synthetic (below)
+};
 
-const DESTRUCTIVE_EXACT = new Set([
-  'create_privacy_job',      // submits a GDPR/CCPA delete — irreversible
-  'delete_profile_entity',   // deletes a stitched profile record
+const DESTRUCTIVE_VERBS = new Set(['delete', 'abort', 'trash', 'purge']);
+
+const WRITE_VERBS = new Set([
+  'create', 'update', 'upload', 'complete', 'enable', 'disable', 'install',
+  'build', 'transition', 'add', 'remove', 'commit', 'copy', 'cancel',
+  'generate', 'execute', 'run', 'publish', 'share', 'merge',
 ]);
 
-const WRITE_PREFIXES = [
-  'create_',
-  'update_',
-  'upload_',
-  'complete_',
-  'enable_',
-  'disable_',
-  'install_',
-  'build_',
-  'transition_',
-  'add_resources',
-  'remove_resources',
-];
-
-const WRITE_EXACT = new Set([
-  'msb_github_commit_code',
-  'msb_github_create_branch',
-  'msb_github_create_pr',
+const READ_VERBS = new Set([
+  'get', 'list', 'search', 'read', 'preview', 'describe', 'health', 'find', 'info',
 ]);
 
 export function classifyTool(name: string): ToolAccessLevel {
-  if (DESTRUCTIVE_EXACT.has(name)) return 'destructive';
-  if (DESTRUCTIVE_PREFIXES.some((p) => name.startsWith(p))) return 'destructive';
-  if (WRITE_EXACT.has(name)) return 'write';
-  if (WRITE_PREFIXES.some((p) => name.startsWith(p))) return 'write';
-  return 'read';
+  const exact = EXACT_LEVELS[name];
+  if (exact) return exact;
+  // Submitting a privacy job deletes customer data irreversibly, even though
+  // its verb is "create".
+  if (name.endsWith('create_privacy_job')) return 'destructive';
+
+  for (const token of name.split('_')) {
+    if (DESTRUCTIVE_VERBS.has(token)) return 'destructive';
+    if (WRITE_VERBS.has(token)) return 'write';
+    if (READ_VERBS.has(token)) return 'read';
+  }
+  return 'write';
 }
 
 // ── Policy enforcement ────────────────────────────────────────────────────────
@@ -113,8 +112,12 @@ export function applyToolPolicy(
   tools: ToolSet,
   opts: { mode?: PolicyMode; dryRun?: boolean } = {}
 ): ToolSet {
-  const mode = opts.mode ?? getDefaultPolicy();
-  const dryRun = opts.dryRun ?? isDryRunEnabled();
+  // The env settings are a floor: a per-request value can make a run stricter
+  // (read-only, dry-run) but never looser than the deployment allows, so a
+  // request body of {"policy":"full","dryRun":false} can't bypass them.
+  const mode: PolicyMode =
+    getDefaultPolicy() === 'read-only' || opts.mode === 'read-only' ? 'read-only' : 'full';
+  const dryRun = isDryRunEnabled() || opts.dryRun === true;
 
   const result: ToolSet = {};
 

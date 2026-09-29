@@ -10,19 +10,23 @@
  *   {"type":"step","step":{...}}           // one per agent step, as it finishes
  *   {"type":"step","step":{...}}
  *   ...
- *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"..."}
+ *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...]}
+ *
+ * If a provider failure restarts the run on a same-tier fallback model:
+ *   {"type":"restart","fromModelKey":"...","toModelKey":"..."}   // discard steps received so far
  *
  * On error (validation or agent failure):
  *   {"type":"error","error":"...","code":"..."}
  *
  * The client reads the stream with a ReadableStream reader, parsing each
- * newline-delimited JSON line as it arrives.
+ * newline-delimited JSON line as it arrives. If the client disconnects (or
+ * hits Stop), the agent run is aborted rather than left running tools.
  */
 
 import { runAgent } from '@/lib/llm/agent';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
-import { ApiError, BuildRequest, BuildResponse, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
+import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -91,6 +95,30 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     }
   }
 
+  const MIN_RETRIES = 0, MAX_RETRIES = 3;
+  if (b.toolRetries !== undefined) {
+    const v = b.toolRetries;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < MIN_RETRIES || v > MAX_RETRIES) {
+      return {
+        ok: false,
+        error: { error: `"toolRetries" must be an integer between ${MIN_RETRIES} and ${MAX_RETRIES}`, code: 'VALIDATION_ERROR', details: { min: MIN_RETRIES, max: MAX_RETRIES } },
+        status: 400,
+      };
+    }
+  }
+
+  const MIN_THINKING = 1024, MAX_THINKING = 64_000;
+  if (b.thinkingBudget !== undefined) {
+    const v = b.thinkingBudget;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < MIN_THINKING || v > MAX_THINKING) {
+      return {
+        ok: false,
+        error: { error: `"thinkingBudget" must be an integer between ${MIN_THINKING} and ${MAX_THINKING}`, code: 'VALIDATION_ERROR', details: { min: MIN_THINKING, max: MAX_THINKING } },
+        status: 400,
+      };
+    }
+  }
+
   return {
     ok: true,
     req: {
@@ -128,22 +156,36 @@ export async function POST(request: Request): Promise<Response> {
   const startedAt = Date.now();
   const createdAt = new Date(startedAt).toISOString();
 
-  // Collect steps for persistence — the stream writes them to the client
-  // in real-time; we accumulate here so we can saveExecution at the end.
-  const collectedSteps: BuildResponse['steps'] = [];
+  // Aborts the agent run when the client goes away — the request's own signal
+  // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
+  const abort = new AbortController();
+  request.signal.addEventListener('abort', () => abort.abort(), { once: true });
 
   // TASK 8: Create a ReadableStream that pushes NDJSON events
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
+      let closed = false;
+      // Writing to a stream the client has cancelled throws; after a
+      // disconnect, events just have nowhere to go.
       const push = (event: BuildStreamEvent) => {
-        controller.enqueue(enc.encode(JSON.stringify(event) + '\n'));
+        if (closed) return;
+        try {
+          controller.enqueue(enc.encode(JSON.stringify(event) + '\n'));
+        } catch {
+          closed = true;
+        }
+      };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        try { controller.close(); } catch { /* already closed/cancelled */ }
       };
 
       try {
-        // Emit run_start immediately so the client can show a run ID before any steps
-        // We emit toolsConsidered later in done — placeholder empty for now; the client
-        // will update it. (We don't have the list until selectLiveTools resolves.)
+        // Emit run_start immediately so the client can show a run ID before
+        // any steps. The tool list isn't known until tool selection resolves
+        // inside runAgent, so it's sent on `done` instead.
         push({ type: 'run_start', runId, toolsConsidered: [] });
 
         const agentResult = await runAgent({
@@ -155,11 +197,10 @@ export async function POST(request: Request): Promise<Response> {
           policy: req.policy,
           dryRun: req.dryRun,
           thinkingBudget: req.thinkingBudget,
+          abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
-          onStep: (step) => {
-            collectedSteps.push(step);
-            push({ type: 'step', step });
-          },
+          onStep: (step) => push({ type: 'step', step }),
+          onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
         });
 
         console.log('[BUILD] Agent finished:', {
@@ -175,16 +216,18 @@ export async function POST(request: Request): Promise<Response> {
           finishReason: agentResult.finishReason,
           usage: agentResult.usage,
           runId,
+          modelKey: agentResult.modelKey,
+          toolsConsidered: agentResult.toolsConsidered,
         });
 
-        controller.close();
+        close();
 
         // Persist after streaming so we don't delay the response
         const completedRecord: ExecutionRecord = {
           id: runId,
           createdAt,
           description: req.description,
-          model: req.model || getDefaultModelKey(),
+          model: agentResult.modelKey,
           allowFullBuild: false,
           status: 'completed',
           durationMs: Date.now() - startedAt,
@@ -201,11 +244,13 @@ export async function POST(request: Request): Promise<Response> {
         };
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error('[BUILD] Agent run failed:', error);
+        const cancelled = abort.signal.aborted;
+        const message = cancelled ? 'Cancelled by client' : error instanceof Error ? error.message : String(error);
+        if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
+        else console.error('[BUILD] Agent run failed:', error);
 
-        push({ type: 'error', error: `Agent run failed: ${message}`, code: 'AGENT_ERROR' });
-        controller.close();
+        push({ type: 'error', error: `Agent run failed: ${message}`, code: cancelled ? 'CANCELLED' : 'AGENT_ERROR' });
+        close();
 
         const failedRecord: ExecutionRecord = {
           id: runId,
@@ -220,6 +265,9 @@ export async function POST(request: Request): Promise<Response> {
         };
         saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
       }
+    },
+    cancel() {
+      abort.abort();
     },
   });
 
