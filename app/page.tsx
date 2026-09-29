@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, RunVersions, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
@@ -26,6 +26,8 @@ interface RunState {
   finishReason: string;
   usage: TokenUsage;
   stopReason?: string;
+  budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  versions?: RunVersions;
   done: boolean;
   error?: string;
   /** Tool calls the run is paused on, waiting for Approve/Deny. */
@@ -205,6 +207,8 @@ export default function Home() {
                 usage: event.usage,
                 stopReason: event.stopReason,
                 critique: event.critique,
+                budgetUsage: event.budgetUsage,
+                versions: event.versions,
                 done: true,
               }
             : prev
@@ -504,6 +508,8 @@ export default function Home() {
               finalText={runState.done ? runState.finalText : runState.streamingText}
               usage={runState.done ? runState.usage : undefined}
               stopReason={runState.done ? runState.stopReason : undefined}
+              budgetUsage={runState.done ? runState.budgetUsage : undefined}
+              versions={runState.done ? runState.versions : undefined}
               critique={runState.done ? runState.critique : undefined}
             />
           </div>

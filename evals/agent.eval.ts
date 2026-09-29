@@ -26,10 +26,9 @@
  * EVAL_JUDGE_MODEL picks the grader (default: the strongest tier).
  */
 
-import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runAgent } from '@/lib/llm/agent';
-import { systemPrompt } from '@/lib/llm/agent-core';
+import { promptVersion } from '@/lib/version';
 import { LOCAL_TOOL_DEFINITIONS } from '@/lib/llm/local-tools';
 import { getMcpToolCatalog, type McpToolDefinition } from '@/lib/llm/tool-catalog';
 import { ModelHealthTracker } from '@/lib/llm/model-health';
@@ -71,7 +70,9 @@ const modelKey = evalModelKey();
 const judgeKey = judgeModelKey();
 const judgeFallbackKey = judgeFallbackModelKey(judgeKey);
 const trials = trialsPerFixture();
-const promptVersion = createHash('sha256').update(systemPrompt()).digest('hex').slice(0, 12);
+// Shared helper (lib/version.ts) so this matches the promptVersion runAgent
+// records — the eval path builds the prompt without the tool-discovery rule.
+const promptVersionHash = promptVersion({ toolDiscovery: false });
 const pre = await preflight('agent eval', [
   { role: 'model under test', key: modelKey, source: modelSource('model') },
   { role: 'judge', key: judgeKey, source: modelSource('judge') },
@@ -89,7 +90,7 @@ afterAll(() =>
     label: `Agent behavior (runAgent + scripted tools, ${evalSplit()} split)`,
     subject: modelKey,
     judgeModel: judgeUsed ? judgeKey : undefined,
-    promptVersion,
+    promptVersion: promptVersionHash,
     startedAt,
     results,
   })

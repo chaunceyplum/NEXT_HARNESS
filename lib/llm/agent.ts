@@ -54,6 +54,8 @@ import {
   type RunBudgetLimits,
 } from './run-budget';
 import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
+import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../tracing';
+import { promptVersion, toolsetVersion, appVersion } from '../version';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -98,6 +100,19 @@ export interface AgentRunResult {
    * nothing was sampled, judging is disabled, or the eval path was used.
    */
   ragJudgments: RagJudgmentEntry[];
+  /**
+   * Version fingerprints for this run (lib/version.ts), so a stored trace or
+   * score can be tied to the exact prompt, tool set and build it came from.
+   */
+  /** Absent when the run ended before any model call (an unclear request, a denied plan). */
+  versions?: {
+    /** sha256(system prompt), first 12 hex — matches the eval's promptVersion. */
+    prompt: string;
+    /** sha256(sorted tool name+description lines), first 12 hex. */
+    toolset: string;
+    /** GIT_SHA / APP_VERSION / package version, or 'dev'. */
+    app: string;
+  };
   /** The plan as executed (statuses and revisions included), when planFirst was set. */
   plan?: Plan;
   /** Set when the request asked for model "auto": how the model was chosen. */
@@ -106,6 +121,13 @@ export interface AgentRunResult {
 
 export interface RunAgentOptions {
   userInput: string;
+  /**
+   * Persisted run id (from the route). Recorded on the trace's run span as
+   * `harness.run.id` so a trace can be correlated with the stored run and its
+   * replay view, and on facts the run saves to memory. Omit (e.g. the eval
+   * path) and the trace still works.
+   */
+  runId?: string;
   /** Model registry key, e.g. "anthropic:haiku". Defaults to DEFAULT_MODEL env var. */
   modelKey?: string;
   /** Tool-call round trips before the loop is forced to stop. */
@@ -174,8 +196,7 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
-  /** Run id and requesting user, recorded on facts the run saves to memory. */
-  runId?: string;
+  /** Requesting user, recorded on facts the run saves to memory. */
   actor?: string;
   /** Plan before acting (planner.ts). */
   planFirst?: boolean;
@@ -491,16 +512,100 @@ async function selectLiveTools(
 // ── Step trace ────────────────────────────────────────────────────────────────
 
 /**
+ * Build a tracing StepSample from a live SDK step and hand it to the tracer.
+ * Pulls tokens/timing from step.usage / step.performance and per-tool call
+ * data (name, input, output/error, duration) from step.content, keyed to
+ * step.performance.toolExecutionMs by tool call id. Provider/model id come
+ * from the registry entry for the model that actually ran the step.
+ */
+function recordStepSpan(
+  tracer: RunTracer,
+  step: {
+    text: string;
+    finishReason?: string;
+    usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+    };
+    content: ReadonlyArray<{ type: string }>;
+    performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
+  },
+  stepNumber: number,
+  modelKey: string
+): void {
+  const entry = tryGetModelEntry(modelKey);
+  const toolMs = step.performance?.toolExecutionMs ?? {};
+
+  type Part = { type: string; toolName?: string; toolCallId?: string; input?: unknown; output?: unknown; result?: unknown; error?: unknown };
+  // Pair each tool-call with its result/error part by call id.
+  const byId = new Map<string, StepSample['tools'][number]>();
+  const order: string[] = [];
+  for (const p of step.content as ReadonlyArray<Part>) {
+    if (!p.toolCallId || !p.toolName) continue;
+    if (p.type === 'tool-call') {
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, { callId: p.toolCallId, toolName: p.toolName, input: p.input, durationMs: toolMs[p.toolCallId] });
+    } else if (p.type === 'tool-result') {
+      const t = byId.get(p.toolCallId) ?? { callId: p.toolCallId, toolName: p.toolName, input: undefined, durationMs: toolMs[p.toolCallId] };
+      t.output = p.output ?? p.result;
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, t);
+    } else if (p.type === 'tool-error') {
+      const t = byId.get(p.toolCallId) ?? { callId: p.toolCallId, toolName: p.toolName, input: undefined, durationMs: toolMs[p.toolCallId] };
+      t.error = p.error instanceof Error ? p.error.message : String(p.error);
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, t);
+    }
+  }
+
+  const sample: StepSample = {
+    stepNumber,
+    modelId: entry?.modelId ?? modelKey,
+    provider: entry?.provider ?? 'unknown',
+    text: step.text,
+    finishReason: step.finishReason ?? '',
+    usage: {
+      inputTokens: step.usage?.inputTokens,
+      outputTokens: step.usage?.outputTokens,
+      cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+      cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
+    },
+    stepTimeMs: step.performance?.stepTimeMs ?? 0,
+    responseTimeMs: step.performance?.responseTimeMs ?? 0,
+    tools: order.map((id) => byId.get(id)!),
+  };
+  tracer.recordStep(sample);
+}
+
+/** Per-step data the AI SDK reports; only the fields the trace reads. */
+interface StepForTrace {
+  text: string;
+  content: ReadonlyArray<{ type: string }>;
+  /** step.usage — chat-model tokens for this step. */
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  /** step.performance — timing the SDK measured for this step (streaming steps only for some fields). */
+  performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
+}
+
+/**
  * Walk step.content directly — tool-error parts are NOT in step.toolResults
  * but we want them visible in the trace.
+ *
+ * When the live SDK step is passed (it carries `usage`/`performance`), the
+ * trace is enriched with per-step timing/tokens and per-tool durations
+ * (step.performance.toolExecutionMs, keyed by tool call id). Re-mapping stored
+ * result steps (no performance) just omits those fields.
  */
-function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string }> }, stepNumber: number): AgentStepTrace {
+function toStepTrace(step: StepForTrace, stepNumber: number): AgentStepTrace {
   const toolCalls: AgentStepTrace['toolCalls'] = [];
   const toolResults: AgentStepTrace['toolResults'] = [];
+  const toolMs = step.performance?.toolExecutionMs;
 
   type Part = {
     type: string;
     toolName: string;
+    toolCallId?: string;
     input?: unknown;
     output?: unknown;
     result?: unknown;
@@ -510,6 +615,7 @@ function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string
     toolCall?: { toolName: string };
   };
   for (const part of step.content as ReadonlyArray<Part>) {
+    const durationMs = part.toolCallId ? toolMs?.[part.toolCallId] : undefined;
     if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
       // Denied calls never produce a tool-result/tool-error part.
       toolResults.push({ toolName: part.toolCall.toolName, output: undefined, error: `Not executed: ${part.reason ?? 'denied'}` });
@@ -517,18 +623,30 @@ function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string
       toolCalls.push({ toolName: part.toolName, input: part.input });
     } else if (part.type === 'tool-result') {
       // StaticToolResult uses .output; DynamicToolResult uses .result
-      toolResults.push({ toolName: part.toolName, output: part.output ?? part.result });
+      toolResults.push({ toolName: part.toolName, output: part.output ?? part.result, ...(durationMs !== undefined ? { durationMs } : {}) });
     } else if (part.type === 'tool-error') {
       const errVal = part.error;
       toolResults.push({
         toolName: part.toolName,
         output: undefined,
         error: errVal instanceof Error ? errVal.message : String(errVal),
+        ...(durationMs !== undefined ? { durationMs } : {}),
       });
     }
   }
 
-  return { stepNumber, text: step.text, toolCalls, toolResults };
+  const perf = step.performance;
+  return {
+    stepNumber,
+    text: step.text,
+    toolCalls,
+    toolResults,
+    ...(perf?.stepTimeMs !== undefined ? { durationMs: perf.stepTimeMs } : {}),
+    ...(perf?.responseTimeMs !== undefined ? { modelMs: perf.responseTimeMs } : {}),
+    ...(step.usage
+      ? { usage: { inputTokens: step.usage.inputTokens, outputTokens: step.usage.outputTokens, totalTokens: step.usage.totalTokens } }
+      : {}),
+  };
 }
 
 /** Lets the agent save a verified, stable deployment fact for later runs. */
@@ -733,6 +851,32 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 
+  // Version fingerprints for this run (lib/version.ts). promptVersion matches
+  // how the prompt is actually built: live runs include the find_tools rule.
+  const toolDiscovery = 'find_tools' in tools;
+  const versions = {
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools }),
+    toolset: toolsetVersion(
+      Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
+    ),
+    app: appVersion(),
+  };
+
+  // ── Tracing (item #8) ──────────────────────────────────────────────────────
+  // A fresh tracer per model attempt so a same-tier fallback's abandoned steps
+  // don't leak into the exported trace (they get their own tracer, never
+  // finished). `tracer` always points at the current attempt; finish() +
+  // exportSpans() run once the loop settles, on both success and error.
+  // Tracing reads only what the SDK already reports per step, so it never
+  // changes the agent's behaviour, and export is best-effort (never throws).
+  const baseTracerAttrs: Record<string, AttrValue> = {
+    'harness.prompt.version': versions.prompt,
+    'harness.toolset.version': versions.toolset,
+    'harness.app.version': versions.app,
+    ...(opts.runId ? { 'harness.run.id': opts.runId } : {}),
+  };
+  let tracer = new RunTracer(baseTracerAttrs);
+
   const isPinned = Boolean(modelKey);
   const registry = getModelRegistry();
 
@@ -753,6 +897,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     attemptHadSideEffects = false;
     budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt);
     stopReason = undefined;
+    // Fresh tracer for this attempt (a fallback restarts the run from scratch).
+    tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey });
     // Step index at which a budget forced the wrap-up step; the loop stops after it.
     let forcedAt: number | undefined;
 
@@ -834,7 +980,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         },
         // TASK 8: fire onStep callback after each step so the route can stream it
         onStepEnd: (step) => {
-          const trace = toStepTrace(step, stepIndex++);
+          const stepNumber = stepIndex++;
+          const trace = toStepTrace(step, stepNumber);
           budget.recordStep(
             step.usage,
             step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))
@@ -844,6 +991,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
             if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
             if (classifyTool(effectiveToolCall(part.toolName, part.input).toolName) !== 'read') attemptHadSideEffects = true;
           }
+          // Item #8: record a trace span for this step from what the SDK reports.
+          recordStepSpan(tracer, step, stepNumber, resolvedModelKey);
           if (opts.onToolOutcome) {
             for (const outcome of toolOutcomes(step.content, approvalReasons)) opts.onToolOutcome(outcome);
           }
@@ -881,6 +1030,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     if (healthy) resolvedModelKey = healthy;
   }
 
+  // Finish the current attempt's trace and export it (best-effort). Called once
+  // the run settles — on success with the run's totals, on failure with the
+  // error. exportSpans never throws, so this can't disturb the run.
+  const finishTrace = (extra: { attributes?: Record<string, AttrValue>; error?: string }): void => {
+    try {
+      const spans = tracer.finish({
+        attributes: {
+          'harness.model.key': resolvedModelKey,
+          'harness.step.count': stepIndex,
+          ...extra.attributes,
+        },
+        ...(extra.error ? { error: extra.error } : {}),
+      });
+      void exportSpans(spans);
+    } catch (err) {
+      console.error('[tracing] failed to finish/export run trace:', err instanceof Error ? err.message : err);
+    }
+  };
+
   const tried = new Set<string>();
   let result: Awaited<ReturnType<typeof callModel>> | undefined;
 
@@ -891,20 +1059,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       modelHealth.recordSuccess(resolvedModelKey);
       break;
     } catch (err) {
-      if (opts.abortSignal?.aborted) throw err;
+      if (opts.abortSignal?.aborted) {
+        finishTrace({ error: 'aborted', attributes: { 'harness.aborted': true } });
+        throw err;
+      }
       const message = err instanceof Error ? err.message : String(err);
       const failureKind = classifyProviderFailure(message);
       if (failureKind) modelHealth.recordFailure(resolvedModelKey);
       const fallback =
         !isPinned && failureKind ? modelHealth.pickFallback(resolvedModelKey, registry, tried) : null;
-      if (!fallback) throw err;
+      if (!fallback) {
+        finishTrace({ error: message });
+        throw err;
+      }
       // A fallback restarts the whole run. If this attempt already ran a
       // write/destructive tool, the new model would redo it — fail instead.
       if (attemptHadSideEffects) {
-        throw new Error(
+        const sideEffectErr =
           `${message}\n(Not falling back to "${fallback}": the failed attempt on "${resolvedModelKey}" ` +
-            `already executed write/destructive tool calls, which a restarted run would repeat.)`
-        );
+          `already executed write/destructive tool calls, which a restarted run would repeat.)`;
+        finishTrace({ error: sideEffectErr });
+        throw new Error(sideEffectErr);
       }
       console.warn(
         `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
@@ -924,6 +1099,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // run record. drain() never rejects.
   const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
 
+  const budgetUsage = budget.usage();
+  // Item #8: finish the run trace with the run's totals (best-effort).
+  finishTrace({
+    attributes: {
+      'gen_ai.response.finish_reasons': result.finishReason,
+      'harness.usage.total_tokens': budgetUsage.tokens,
+      'harness.duration_ms': budgetUsage.durationMs,
+      ...(budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': budgetUsage.costUsd } : {}),
+      ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
+    },
+  });
+
   return {
     finalText: result.text,
     steps,
@@ -931,13 +1118,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     finishReason: result.finishReason,
     modelKey: resolvedModelKey,
     ...(stopReason ? { stopReason } : {}),
-    budgetUsage: budget.usage(),
+    budgetUsage,
     usage: {
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       totalTokens: result.usage.totalTokens,
     },
     ragJudgments,
+    versions,
     ...(planTracker ? { plan: planTracker.plan } : {}),
     ...(route ? { route } : {}),
   };

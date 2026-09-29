@@ -1,6 +1,6 @@
 'use client';
 
-import { AgentStepDTO, CritiqueInfo, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage } from '@/lib/types';
 
 export interface AgentTraceProps {
   steps: AgentStepDTO[];
@@ -11,8 +11,22 @@ export interface AgentTraceProps {
   usage?: TokenUsage;
   /** Set when a run budget or loop detection cut the run short. */
   stopReason?: string;
+  /** Run totals (tokens, estimated cost, wall-clock time). */
+  budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
+  versions?: RunVersions;
   /** Grounding check on the final answer, when it ran. */
   critique?: CritiqueInfo;
+}
+
+/** Compact ms → "820ms" / "1.4s" / "2m 05s". */
+function formatMs(ms: number | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
 const STOP_REASON_LABEL: Record<string, string> = {
@@ -23,7 +37,7 @@ const STOP_REASON_LABEL: Record<string, string> = {
 };
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique }: AgentTraceProps) {
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, budgetUsage, versions }: AgentTraceProps) {
   // "stop" means the model decided it was done. "running" means we're still
   // streaming. Anything else (most commonly "tool-calls") means the run was
   // cut off at the step limit, and finalText is not a real conclusion.
@@ -59,6 +73,18 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
             <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Total tokens</p>
             <p className="text-lg font-bold text-indigo-900">{usage!.totalTokens?.toLocaleString() ?? '—'}</p>
           </div>
+          {budgetUsage && formatMs(budgetUsage.durationMs) && (
+            <div>
+              <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Duration</p>
+              <p className="text-lg font-bold text-indigo-900">{formatMs(budgetUsage.durationMs)}</p>
+            </div>
+          )}
+          {budgetUsage?.costUsd != null && (
+            <div>
+              <p className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide">Est. cost</p>
+              <p className="text-lg font-bold text-indigo-900">${budgetUsage.costUsd.toFixed(4)}</p>
+            </div>
+          )}
           <p className="text-xs text-indigo-400 italic ml-auto self-end">
             chat model only — tool-shortlisting and RAG-judge calls not included
           </p>
@@ -68,9 +94,24 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
       <div className="text-xs text-gray-500">Tools available this run: {toolsConsidered.join(', ') || 'none'}</div>
 
       <div className="space-y-3">
-        {steps.map((step) => (
+        {steps.map((step) => {
+          const stepTime = formatMs(step.durationMs);
+          const modelTime = formatMs(step.modelMs);
+          const stepTokens = step.usage?.totalTokens;
+          return (
           <div key={step.stepNumber} className="border border-gray-200 rounded-lg p-4">
-            <p className="text-xs font-semibold text-gray-500 mb-2">Step {step.stepNumber + 1}</p>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-gray-500">Step {step.stepNumber + 1}</p>
+              {(stepTime || stepTokens != null) && (
+                <p className="text-[11px] text-gray-400 font-mono">
+                  {stepTime && <span title="total step time">{stepTime}</span>}
+                  {stepTime && modelTime && <span className="text-gray-300"> · </span>}
+                  {modelTime && <span title="model response time">model {modelTime}</span>}
+                  {(stepTime || modelTime) && stepTokens != null && <span className="text-gray-300"> · </span>}
+                  {stepTokens != null && <span title="tokens this step">{stepTokens.toLocaleString()} tok</span>}
+                </p>
+              )}
+            </div>
             {step.text && <p className="text-sm text-gray-800 mb-2 whitespace-pre-wrap">{step.text}</p>}
             {step.toolCalls.map((call, i) => (
               <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2 font-mono text-xs text-green-400 overflow-x-auto">
@@ -78,23 +119,28 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
                 <pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(call.input, null, 2)}</pre>
               </div>
             ))}
-            {step.toolResults.map((res, i) => (
+            {step.toolResults.map((res, i) => {
+              const toolTime = formatMs(res.durationMs);
+              return (
               <div
                 key={i}
                 className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${
                   res.error ? 'bg-red-950 text-red-300' : 'bg-gray-800 text-gray-300'
                 }`}
               >
-                <div className={res.error ? 'text-red-300' : 'text-yellow-300'}>
-                  ← {res.toolName} {res.error ? 'error' : 'result'}
+                <div className={`flex items-center justify-between ${res.error ? 'text-red-300' : 'text-yellow-300'}`}>
+                  <span>← {res.toolName} {res.error ? 'error' : 'result'}</span>
+                  {toolTime && <span className="text-gray-400" title="tool execution time">{toolTime}</span>}
                 </div>
                 <pre className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto">
                   {res.error ?? JSON.stringify(res.output, null, 2)}
                 </pre>
               </div>
-            ))}
+              );
+            })}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className={`p-4 rounded-lg border-l-4 ${isIncomplete ? 'bg-amber-50 border-amber-500' : isRunning ? 'bg-blue-50 border-blue-400' : 'bg-green-50 border-green-500'}`}>
@@ -147,6 +193,14 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
           </div>
         )}
       </div>
+
+      {versions && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400 font-mono border-t border-gray-100 pt-3">
+          <span title="hash of the exact system prompt">prompt {versions.prompt}</span>
+          <span title="hash of the tool set the model was given">toolset {versions.toolset}</span>
+          <span title="build the run executed on">app {versions.app}</span>
+        </div>
+      )}
     </div>
   );
 }

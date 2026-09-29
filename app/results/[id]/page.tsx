@@ -212,6 +212,8 @@ export default function RunDetailPage() {
                 finalText={record.result.finalText}
                 usage={record.result.usage}
                 stopReason={record.result.stopReason}
+                budgetUsage={record.result.budgetUsage}
+                versions={record.result.versions}
                 critique={record.result.critique}
               />
             )}

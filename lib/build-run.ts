@@ -210,6 +210,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         stopReason: agentResult.stopReason,
         budgetUsage: agentResult.budgetUsage,
         critique: agentResult.critique,
+        versions: agentResult.versions,
       });
 
       save({
@@ -235,6 +236,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           plan: agentResult.plan,
           critique: agentResult.critique,
           route: agentResult.route,
+          versions: agentResult.versions,
         },
       });
       // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.

@@ -16,6 +16,8 @@ export interface AgentToolResultDTO {
   output: unknown;
   /** Present when this tool call failed (after exhausting its transient-error retries, if any). */
   error?: string;
+  /** Wall-clock time this tool call took, in ms. Absent on runs persisted before per-step timing was tracked. */
+  durationMs?: number;
 }
 
 export interface AgentStepDTO {
@@ -23,6 +25,23 @@ export interface AgentStepDTO {
   text: string;
   toolCalls: AgentToolCallDTO[];
   toolResults: AgentToolResultDTO[];
+  /** Wall-clock time for the whole step (model + tools), in ms. Absent on runs from before per-step metrics were tracked. */
+  durationMs?: number;
+  /** Time spent waiting on the model response, in ms. */
+  modelMs?: number;
+  /** Chat-model tokens for this step alone. */
+  usage?: TokenUsage;
+}
+
+/**
+ * Version fingerprints for a run (lib/version.ts) — short sha256 hashes that
+ * tie a stored run to the exact prompt, tool set and build it came from.
+ * Absent on runs persisted before versioning was tracked.
+ */
+export interface RunVersions {
+  prompt: string;
+  toolset: string;
+  app: string;
 }
 
 /**
@@ -138,6 +157,8 @@ export interface BuildResponse {
    * was tracked, and empty when nothing was sampled or judging was disabled.
    */
   ragJudgments?: RagJudgmentDTO[];
+  /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
+  versions?: RunVersions;
 }
 
 // ── TASK 8: Streaming event types ─────────────────────────────────────────────
@@ -181,6 +202,8 @@ export type BuildStreamEvent =
       toolsConsidered: string[];
       stopReason?: string;
       budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+      /** Version fingerprints (prompt/toolset/app) for this run. */
+      versions?: RunVersions;
       critique?: CritiqueInfo;
     }
   | { type: 'error'; error: string; code?: string };

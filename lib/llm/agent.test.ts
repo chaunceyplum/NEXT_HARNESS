@@ -335,6 +335,40 @@ describe('runAgent token streaming (TASK 1)', () => {
   });
 });
 
+describe('runAgent version fingerprints (item #8)', () => {
+  it('returns stable prompt/toolset/app version hashes', async () => {
+    script = [{ text: 'done' }];
+    const result = await runAgent({ userInput: 'hello', modelKey: 'test:plain' });
+
+    expect(result.versions!.prompt).toMatch(/^[0-9a-f]{12}$/);
+    expect(result.versions!.toolset).toMatch(/^[0-9a-f]{12}$/);
+    expect(typeof result.versions!.app).toBe('string');
+  });
+
+  it('computes the same prompt hash across runs and a different toolset hash when the tools differ', async () => {
+    script = [{ text: 'a' }];
+    const a = await runAgent({ userInput: 'x', modelKey: 'test:plain' });
+    script = [{ text: 'b' }];
+    const b = await runAgent({ userInput: 'y', modelKey: 'test:plain' });
+    // Same live prompt + same shortlist → identical fingerprints.
+    expect(a.versions!.prompt).toBe(b.versions!.prompt);
+    expect(a.versions!.toolset).toBe(b.versions!.toolset);
+
+    // A scripted (eval-path) tool set is a different set → different toolset hash,
+    // and the eval prompt (no tool-discovery rule) → different prompt hash.
+    script = [{ text: 'c' }];
+    const scripted = await runAgent({
+      userInput: 'z',
+      modelKey: 'test:plain',
+      tools: {
+        only_one: tool({ description: 'the only tool', inputSchema: jsonSchema({ type: 'object' } as never), execute: async () => ({}) }),
+      },
+    });
+    expect(scripted.versions!.toolset).not.toBe(a.versions!.toolset);
+    expect(scripted.versions!.prompt).not.toBe(a.versions!.prompt);
+  });
+});
+
 describe('runAgent deployment memory', () => {
   beforeEach(() => {
     memoryFacts = [];
