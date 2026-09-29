@@ -115,5 +115,11 @@ export interface AgentStepTrace {
   stepNumber: number;
   text: string;
   toolCalls: Array<{ toolName: string; input: unknown }>;
-  toolResults: Array<{ toolName: string; output: unknown; error?: string }>;
+  toolResults: Array<{ toolName: string; output: unknown; error?: string; durationMs?: number }>;
+  /** Wall-clock time for the whole step (model call + tool execution), in ms. From the SDK's step.performance; absent for steps built outside the live loop (e.g. re-mapped results). */
+  durationMs?: number;
+  /** Time spent waiting on the model response, in ms (step.performance.responseTimeMs). */
+  modelMs?: number;
+  /** Chat-model token usage for this step alone. */
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }

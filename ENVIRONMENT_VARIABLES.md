@@ -703,6 +703,35 @@ NODE_ENV=production
 
 That's it! Just set `MCP_ENDPOINT_URL` and you're good to go. 🚀
 
+## Tracing and versioning (`lib/tracing.ts`, `lib/version.ts`)
+
+Each run builds a nested trace — one span for the run, one per step, and one
+per model call and per tool call — with tokens, latency, model, tool
+durations and errors. Spans are built from what the AI SDK already reports
+per step (`usage`, `performance.stepTimeMs` / `responseTimeMs` /
+`toolExecutionMs`), so tracing adds nothing to the hot path and can't change
+agent behaviour. Attribute names follow the OpenTelemetry GenAI conventions
+(`gen_ai.*`), so any OTLP backend (Langfuse, Arize Phoenix, Jaeger,
+Honeycomb, Grafana Tempo…) can read them. Export is best-effort — a failed
+export is logged, never thrown into the run.
+
+Every run also carries three short (12-hex) version fingerprints on its
+result, the `done` event and the persisted record, so a stored trace or
+score can be tied to the exact prompt, tool set and build: `prompt` (hash of
+the exact system prompt), `toolset` (hash of the sorted tool names +
+descriptions) and `app` (see `APP_VERSION` below). The eval suite computes
+`prompt` the same way, so an eval score and a production run are directly
+comparable.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP/HTTP JSON collector base URL; spans are POSTed to `{endpoint}/v1/traces`. Unset disables OTLP export. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | none | `key=value,key2=value2` headers on the export request (e.g. an auth header). |
+| `OTEL_SERVICE_NAME` | `next-harness` | `service.name` on the exported resource. |
+| `TRACE_LOG` | `false` | `true` also prints each finished run's spans as one JSON line (no collector needed). |
+| `TRACE_CAPTURE_CONTENT` | `false` | `true` includes (truncated, 2 000 chars) tool arguments/results and step text in spans. Off by default so payloads/PII don't leave in traces. |
+| `GIT_SHA` / `APP_VERSION` | package version, else `dev` | The `app` version fingerprint; set one in your deploy (a commit SHA or release tag). |
+
 ## Eval Variables
 
 Only read by `npm run eval:*` (see `evals/README.md`), never by the app.

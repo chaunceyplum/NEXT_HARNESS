@@ -248,6 +248,8 @@ export async function POST(request: Request): Promise<Response> {
 
         const rawResult = await runAgent({
           userInput: req.description,
+          // Item #8: correlate the run's trace spans with the persisted run.
+          runId,
           modelKey: req.model,
           toolRetries: req.toolRetries,
           toolShortlistSize: req.toolShortlistSize,
@@ -292,6 +294,7 @@ export async function POST(request: Request): Promise<Response> {
           toolsConsidered: agentResult.toolsConsidered,
           stopReason: agentResult.stopReason,
           budgetUsage: agentResult.budgetUsage,
+          versions: agentResult.versions,
         });
 
         close();
@@ -317,6 +320,7 @@ export async function POST(request: Request): Promise<Response> {
             stopReason: agentResult.stopReason,
             budgetUsage: agentResult.budgetUsage,
             ragJudgments: agentResult.ragJudgments,
+            versions: agentResult.versions,
           },
         };
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
