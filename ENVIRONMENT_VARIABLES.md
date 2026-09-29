@@ -70,6 +70,24 @@ guessing at file contents.
 
 ---
 
+## Authentication (`proxy.ts`, `lib/auth.ts`) — required in production
+
+Every page and API route is authenticated. **A production build with none
+of these set refuses every request with 503**, so set at least one before
+deploying. `next dev` allows unauthenticated requests.
+
+| Variable | Format | Purpose |
+| --- | --- | --- |
+| `HARNESS_AUTH_USERS` | `alice:password,bob:password` | HTTP Basic for people. The browser shows its sign-in prompt. |
+| `HARNESS_API_TOKENS` | `ci-bot:token,cron:token` | `Authorization: Bearer <token>` for scripts. The name before `:` is the identity. |
+| `HARNESS_APPROVERS` | `alice,carol` | Only these users may approve or deny paused tool calls. Unset = any signed-in user. |
+| `HARNESS_AUTH_DISABLED` | `true` | Explicit opt-out, e.g. behind a VPN or an authenticating load balancer. |
+
+The authenticated name is passed to route handlers in the `x-harness-user`
+header. The proxy overwrites any value a client sends. Approval decisions
+record who made them. Serve the app over HTTPS: Basic credentials are
+only base64-encoded.
+
 ## LLM Provider Variables (agent — lib/llm/)
 
 The `/api/build` route no longer runs a fixed planner→orchestrator pipeline.

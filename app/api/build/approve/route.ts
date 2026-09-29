@@ -6,10 +6,12 @@
  *
  * Body: {"runId":"...","toolCallId":"...","approved":true}
  * 200 {"ok":true} — the run resumes; 404 if nothing is waiting on that call
- * (already decided, timed out, or the run ended).
+ * (already decided, timed out, or the run ended); 403 if HARNESS_APPROVERS
+ * is set and doesn't include the caller.
  */
 
 import { resolveApproval } from '@/lib/llm/approvals';
+import { mayApprove, requestUser } from '@/lib/auth';
 import { ApiError } from '@/lib/types';
 
 export async function POST(request: Request): Promise<Response> {
@@ -32,12 +34,20 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  if (!resolveApproval(b.runId, b.toolCallId, b.approved)) {
+  const user = requestUser(request);
+  if (!mayApprove(user)) {
+    return Response.json(
+      { error: `"${user}" is not in HARNESS_APPROVERS, so cannot approve or deny tool calls`, code: 'FORBIDDEN' } as ApiError,
+      { status: 403 }
+    );
+  }
+
+  if (!resolveApproval(b.runId, b.toolCallId, b.approved, user)) {
     return Response.json(
       { error: 'No pending approval for that tool call (already decided, timed out, or the run ended)', code: 'NOT_FOUND' } as ApiError,
       { status: 404 }
     );
   }
-  console.log(`[BUILD] Tool call ${b.toolCallId} on run ${b.runId} ${b.approved ? 'approved' : 'denied'} by user`);
+  console.log(`[BUILD] Tool call ${b.toolCallId} on run ${b.runId} ${b.approved ? 'approved' : 'denied'} by ${user}`);
   return Response.json({ ok: true });
 }
