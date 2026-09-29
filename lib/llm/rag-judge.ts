@@ -17,7 +17,7 @@
 
 import { generateObject } from 'ai';
 import { z } from 'zod';
-import { resolveModel, getDefaultModelKey } from './model-registry';
+import { resolveModel, getDefaultModelKey, getModelEntry, getModelRegistry } from './model-registry';
 
 /**
  * Tools where "judge the retrieval" is a coherent question — a query goes
@@ -91,9 +91,44 @@ function isEmptyResult(output: unknown): boolean {
   return false;
 }
 
-/** Defaults to the harness's own default chat model (guaranteed to have working credentials) rather than a hardcoded cheap tier — override with RAG_JUDGE_MODEL to spend less per lookup. */
-function judgeModelKey(): string {
-  return process.env.RAG_JUDGE_MODEL || getDefaultModelKey();
+/**
+ * Ordered list of model keys to try scoring a judgment with, cheapest first.
+ *
+ * The judgment is monitoring data the agent never acts on, so it should be
+ * scored as cheaply as possible — but not at the cost of reliability. On
+ * Bedrock, model access is granted per model, so the cheap tier can be
+ * inaccessible even when the default (balanced) works. So rather than
+ * hardcoding the cheap tier, we try the *same provider's* cheap tier first
+ * and fall back to the harness's default chat model, which is guaranteed to
+ * have working credentials (it's what every real run uses). judgeRagResult
+ * walks this list in order until one succeeds.
+ *
+ * RAG_JUDGE_MODEL overrides the whole thing with a single explicit key (no
+ * auto-fallback beyond it) — set it when you want to pin the judge to a
+ * specific model regardless of the default provider.
+ */
+function resolveJudgeModelKeys(): string[] {
+  const override = process.env.RAG_JUDGE_MODEL;
+  if (override) return [override];
+
+  const defaultKey = getDefaultModelKey();
+  const keys: string[] = [];
+
+  // Same-provider cheap tier first, if one exists and isn't already the default.
+  try {
+    const defaultEntry = getModelEntry(defaultKey);
+    const cheap = getModelRegistry().find(
+      (e) => e.provider === defaultEntry.provider && e.tier === 'cheap'
+    );
+    if (cheap) keys.push(cheap.key);
+  } catch {
+    // Unknown/unresolvable default entry — fall through to the default key alone.
+  }
+
+  keys.push(defaultKey);
+  // De-dupe: the default itself may be the cheap tier, or the cheap lookup
+  // may have already produced it.
+  return [...new Set(keys)];
 }
 
 function summarizeOutputForJudge(output: unknown): string {
@@ -121,17 +156,25 @@ const JUDGE_SYSTEM_PROMPT = [
 export async function judgeRagResult(query: string, output: unknown): Promise<RagJudgment | undefined> {
   if (!isJudgeEnabled()) return undefined;
 
-  const modelKey = judgeModelKey();
-  try {
-    const { object } = await generateObject({
-      model: resolveModel(modelKey),
-      schema: ragJudgmentSchema,
-      system: JUDGE_SYSTEM_PROMPT,
-      prompt: `Query: ${query}\n\nRetrieved results (already reranked):\n${summarizeOutputForJudge(output)}`,
-    });
-    return { ...object, judgeModel: modelKey };
-  } catch (err) {
-    console.warn(`[rag-judge] Skipping judgment (model "${modelKey}"):`, err instanceof Error ? err.message : err);
-    return undefined;
+  const candidates = resolveJudgeModelKeys();
+  const prompt = `Query: ${query}\n\nRetrieved results (already reranked):\n${summarizeOutputForJudge(output)}`;
+
+  for (const modelKey of candidates) {
+    try {
+      const { object } = await generateObject({
+        model: resolveModel(modelKey),
+        schema: ragJudgmentSchema,
+        system: JUDGE_SYSTEM_PROMPT,
+        prompt,
+      });
+      return { ...object, judgeModel: modelKey };
+    } catch (err) {
+      // A cheap-tier model the account can't reach (per-model Bedrock access)
+      // shows up here — warn and try the next candidate (the default model,
+      // which every real run uses and so is known-good). If they all fail,
+      // fall out of the loop and return undefined, same as before.
+      console.warn(`[rag-judge] Judgment attempt with model "${modelKey}" failed:`, err instanceof Error ? err.message : err);
+    }
   }
+  return undefined;
 }
