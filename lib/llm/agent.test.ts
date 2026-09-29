@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { tool, jsonSchema, type ToolSet } from 'ai';
+import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
 
 // runAgent's live path end to end, against a scripted model and a fake
 // catalog: approval gating (incl. via call_tool), dry-run, and the
@@ -28,6 +29,9 @@ vi.mock('./model-registry', () => {
       return e;
     },
     resolveModel: () =>
+      // runAgent uses streamText, so doStream is the path exercised here.
+      // doGenerate is kept for completeness/any other caller. Both consume
+      // the same `script` queue and record the same `calls` for assertions.
       new MockLanguageModelV4({
         doGenerate: async (options) => {
           calls.push(JSON.parse(JSON.stringify(options)));
@@ -42,6 +46,33 @@ vi.mock('./model-registry', () => {
             warnings: [],
           };
         },
+        doStream: async (options) => {
+          calls.push(JSON.parse(JSON.stringify(options)));
+          const next = script.shift() ?? { text: 'done' };
+          const id = `call-${calls.length}`;
+          const parts: LanguageModelV4StreamPart[] =
+            'text' in next
+              ? [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id },
+                  { type: 'text-delta', id, delta: next.text },
+                  { type: 'text-end', id },
+                  { type: 'finish', finishReason: { unified: 'stop', raw: 'stop' }, usage },
+                ]
+              : [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'tool-call', toolCallId: id, toolName: next.toolCall.toolName, input: JSON.stringify(next.toolCall.input) },
+                  { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_use' }, usage },
+                ];
+          return {
+            stream: new ReadableStream({
+              start(controller) {
+                for (const p of parts) controller.enqueue(p);
+                controller.close();
+              },
+            }),
+          };
+        },
       }),
   };
 });
@@ -54,6 +85,9 @@ const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_se
 
 vi.mock('./tool-catalog', () => ({
   getMcpToolCatalog: async () => CATALOG,
+  // runAgent creates a sink on the live path and drains it at the end; the
+  // scripted tools here never judge, so an empty-draining stub is enough.
+  createRagJudgmentSink: () => ({ track() {}, async drain() { return []; } }),
   buildAiTools: (defs: typeof CATALOG): ToolSet =>
     Object.fromEntries(
       defs.map((d) => [
@@ -180,5 +214,23 @@ describe('runAgent loop shape', () => {
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
     expect(calls[0].providerOptions?.anthropic).toBeUndefined();
+  });
+});
+
+describe('runAgent token streaming (TASK 1)', () => {
+  it('forwards assistant text deltas via onTextDelta as the model generates them', async () => {
+    script = [{ toolCall: { toolName: 'adobe_list_segments', input: {} } }, { text: 'here is the answer' }];
+    const deltas: string[] = [];
+
+    const result = await runAgent({
+      userInput: 'list segments',
+      modelKey: 'test:plain',
+      maxSteps: 3,
+      onTextDelta: (d) => deltas.push(d),
+    });
+
+    // The streamed chunks reassemble into the final answer text.
+    expect(deltas.join('')).toContain('here is the answer');
+    expect(result.finalText).toBe('here is the answer');
   });
 });
