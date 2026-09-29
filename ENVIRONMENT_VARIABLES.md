@@ -359,6 +359,24 @@ tool that falls back to a server-side default sandbox isn't caught.
   prompt also asks for source titles when the answer relies on the
   knowledge base.
 
+## Audit log (`lib/audit-log.ts`)
+
+Every consequential action is recorded in `harness_audit_log` (the MCP
+server's Postgres, created on first use). Rows are only ever inserted:
+
+- `run_start`: who started a run, and the request
+- `tool_call`: every write/destructive call (and any call that needed
+  approval), with the effective tool, redacted and truncated input, and
+  outcome `ok` / `error` / `denied`
+- `approval`: every approve/deny, with who decided (`system` for timeouts
+  and cancellations)
+- `kill_switch`: engage/release, with who and why
+
+View a run's trail on `/results/[id]`, or query `GET /api/audit?runId=&actor=&tool=&type=`.
+Without `runId`, only `HARNESS_ADMINS` may query when it's set.
+`AUDIT_READS=true` also records read calls (noisy). Writes are
+best-effort: a failed insert is logged and never breaks a run.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
