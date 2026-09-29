@@ -12,6 +12,11 @@
  *   ...
  *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...]}
  *
+ * When a destructive tool call needs a human decision (POST it to
+ * /api/build/approve — the run waits until then, or until it times out):
+ *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...}}
+ *   {"type":"approval_resolved","toolCallId":"...","approved":true,"reason":"..."}
+ *
  * If a provider failure restarts the run on a same-tier fallback model:
  *   {"type":"restart","fromModelKey":"...","toModelKey":"..."}   // discard steps received so far
  *
@@ -24,6 +29,7 @@
  */
 
 import { runAgent } from '@/lib/llm/agent';
+import { waitForApproval } from '@/lib/llm/approvals';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
@@ -201,6 +207,13 @@ export async function POST(request: Request): Promise<Response> {
           // TASK 8: stream each step as it completes
           onStep: (step) => push({ type: 'step', step }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
+          // TASK 9: destructive calls wait here for the user's decision
+          approveTool: async ({ toolCallId, toolName, input }) => {
+            push({ type: 'approval_request', toolCallId, toolName, input });
+            const decision = await waitForApproval(runId, toolCallId, abort.signal);
+            push({ type: 'approval_resolved', toolCallId, ...decision });
+            return decision;
+          },
         });
 
         console.log('[BUILD] Agent finished:', {

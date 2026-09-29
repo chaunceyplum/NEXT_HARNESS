@@ -90,12 +90,15 @@ export interface BuildResponse {
 // POST /api/build returns a streaming response of newline-delimited JSON events.
 // Each line is one BuildStreamEvent. The client accumulates step events and
 // replaces the trace on each update; 'restart' means a fallback model is
-// re-running from scratch, so discard steps so far; 'done' carries the final summary.
+// re-running from scratch, so discard steps so far; 'approval_request' means
+// the run is paused until POST /api/build/approve; 'done' carries the final summary.
 
 export type BuildStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
   | { type: 'step'; step: AgentStepDTO }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  | { type: 'approval_request'; toolCallId: string; toolName: string; input: unknown }
+  | { type: 'approval_resolved'; toolCallId: string; approved: boolean; reason: string }
   | {
       type: 'done';
       finalText: string;

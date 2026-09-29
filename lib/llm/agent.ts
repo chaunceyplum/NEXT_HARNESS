@@ -10,32 +10,37 @@
  *      cached via toolOrder stability (shortlist never shuffles). Cache-write on
  *      the first step, much-cheaper cache-read on every subsequent step.
  *
- *   2. prepareStep context management (TASK 2): tool results from steps older
- *      than RESULT_SUMMARY_THRESHOLD are replaced with a compact one-line
- *      summary before each step, so they don't accumulate at full size across a
- *      long run. The trace keeps the uncompressed results (each already capped at
- *      12K chars by capToolResult) — only the in-flight model context shrinks.
+ *   2. Context management (TASK 2): tool results from older steps stop being
+ *      resent at full size. Normally prepareStep swaps them for a one-line
+ *      summary. Models that bind thinking to the exact prior conversation
+ *      (see HISTORY_BOUND_MODEL_RE) reject any rewrite of earlier messages, so
+ *      for those the API's server-side context editing clears them instead.
+ *      The trace keeps the uncompressed results (each already capped at 12K
+ *      chars by capToolResult) — only the in-flight model context shrinks.
  *
- *   3. Last-step summary (TASK 3): toolChoice is forced to 'none' for the final
- *      allowed step so the model always writes a coherent closing answer rather
- *      than being cut off mid-tool-call when stepCountIs fires. (So with
- *      maxSteps=1 the run is text-only.)
+ *   3. Last-step summary (TASK 3): the final allowed step is steered to a
+ *      written answer so the run doesn't end cut off mid-tool-call when
+ *      stepCountIs fires. (So with maxSteps=1 the run is text-only.)
  *
- *   6. find_tools mid-run expansion (TASK 6): every catalog tool is built and
- *      passed to generateText, but prepareStep's activeTools narrows what the
- *      model sees to the shortlist plus the always-on synthetic `find_tools`.
- *      When the model calls find_tools, the returned names join the active set
- *      for the remaining steps.
+ *   6. Tool discovery (TASK 6): the tool list the model sees is fixed for the
+ *      whole run — the shortlist plus `find_tools` and `call_tool`. find_tools
+ *      searches the rest of the (policy-filtered) catalog and returns schemas;
+ *      call_tool runs any of those by name. Keeping the list fixed preserves
+ *      the prompt cache and never trips the history-binding check above,
+ *      which swapping tools in and out mid-run would.
+ *
+ *   9. Approval (TASK 9): destructive calls wait for a human decision via
+ *      RunAgentOptions.approveTool; without an approver they're denied.
  */
 
 import { generateText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
-import { tool, jsonSchema } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
-import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog } from './tool-catalog';
+import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
-import { applyToolPolicy, classifyTool, type PolicyMode } from './tool-policy';
+import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -117,6 +122,14 @@ export interface RunAgentOptions {
    * abandoned attempt and should be discarded.
    */
   onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
+  /**
+   * TASK 9: asks a human to approve one destructive tool call (delete_*,
+   * abort_*, privacy jobs, merge_pr — including ones routed via call_tool)
+   * before it runs. Not consulted in dry-run mode, where destructive tools
+   * don't execute. On a live run without an approver, destructive calls are
+   * denied. The eval path (opts.tools) is never gated.
+   */
+  approveTool?: (call: { toolCallId: string; toolName: string; input: unknown }) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
@@ -129,7 +142,7 @@ export interface RunAgentOptions {
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-function buildSystemMessage(modelKey: string): SystemModelMessage {
+function buildSystemMessage(modelKey: string, toolDiscovery: boolean): SystemModelMessage {
   const entry = tryGetModelEntry(modelKey);
   const providerOptions: SystemModelMessage['providerOptions'] =
     entry?.provider === 'anthropic'
@@ -137,7 +150,7 @@ function buildSystemMessage(modelKey: string): SystemModelMessage {
       : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
         ? { bedrock: { cachePoint: { type: 'default' } } }
         : undefined;
-  return { role: 'system', content: systemPrompt(), ...(providerOptions ? { providerOptions } : {}) };
+  return { role: 'system', content: systemPrompt({ toolDiscovery }), ...(providerOptions ? { providerOptions } : {}) };
 }
 
 function tryGetModelEntry(modelKey: string) {
@@ -147,6 +160,78 @@ function tryGetModelEntry(modelKey: string) {
 function isClaudeModelId(modelId: string): boolean {
   return /claude/i.test(modelId);
 }
+
+// ── Conversation-bound thinking ───────────────────────────────────────────────
+
+/**
+ * Claude models that bind their thinking blocks to the exact prior
+ * conversation — system prompt, tools array, and every earlier message must
+ * be byte-identical when the blocks are replayed, or the API returns a 400
+ * (enforced by default for accounts created on or after 2026-08-31). These
+ * always think, so on them the loop must be append-only: no rewriting old
+ * tool results, no dropping the tools array for a text-only last step.
+ */
+const HISTORY_BOUND_MODEL_RE = /claude-(?:opus-5-5|fable-5-1|mythos-5-1)/i;
+
+function isHistoryBound(modelKey: string): boolean {
+  const entry = tryGetModelEntry(modelKey);
+  return Boolean(entry && HISTORY_BOUND_MODEL_RE.test(entry.modelId));
+}
+
+/** Server-side clearing of old tool results starts once a request's input passes this many tokens. */
+const CONTEXT_EDIT_TRIGGER_TOKENS = 30_000;
+/** Most recent tool uses kept intact by server-side context editing. */
+const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
+
+/**
+ * Server-side context editing (clear_tool_uses) — the API clears old tool
+ * results itself, which doesn't count as a history edit. Anthropic takes
+ * the typed `contextManagement` option; on Bedrock it's passed through as a
+ * raw request field plus its beta flag.
+ */
+function contextEditingProviderOptions(modelKey: string): ProviderOptions | undefined {
+  const entry = tryGetModelEntry(modelKey);
+  if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
+  const trigger = { type: 'input_tokens', value: CONTEXT_EDIT_TRIGGER_TOKENS };
+  const keep = { type: 'tool_uses', value: CONTEXT_EDIT_KEEP_TOOL_USES };
+  // find_tools results carry the schemas call_tool needs — keep them.
+  const excluded = ['find_tools'];
+  if (entry.provider === 'anthropic') {
+    return {
+      anthropic: {
+        contextManagement: { edits: [{ type: 'clear_tool_uses_20250919', trigger, keep, excludeTools: excluded }] },
+      },
+    };
+  }
+  if (entry.provider === 'bedrock') {
+    return {
+      bedrock: {
+        anthropicBeta: ['context-management-2025-06-27'],
+        additionalModelRequestFields: {
+          context_management: { edits: [{ type: 'clear_tool_uses_20250919', trigger, keep, exclude_tools: excluded }] },
+        },
+      },
+    };
+  }
+  return undefined;
+}
+
+type ProviderOptions = Record<string, Record<string, unknown>>;
+
+/** Merge per-provider option objects (one level deep — provider key, then option). */
+function mergeProviderOptions(...parts: Array<ProviderOptions | undefined>): ProviderOptions | undefined {
+  const merged: ProviderOptions = {};
+  for (const part of parts) {
+    for (const [provider, options] of Object.entries(part ?? {})) {
+      merged[provider] = { ...merged[provider], ...options };
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+/** Appended on the final step for history-bound models, which can't drop the tools array. */
+const FINAL_STEP_NOTE =
+  'This is your last step: do not call any more tools. Write your final answer now, based on what you have done so far.';
 
 // ── TASK 10: Extended thinking ────────────────────────────────────────────────
 
@@ -172,7 +257,7 @@ const BUDGET_THINKING_MODEL_RE =
 function resolveThinkingProviderOptions(
   modelKey: string,
   perRequestBudget?: number
-): Record<string, Record<string, unknown>> | undefined {
+): ProviderOptions | undefined {
   const entry = tryGetModelEntry(modelKey);
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
   if (entry.provider !== 'anthropic' && entry.provider !== 'bedrock') return undefined;
@@ -274,66 +359,12 @@ function summariseOutputHint(output: unknown): string {
   return 'Re-fetch with narrower arguments if you need the full content.';
 }
 
-// ── TASK 3 + TASK 6: prepareStep hook ────────────────────────────────────────
-// Implemented inline in runAgent's callModel closure (see below) so it has
-// direct access to maxSteps, expandedToolNames, and allCatalogNames without
-// extra indirection.
-
-// ── TASK 6: find_tools synthetic tool ────────────────────────────────────────
-
-/**
- * A lightweight synthetic tool always included in the model's tool set.
- * When the model discovers mid-run that it needs a tool not in its initial
- * shortlist, it calls find_tools(query) to get candidates from the full
- * catalog. The prepareStep hook then adds the returned names to activeTools
- * for subsequent steps.
- *
- * Returns up to 10 matching tool names. The model must pick the right one
- * from the results and proceed — this is a retrieval hint, not execution.
- */
-function buildFindToolsTool(catalog: McpToolDefinition[]) {
-  const nameIndex = catalog.map((t) => ({
-    name: t.name,
-    text: `${t.name}: ${t.description || ''}`.toLowerCase(),
-  }));
-
-  return tool({
-    description:
-      'Search the full tool catalog for tools you need but do not currently have access to. ' +
-      'Call this when you realize a needed tool is not in your current tool set. ' +
-      'Returns up to 10 matching tool names — the matching tools will be made available to you in the next step.',
-    inputSchema: jsonSchema<{ query: string }>({
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'A short phrase describing the capability you need, e.g. "get merge policy" or "delete segment".',
-        },
-      },
-      required: ['query'],
-    }),
-    execute: async ({ query }: { query: string }) => {
-      const q = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
-      const scored = nameIndex
-        .map((entry) => ({
-          name: entry.name,
-          score: q.reduce((s, token) => s + (entry.text.includes(token) ? 1 : 0), 0),
-        }))
-        .filter((e) => e.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10)
-        .map((e) => e.name);
-      return { tools: scored, message: `Found ${scored.length} matching tool(s). They will be active on your next step.` };
-    },
-  });
-}
-
 // ── Tool selection ────────────────────────────────────────────────────────────
 
 interface LiveToolSelection {
-  /** Every catalog tool that survived the policy, plus find_tools and policy_info. */
+  /** What the model sees all run: always-on + shortlist + policy_info + find_tools + call_tool. */
   tools: ToolSet;
-  /** The initial active set: always-on tools plus the semantic shortlist. */
+  /** Always-on tools plus the semantic shortlist (the directly-visible catalog tools). */
   toolsConsidered: string[];
 }
 
@@ -351,23 +382,18 @@ async function selectLiveTools(
     shortlistTools(userInput, { k: toolShortlistSize, exclude: alwaysOn })
   );
 
-  // TASK 6: build the whole catalog, not just the shortlist — activeTools can
-  // only select from tools passed to generateText, so a tool find_tools
-  // discovers must already exist here to be activated later. Only the active
-  // subset is sent to the model on each step.
-  //
-  // TASK 9: the policy runs over the whole catalog, so a tool activated
-  // mid-run via find_tools is filtered/dry-run-wrapped like any other.
-  const tools = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
+  // TASK 9: the policy runs over the whole catalog, so a tool reached via
+  // call_tool is filtered/dry-run-wrapped exactly like a shortlisted one.
+  const callable = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
 
-  // Index only tools that survived the policy, so find_tools never suggests
-  // one read-only mode removed.
-  tools['find_tools'] = buildFindToolsTool(catalog.filter((t) => t.name in tools));
+  const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
+  const tools: ToolSet = Object.fromEntries(
+    [...toolsConsidered, 'policy_info'].map((name) => [name, callable[name]])
+  );
+  // TASK 6: discovery over everything the policy allows (see tool-discovery.ts)
+  Object.assign(tools, buildDiscoveryTools(catalog, callable, new Set(toolsConsidered)));
 
-  return {
-    tools,
-    toolsConsidered: [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in tools),
-  };
+  return { tools, toolsConsidered };
 }
 
 // ── Step trace ────────────────────────────────────────────────────────────────
@@ -380,8 +406,22 @@ function toStepTrace(step: { text: string; content: ReadonlyArray<{ type: string
   const toolCalls: AgentStepTrace['toolCalls'] = [];
   const toolResults: AgentStepTrace['toolResults'] = [];
 
-  for (const part of step.content as ReadonlyArray<{ type: string; toolName: string; input?: unknown; output?: unknown; result?: unknown; error?: unknown }>) {
-    if (part.type === 'tool-call') {
+  type Part = {
+    type: string;
+    toolName: string;
+    input?: unknown;
+    output?: unknown;
+    result?: unknown;
+    error?: unknown;
+    approved?: boolean;
+    reason?: string;
+    toolCall?: { toolName: string };
+  };
+  for (const part of step.content as ReadonlyArray<Part>) {
+    if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
+      // Denied calls never produce a tool-result/tool-error part.
+      toolResults.push({ toolName: part.toolCall.toolName, output: undefined, error: `Not executed: ${part.reason ?? 'denied'}` });
+    } else if (part.type === 'tool-call') {
       toolCalls.push({ toolName: part.toolName, input: part.input });
     } else if (part.type === 'tool-result') {
       // StaticToolResult uses .output; DynamicToolResult uses .result
@@ -413,10 +453,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
-  // TASK 6: names the model can see on each step; find_tools results are
-  // added mid-run. Undefined on the eval path (opts.tools), which has no
-  // find_tools and exposes its whole scripted set every step.
-  let activeToolNames: Set<string> | undefined;
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -430,8 +466,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     });
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
-    activeToolNames = new Set([...toolsConsidered, 'find_tools', 'policy_info']);
   }
+
+  // TASK 9: gate destructive calls on a human decision (live runs only).
+  const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
+  const toolApproval = opts.tools
+    ? undefined
+    : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
+        const call = effectiveToolCall(toolCall.toolName, toolCall.input);
+        if (dryRun || classifyTool(call.toolName) !== 'destructive') return 'not-applicable' as const;
+        if (!opts.approveTool) {
+          return { type: 'denied' as const, reason: 'Destructive tool calls need a human approver, and none is attached to this run.' };
+        }
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call });
+        return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
+      };
 
   const isPinned = Boolean(modelKey);
   const registry = getModelRegistry();
@@ -448,38 +497,37 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     attemptHadSideEffects = false;
 
     // TASK 10: resolve thinking config for this model + request combination
-    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget) as
-      | Record<string, Record<string, never>>
-      | undefined;
+    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget);
     if (thinkingProviderOptions) {
       console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
+    const historyBound = isHistoryBound(resolvedModelKey);
+    const providerOptions = mergeProviderOptions(
+      thinkingProviderOptions,
+      historyBound ? contextEditingProviderOptions(resolvedModelKey) : undefined
+    ) as Record<string, Record<string, never>> | undefined;
 
     return stage(`chat model call (${resolvedModelKey})`, () =>
       generateText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey),
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
         messages: [{ role: 'user', content: userInput }],
         tools,
         stopWhen: stepCountIs(maxSteps),
         abortSignal: opts.abortSignal,
-        // TASK 10: merge thinking providerOptions when budget is set
-        ...(thinkingProviderOptions ? { providerOptions: thinkingProviderOptions } : {}),
+        // TASK 10 (thinking) + TASK 2 (server-side context editing)
+        ...(providerOptions ? { providerOptions } : {}),
+        ...(toolApproval ? { toolApproval } : {}),
         prepareStep: ({ steps, messages }) => {
-          // TASK 6: scan completed steps for find_tools results and expand active set
-          for (const step of steps) {
-            for (const part of step.content) {
-              if (part.type === 'tool-result' && part.toolName === 'find_tools') {
-                const resultVal = (part as unknown as { output?: unknown; result?: unknown }).output
-                  ?? (part as unknown as { result?: unknown }).result;
-                if (activeToolNames && resultVal && typeof resultVal === 'object' && Array.isArray((resultVal as Record<string, unknown>).tools)) {
-                  for (const name of (resultVal as { tools: string[] }).tools) {
-                    if (name in tools) activeToolNames.add(name);
-                  }
-                }
-              }
-            }
+          const isLastStep = steps.length >= maxSteps - 1;
+
+          // History-bound models: append-only. Old tool results are cleared
+          // server-side (providerOptions above), and the last step keeps the
+          // tools array — toolChoice 'none' makes the providers drop it — and
+          // instead appends an instruction after the latest tool results.
+          if (historyBound) {
+            return isLastStep ? { messages: [...messages, { role: 'user' as const, content: FINAL_STEP_NOTE }] } : {};
           }
 
           // TASK 2: compress tool results from steps older than the threshold
@@ -492,17 +540,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           const compressedMessages = compressOldToolMessages(messages, steps.length);
 
           // TASK 3: force text-only on the final allowed step
-          const isLastStep = steps.length >= maxSteps - 1;
           return {
             toolChoice: isLastStep ? 'none' : 'auto',
-            activeTools: activeToolNames ? [...activeToolNames] : undefined,
             ...(compressedMessages ? { messages: compressedMessages } : {}),
           };
         },
         // TASK 8: fire onStep callback after each step so the route can stream it
         onStepEnd: (step) => {
           const trace = toStepTrace(step, stepIndex++);
-          if (trace.toolCalls.some((c) => classifyTool(c.toolName) !== 'read')) attemptHadSideEffects = true;
+          // Only calls that actually ran count — a denied call never executed.
+          for (const part of step.content) {
+            if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
+            if (classifyTool(effectiveToolCall(part.toolName, part.input).toolName) !== 'read') attemptHadSideEffects = true;
+          }
           opts.onStep?.(trace);
         },
       })

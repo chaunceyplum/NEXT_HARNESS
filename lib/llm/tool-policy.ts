@@ -44,6 +44,7 @@ const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
   msb_github_merge_pr: 'destructive',      // merging a PR is irreversible
   query_rag_db: 'read',                    // "query" is a verb here, but a server prefix in query_run etc.
   find_tools: 'read',                      // synthetic (agent.ts)
+  call_tool: 'write',                      // synthetic proxy (agent.ts) — classify its target via effectiveToolName
   policy_info: 'read',                     // synthetic (below)
 };
 
@@ -108,16 +109,24 @@ export function isDryRunEnabled(): boolean {
  * Always injects a 'policy_info' tool so the model can query the active policy
  * if it's confused about why a tool is missing.
  */
+/**
+ * The effective policy for a run. The env settings are a floor: a per-request
+ * value can make a run stricter (read-only, dry-run) but never looser than
+ * the deployment allows, so a request body of {"policy":"full","dryRun":false}
+ * can't bypass them.
+ */
+export function resolvePolicy(opts: { mode?: PolicyMode; dryRun?: boolean } = {}): { mode: PolicyMode; dryRun: boolean } {
+  return {
+    mode: getDefaultPolicy() === 'read-only' || opts.mode === 'read-only' ? 'read-only' : 'full',
+    dryRun: isDryRunEnabled() || opts.dryRun === true,
+  };
+}
+
 export function applyToolPolicy(
   tools: ToolSet,
   opts: { mode?: PolicyMode; dryRun?: boolean } = {}
 ): ToolSet {
-  // The env settings are a floor: a per-request value can make a run stricter
-  // (read-only, dry-run) but never looser than the deployment allows, so a
-  // request body of {"policy":"full","dryRun":false} can't bypass them.
-  const mode: PolicyMode =
-    getDefaultPolicy() === 'read-only' || opts.mode === 'read-only' ? 'read-only' : 'full';
-  const dryRun = isDryRunEnabled() || opts.dryRun === true;
+  const { mode, dryRun } = resolvePolicy(opts);
 
   const result: ToolSet = {};
 
