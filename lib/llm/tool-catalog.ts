@@ -14,7 +14,7 @@
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
-import { judgeRagResult, JUDGEABLE_RAG_TOOLS, type RagJudgment } from './rag-judge';
+import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
 export interface McpToolDefinition {
@@ -194,6 +194,54 @@ function retryDelayMs(attempt: number, message: string): number {
 }
 
 /**
+ * A validation error whose text doesn't say what's wrong — just a status
+ * line like `400: Bad Request` or `422 Unprocessable Entity`, with no field,
+ * value, or constraint named. The model can't fix its arguments from that
+ * alone, so this is one of the two cases where a knowledge-base lookup is
+ * worth its cost (see shouldGroundValidationError).
+ */
+const GENERIC_ERROR_WORDS =
+  /\b(?:http|status|code|error|errors?|bad|request|invalid|unprocessable|entity|content|not|found|conflict|gone|validation|failed|the|a)\b/gi;
+
+export function isUninformativeError(message: string): boolean {
+  const residue = message
+    .replace(/\b\d{3}\b/g, ' ')
+    .replace(GENERIC_ERROR_WORDS, ' ')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim();
+  // Anything left over (a field name, a value, a constraint) is something the model can act on.
+  return residue.length < 3;
+}
+
+/**
+ * Per-run state shared by every tool built by one buildAiTools() call (one
+ * agent run): how often each tool has hit a validation error, and the
+ * knowledge-base lookups already made, so the same failure isn't looked up
+ * twice.
+ */
+export interface GroundingState {
+  validationFailures: Map<string, number>;
+  lookups: Map<string, Promise<unknown>>;
+}
+
+export function createGroundingState(): GroundingState {
+  return { validationFailures: new Map(), lookups: new Map() };
+}
+
+/**
+ * Whether a validation error is worth a knowledge-base lookup. Most aren't:
+ * the error itself usually names the bad field, and the model fixes it on
+ * the next call. Look up only when the model is stuck — the same tool has
+ * already failed validation earlier in this run — or the error gives it
+ * nothing to go on.
+ */
+export function shouldGroundValidationError(priorFailures: number, message: string): 'repeat-failure' | 'uninformative-error' | undefined {
+  if (priorFailures >= 1) return 'repeat-failure';
+  if (isUninformativeError(message)) return 'uninformative-error';
+  return undefined;
+}
+
+/**
  * Tool arguments embedded in a RAG lookup query so it's bounded regardless
  * of payload size — e.g. a CJA project definition can be tens of KB, and
  * that has no bearing on searching docs for "what's the correct usage."
@@ -264,8 +312,9 @@ export function capRagResult(result: unknown): unknown {
 
 /**
  * If `toolName` is a judgeable RAG tool (see rag-judge.ts) and its args
- * carried a `query` string, score the result (against the real,
- * uncapped content — the judge has its own separate size cap) and cap the
+ * carried a `query` string, score a sample of results (see
+ * shouldJudgeLiveResult — against the real, uncapped content; the judge has
+ * its own separate size cap) and cap the
  * result itself before it's returned to the model. Judgment metadata rides
  * along on the capped result the same way `_retryHistory` rides along
  * below, so callers reading a result's normal fields are unaffected either
@@ -276,7 +325,7 @@ export function capRagResult(result: unknown): unknown {
 async function withRagJudgment(toolName: string, args: Record<string, unknown>, result: unknown): Promise<unknown> {
   if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return result;
   const query = typeof args.query === 'string' ? args.query : undefined;
-  if (!query) return capRagResult(result);
+  if (!query || !shouldJudgeLiveResult(result)) return capRagResult(result);
 
   const judgment = await judgeRagResult(query, result);
   const capped = capRagResult(result);
@@ -293,28 +342,30 @@ export interface RetryAttemptRecord {
   raggedBefore?: {
     tool: string;
     query: string;
+    /** Why this failure got a lookup at all — see shouldGroundValidationError. */
+    reason: 'repeat-failure' | 'uninformative-error';
     findings?: unknown;
-    /** Set when the grounding lookup's own results were scored — see rag-judge.ts. */
-    judgment?: RagJudgment;
     lookupError?: string;
   };
 }
 
 export interface BuildAiToolsOptions {
-  /** Extra retries after the first failed attempt, each preceded by a RAG lookup. 0 disables retrying. */
+  /** Extra attempts after a transient (5xx/timeout/429) failure, with back-off. 0 disables retrying. */
   maxRetries?: number;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
-  /** Extra retries after the first failed attempt, each preceded by a RAG lookup. 0 disables retrying. */
+  /** Extra attempts after a transient (5xx/timeout/429) failure, with back-off. 0 disables retrying. */
   maxRetries: number;
   /** Names of tools in this run's selected set — used to pick a plausible grounding tool for the RAG lookup. */
   availableNames: Set<string>;
+  /** Per-run lookup state (see GroundingState). A fresh one is used if omitted. */
+  grounding?: GroundingState;
 }
 
 /**
- * Calls one MCP (or local) tool with the RAG-consulting retry behavior,
- * independent of the AI SDK tool wrapper below.
+ * Calls one MCP (or local) tool with the retry / knowledge-grounding
+ * behavior, independent of the AI SDK tool wrapper below.
  *
  * Error handling has three tiers (TASK 7):
  *
@@ -322,19 +373,20 @@ export interface ExecuteMcpToolWithRetryOptions {
  *      no retry, no RAG lookup. These are permanent for this credential.
  *
  *   2. Validation errors (400/404/409/422/etc): the arguments are wrong and
- *      retrying the same call cannot fix that. Do the RAG grounding lookup
- *      once to get relevant docs, then throw immediately with the findings
- *      in the message — don't waste a retry attempt. The AI SDK hands a
- *      thrown tool error back to the model as a tool-error result, so it
- *      still sees the error + docs and can correct its arguments, and the
- *      trace/evals still record it as a failure.
+ *      retrying the same call cannot fix that, so throw immediately. The AI
+ *      SDK hands a thrown tool error back to the model as a tool-error
+ *      result, so it sees the error and can correct its arguments, and the
+ *      trace/evals still record it as a failure. A knowledge-base lookup is
+ *      attached only when the model needs more than the error — see
+ *      shouldGroundValidationError — and identical lookups in a run are
+ *      made once.
  *
  *   3. Transient errors (5xx, timeouts, network, 429 rate limits): retry
- *      with exponential back-off, doing a RAG lookup before each retry
- *      attempt so the model has context even if all retries fail.
+ *      with exponential back-off. No lookup — documentation can't fix an
+ *      outage or a rate limit.
  *
- * Retry history (including what the RAG lookup found) rides along on the
- * eventual result/error so it's visible in the trace, not just to the model.
+ * Retry history (including any lookup findings) rides along on the eventual
+ * result/error so it's visible in the trace, not just to the model.
  *
  * RAG tools never go through this path — they call themselves once and return.
  */
@@ -344,6 +396,7 @@ export async function executeMcpToolWithRetry(
   opts: ExecuteMcpToolWithRetryOptions
 ): Promise<unknown> {
   const { maxRetries, availableNames } = opts;
+  const grounding = opts.grounding ?? createGroundingState();
   const isRagTool = RAG_TOOLS.has(toolName);
 
   if (isRagTool || maxRetries <= 0) {
@@ -375,19 +428,29 @@ export async function executeMcpToolWithRetry(
       }
 
       // TASK 7 — Tier 2: validation error — arguments are wrong, retrying
-      // the same call is pointless. Do the RAG grounding lookup once to give
-      // the model context for fixing its arguments, then fail without
-      // retrying (see the tier list above for why this throws).
+      // the same call is pointless. Fail without retrying (see the tier list
+      // above for why this throws), grounding it first only if needed.
       if (isValidationError(message)) {
-        const ragTool = pickRagTool(toolName, availableNames);
+        const priorFailures = grounding.validationFailures.get(toolName) ?? 0;
+        grounding.validationFailures.set(toolName, priorFailures + 1);
+
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
-        if (ragTool) {
+        const reason = shouldGroundValidationError(priorFailures, message);
+        const ragTool = reason ? pickRagTool(toolName, availableNames) : undefined;
+        if (reason && ragTool) {
           const query = `Tool "${toolName}" failed with validation error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What are the correct argument values or constraints?`;
-          record.raggedBefore = { tool: ragTool, query };
+          record.raggedBefore = { tool: ragTool, query, reason };
           try {
-            const findings = await callMcpTool(ragTool, { query });
-            record.raggedBefore.judgment = await judgeRagResult(query, findings);
-            record.raggedBefore.findings = summarizeFindingsForRetryHistory(findings);
+            // Keyed on tool + error, not the full query: the same rejection
+            // with slightly different args needs the same docs.
+            const key = `${ragTool}\u0000${toolName}\u0000${message}`;
+            let lookup = grounding.lookups.get(key);
+            if (!lookup) {
+              lookup = callMcpTool(ragTool, { query });
+              grounding.lookups.set(key, lookup);
+              lookup.catch(() => grounding.lookups.delete(key)); // don't cache a failed lookup
+            }
+            record.raggedBefore.findings = summarizeFindingsForRetryHistory(await lookup);
           } catch (ragErr) {
             record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
           }
@@ -399,25 +462,10 @@ export async function executeMcpToolWithRetry(
         );
       }
 
-      // Tier 3: transient error — retry with a RAG grounding lookup first.
+      // Tier 3: transient error — back off and retry.
+      attempts.push({ attempt: attempt + 1, error: message });
       if (attempt < maxRetries) {
-        const ragTool = pickRagTool(toolName, availableNames);
-        const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
-        if (ragTool) {
-          const query = `Tool "${toolName}" failed with error: ${message}. Arguments used: ${summarizeArgsForRagQuery(args)}. What is the correct usage or known constraint here?`;
-          record.raggedBefore = { tool: ragTool, query };
-          try {
-            const findings = await callMcpTool(ragTool, { query });
-            record.raggedBefore.judgment = await judgeRagResult(query, findings);
-            record.raggedBefore.findings = summarizeFindingsForRetryHistory(findings);
-          } catch (ragErr) {
-            record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
-          }
-        }
-        attempts.push(record);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt + 1, message)));
-      } else {
-        attempts.push({ attempt: attempt + 1, error: message });
       }
     }
   }
@@ -471,6 +519,8 @@ export function capToolResult(toolName: string, result: unknown): unknown {
 export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions = {}): ToolSet {
   const maxRetries = opts.maxRetries ?? 1;
   const availableNames = new Set(defs.map((d) => d.name));
+  // One per buildAiTools() call, i.e. per agent run — shared by every tool in it.
+  const grounding = createGroundingState();
   const tools: ToolSet = {};
 
   for (const def of defs) {
@@ -483,7 +533,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
         const result = await executeMcpToolWithRetry(
           def.name,
           (input as Record<string, unknown>) ?? {},
-          { maxRetries, availableNames }
+          { maxRetries, availableNames, grounding }
         );
         return capToolResult(def.name, result);
       },

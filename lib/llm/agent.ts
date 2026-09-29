@@ -69,7 +69,7 @@ export interface RunAgentOptions {
   maxSteps?: number;
   /** How many tools the semantic shortlist pulls in, on top of the always-on set. */
   toolShortlistSize?: number;
-  /** Extra attempts per failed tool call, each preceded by a RAG lookup for context. 0 disables retrying. */
+  /** Extra attempts after a transient (5xx/timeout/429) tool failure, with back-off. 0 disables retrying. */
   toolRetries?: number;
   /**
    * Health tracker used to route around models failing on provider-side access/auth/quota errors.

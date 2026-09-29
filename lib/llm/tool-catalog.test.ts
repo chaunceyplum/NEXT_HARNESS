@@ -5,6 +5,7 @@ import {
   isAdobeScoped,
   isNonRetryableError,
   isRateLimitError,
+  isUninformativeError,
   isValidationError,
   pickRagTool,
   summarizeArgsForRagQuery,
@@ -183,5 +184,19 @@ describe('isRateLimitError', () => {
 describe('capToolResult', () => {
   it('passes through undefined results instead of throwing', () => {
     expect(capToolResult('t', undefined)).toBeUndefined();
+  });
+});
+
+describe('isUninformativeError', () => {
+  it('flags bare status lines', () => {
+    for (const m of ['400: Bad Request', '422 Unprocessable Entity', 'HTTP 404 Not Found', 'Validation error']) {
+      expect(isUninformativeError(m), m).toBe(true);
+    }
+  });
+
+  it('does not flag errors that name what is wrong', () => {
+    for (const m of ['422: field "meta:class" is required', '400: segment name already exists', '404: schema _tenant.loyalty not found']) {
+      expect(isUninformativeError(m), m).toBe(false);
+    }
   });
 });
