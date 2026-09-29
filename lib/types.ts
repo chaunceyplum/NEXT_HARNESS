@@ -55,6 +55,13 @@ export interface BuildRequest {
    * the server default.
    */
   maxSteps?: number;
+  /**
+   * Server-set when this run resumes an interrupted one: what the earlier
+   * attempt already did, appended to the request. Never read from the body.
+   */
+  resumeContext?: string;
+  /** Server-set: the interrupted run this one resumes. */
+  resumedFrom?: string;
   /** Token budget for this run. Can only tighten RUN_MAX_TOKENS. */
   maxTokens?: number;
   /** Estimated-cost ceiling (USD) for this run. Can only tighten RUN_MAX_COST_USD. */
@@ -111,6 +118,8 @@ export interface BuildResponse {
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  /** Present on a record saved mid-run (status 'running' or 'interrupted'). */
+  checkpoint?: { schemaVersion: number; step: number; savedAt: string };
   /**
    * Quality judgments for a sample of the run's knowledge searches, scored
    * off the critical path by the RAG judge. Absent on runs from before this
@@ -175,7 +184,12 @@ export interface RunSummary {
   description: string;
   model: string;
   allowFullBuild: boolean;
-  status: 'completed' | 'failed';
+  /**
+   * running: in progress (checkpointed after every step). interrupted: the
+   * server stopped while it was running (marked on the next start); it can
+   * be resumed from /results/[id].
+   */
+  status: 'completed' | 'failed' | 'running' | 'interrupted';
   durationMs: number;
   toolsConsidered?: string[];
   executionId?: string;

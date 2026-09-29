@@ -340,6 +340,32 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
+## Durable runs (`lib/run-jobs.ts`, `lib/build-run.ts`)
+
+Runs are jobs, not HTTP requests:
+
+- **Detached:** `POST /api/build` starts the run and streams its events,
+  but closing the tab or losing the connection doesn't stop it. The page
+  reconnects automatically. `/?run=<id>` attaches to a live run, and
+  `GET /api/runs/:id/events?after=<seq>` replays the buffered events and
+  then streams live ones.
+- **Explicit stop:** the Stop button calls `POST /api/runs/:id/cancel`; the
+  kill switch still stops everything.
+- **Checkpoints:** the run record is saved as `running` after every step.
+  On startup, `instrumentation.ts` marks runs left `running` by the
+  previous process as `interrupted`.
+- **Resume:** interrupted and failed runs show **Resume** on
+  `/results/[id]` (`POST /api/runs/:id/resume`). This starts a new run with
+  the same request plus what the earlier attempt already did, told not to
+  repeat completed changes (continuation by context, not by replaying the
+  model's exact messages).
+- Finished runs stay reconnectable for 15 minutes, then only the saved
+  record remains.
+
+This assumes a single Node process (like approvals and the kill switch).
+Running several app instances needs a shared queue and event store (e.g.
+Postgres or Redis) behind the same interfaces.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
