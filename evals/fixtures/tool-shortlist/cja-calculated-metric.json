@@ -1,0 +1,5 @@
+{
+  "id": "cja-calculated-metric",
+  "request": "Add a Customer Journey Analytics calculated metric for average order value (revenue divided by orders).",
+  "expectedTools": ["cja_create_calculated_metric"]
+}

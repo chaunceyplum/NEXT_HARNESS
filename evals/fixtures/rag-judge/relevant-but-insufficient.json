@@ -1,0 +1,12 @@
+{
+  "id": "relevant-but-insufficient",
+  "note": "On-topic (batch ingestion) but doesn't contain the specific limits asked for — relevance and sufficiency must be judged independently.",
+  "query": "What is the maximum file size and maximum number of files per batch for AEP batch ingestion?",
+  "output": {
+    "results": [
+      { "title": "Batch ingestion overview", "content": "Batch ingestion lets you ingest data into Adobe Experience Platform as batches. Create a batch, upload one or more files to it, then signal completion so the batch is promoted." },
+      { "title": "Supported file formats", "content": "Batch ingestion supports Parquet, JSON, and CSV files." }
+    ]
+  },
+  "expected": { "verdictOneOf": ["weak", "poor"], "sufficient": false, "relevanceMin": 2 }
+}

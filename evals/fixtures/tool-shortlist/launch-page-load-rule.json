@@ -1,0 +1,5 @@
+{
+  "id": "launch-page-load-rule",
+  "request": "In our Launch property, add a rule that fires an Analytics beacon on every page load.",
+  "expectedTools": ["reactor_create_rule", "reactor_create_rule_component"]
+}

@@ -64,6 +64,22 @@ the RAG judge's enable/disable gate. Deliberately doesn't hit the live MCP
 server, a real chat model, or a real embedding provider — those need
 credentials this suite shouldn't require just to run.
 
+## Evals
+
+```bash
+npm run eval:shortlist   # does tool shortlisting surface the right tools? (live MCP catalog)
+npm run eval:agent       # does the real agent loop behave? (real model, scripted tools)
+npm run eval:rag-judge   # does the RAG judge agree with a human?
+npm run eval:all
+```
+
+Separate from `npm test`: evals call the real, configured model / embedding
+provider / MCP endpoint against hand-reviewed fixtures in `evals/fixtures/`,
+so they cost money and aren't deterministic. Results print as a table and
+are saved to the MCP server's database, browsable at `/evals`. See
+[`evals/README.md`](./evals/README.md) for what each suite checks and how to
+add fixtures.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

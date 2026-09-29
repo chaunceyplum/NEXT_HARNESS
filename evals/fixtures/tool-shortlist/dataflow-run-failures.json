@@ -1,0 +1,5 @@
+{
+  "id": "dataflow-run-failures",
+  "request": "Did any of the recent runs of our S3 source dataflow fail? Show me the run history.",
+  "expectedTools": ["flow_list_runs"]
+}

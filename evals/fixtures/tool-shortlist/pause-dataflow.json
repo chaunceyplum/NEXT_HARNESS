@@ -1,0 +1,6 @@
+{
+  "id": "pause-dataflow",
+  "note": "Phrased as 'pause' — the tool is named flow_disable, so this checks the shortlist isn't just matching on names.",
+  "request": "Pause the Salesforce ingestion dataflow until we fix the mapping.",
+  "expectedTools": ["flow_disable"]
+}

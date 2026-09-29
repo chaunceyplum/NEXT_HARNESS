@@ -17,7 +17,7 @@
  * narrow tool calls.
  */
 
-import { generateText, stepCountIs } from 'ai';
+import { generateText, stepCountIs, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel } from './model-registry';
 import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-catalog';
 import { shortlistTools } from './tool-retrieval';
@@ -48,6 +48,8 @@ export interface AgentRunResult {
   toolsConsidered: string[];
   finishReason: string;
   usage: TokenUsage;
+  /** Model registry key that actually produced the result — differs from the requested one after a same-tier fallback. */
+  modelKey: string;
 }
 
 export interface RunAgentOptions {
@@ -67,18 +69,22 @@ export interface RunAgentOptions {
    * modelKey) — a pinned model still surfaces its own error.
    */
   modelHealth?: ModelHealthTracker;
+  /**
+   * A pre-built tool set to hand the model instead of shortlisting from the
+   * live MCP catalog. Skips tools/list and tool-shortlisting entirely. Used
+   * by the agent eval (evals/agent.eval.ts) to grade the real loop — system
+   * prompt, step limit, model fallback, trace mapping — against scripted
+   * tools, without touching a live platform. Not exposed via /api/build.
+   */
+  tools?: ToolSet;
 }
 
-export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
-  const {
-    userInput,
-    modelKey,
-    maxSteps = 20,
-    toolShortlistSize = 24,
-    toolRetries = 1,
-    modelHealth = defaultModelHealth,
-  } = opts;
-
+/** Shortlist the live MCP catalog down to the tools relevant to this request (plus the always-on set). */
+async function selectLiveTools(
+  userInput: string,
+  toolShortlistSize: number,
+  toolRetries: number
+): Promise<{ tools: ToolSet; toolsConsidered: string[] }> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
 
@@ -96,7 +102,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     .map((name) => catalogByName.get(name))
     .filter((d): d is McpToolDefinition => Boolean(d));
 
-  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
+  return {
+    tools: buildAiTools(selectedDefs, { maxRetries: toolRetries }),
+    toolsConsidered: [...selectedNames],
+  };
+}
+
+export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
+  const {
+    userInput,
+    modelKey,
+    maxSteps = 20,
+    toolShortlistSize = 24,
+    toolRetries = 1,
+    modelHealth = defaultModelHealth,
+  } = opts;
+
+  const { tools, toolsConsidered } = opts.tools
+    ? { tools: opts.tools, toolsConsidered: Object.keys(opts.tools) }
+    : await selectLiveTools(userInput, toolShortlistSize, toolRetries);
 
   // Whether the caller pinned a specific model. Pinned requests surface their
   // own provider errors verbatim; only unpinned (default-model) requests get
@@ -191,8 +215,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   return {
     finalText: result.text,
     steps,
-    toolsConsidered: [...selectedNames],
+    toolsConsidered,
     finishReason: result.finishReason,
+    modelKey: resolvedModelKey,
     usage: {
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,

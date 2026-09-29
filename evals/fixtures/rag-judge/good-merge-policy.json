@@ -1,0 +1,13 @@
+{
+  "id": "good-merge-policy",
+  "query": "Which merge policy is required for edge segmentation?",
+  "output": {
+    "results": [
+      {
+        "title": "Edge segmentation",
+        "content": "Edge segmentation evaluates audiences on the Edge Network. Only the merge policy marked 'Active-On-Edge' is used for edge evaluation; audiences using any other merge policy are not evaluated on the edge. Only one merge policy per sandbox can be marked Active-On-Edge."
+      }
+    ]
+  },
+  "expected": { "verdictOneOf": ["good"], "sufficient": true, "relevanceMin": 4 }
+}
