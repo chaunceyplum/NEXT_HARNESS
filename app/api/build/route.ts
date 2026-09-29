@@ -38,6 +38,8 @@
  */
 
 import { parseRolloutMode } from '@/lib/llm/approval-policy';
+import { planFirstByDefault } from '@/lib/llm/planner';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
 import { getModelRegistry } from '@/lib/llm/model-registry';
 import { checkInput } from '@/lib/llm/guardrails';
 import { runsBlockedReason } from '@/lib/kill-switch';
@@ -87,7 +89,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
   }
   const description = input.text;
 
-  if (b.model !== undefined) {
+  if (b.model !== undefined && b.model !== AUTO_MODEL) {
     const known = getModelRegistry().some((e) => e.key === b.model);
     if (!known) {
       return {
@@ -172,7 +174,8 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     ok: true,
     req: {
       description,
-      model: typeof b.model === 'string' ? b.model : undefined,
+      // "auto" routes per request (lib/llm/model-router.ts); MODEL_ROUTING=true makes it the default.
+      model: typeof b.model === 'string' ? b.model : routingEnabledByDefault() ? AUTO_MODEL : undefined,
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
       maxSteps: typeof b.maxSteps === 'number' ? b.maxSteps : undefined,
@@ -180,6 +183,9 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
+      planFirst: typeof b.planFirst === 'boolean' ? b.planFirst : planFirstByDefault(),
+      // A request can ask for plan approval; PLAN_APPROVAL=true requires it for every planned run.
+      requirePlanApproval: b.requirePlanApproval === true || process.env.PLAN_APPROVAL?.trim().toLowerCase() === 'true',
       rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
     },

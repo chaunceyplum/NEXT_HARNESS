@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
 import AuditTrail from '@/components/AuditTrail';
 
@@ -201,6 +202,8 @@ export default function RunDetailPage() {
               </div>
             )}
 
+            {record.result?.plan && <PlanView plan={record.result.plan} />}
+
             {record.result && (
               <AgentTrace
                 steps={record.result.steps}
@@ -209,6 +212,7 @@ export default function RunDetailPage() {
                 finalText={record.result.finalText}
                 usage={record.result.usage}
                 stopReason={record.result.stopReason}
+                critique={record.result.critique}
               />
             )}
 

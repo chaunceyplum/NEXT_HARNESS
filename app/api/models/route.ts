@@ -7,6 +7,7 @@
  */
 
 import { getDefaultModelKey, getModelRegistry } from '@/lib/llm/model-registry';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
 import { ModelOption } from '@/lib/types';
 
 export async function GET(): Promise<Response> {
@@ -16,5 +17,10 @@ export async function GET(): Promise<Response> {
     tier: entry.tier,
   }));
 
-  return Response.json({ models: options, defaultModel: getDefaultModelKey() }, { status: 200 });
+  // "auto" routes each request to a tier (lib/llm/model-router.ts).
+  const auto: ModelOption = { key: AUTO_MODEL, label: 'Auto (route by request: cheap / balanced / strong)', tier: 'balanced' };
+  return Response.json(
+    { models: [auto, ...options], defaultModel: routingEnabledByDefault() ? AUTO_MODEL : getDefaultModelKey() },
+    { status: 200 }
+  );
 }

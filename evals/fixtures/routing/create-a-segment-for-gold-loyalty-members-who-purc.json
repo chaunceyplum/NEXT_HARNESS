@@ -1,0 +1,5 @@
+{
+  "id": "create-a-segment-for-gold-loyalty-members-who-purc",
+  "request": "Create a segment for gold loyalty members who purchased in the last 30 days",
+  "expected": "change"
+}

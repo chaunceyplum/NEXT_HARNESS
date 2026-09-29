@@ -1,0 +1,5 @@
+{
+  "id": "set-up-a-new-xdm-schema-with-the-loyalty-field-gro",
+  "request": "Set up a new XDM schema with the loyalty field group, create a dataset for it, enable it for Profile, and then create a segment on top",
+  "expected": "build"
+}

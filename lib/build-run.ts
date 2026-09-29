@@ -12,10 +12,14 @@ import { getDefaultModelKey } from '@/lib/llm/model-registry';
 import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveExecution } from '@/lib/execution-store';
 import { createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
 import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
+import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
 import type { AgentStepDTO, BuildRequest, ExecutionRecord } from '@/lib/types';
+
+/** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
+const PLAN_APPROVAL_ID = 'plan';
 
 export function startBuildRun(req: BuildRequest, actor: string): RunJob {
   console.log('[BUILD] Running agent for:', req.description.slice(0, 80));
@@ -133,6 +137,23 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           steps.length = 0;
           push({ type: 'restart', fromModelKey, toModelKey });
         },
+        // Deployment memory records which run and user saved a fact
+        runId,
+        actor,
+        // Plan-and-execute: the plan, then every status change and revision
+        planFirst: req.planFirst,
+        onPlan: (plan) => push({ type: 'plan', plan: redactOutput(plan) }),
+        ...(req.requirePlanApproval
+          ? {
+              approvePlan: async (plan) => {
+                push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
+                const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
+                push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
+                return decision;
+              },
+            }
+          : {}),
+        onRoute: (route) => push({ type: 'route', route }),
         // TASK 9: flagged calls wait here for the user's decision
         approveTool: async ({ toolCallId, toolName, input, reason }) => {
           push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
@@ -155,8 +176,20 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         },
       });
 
+      // Grounding check (answer-critic.ts): the final answer is checked
+      // against the tool results; CRITIC_MODE=revise also fixes it once.
+      const critiqued = await critiqueAnswer({
+        task: req.description,
+        answer: rawResult.finalText,
+        steps: rawResult.steps,
+        modelKey: rawResult.modelKey,
+      });
+      const checked: typeof rawResult & { critique?: Critique } = critiqued
+        ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }
+        : rawResult;
+
       // Output guardrail: nothing leaves the server (stream or run history) unredacted.
-      const agentResult = redactOutput(rawResult);
+      const agentResult = redactOutput(checked);
 
       console.log('[BUILD] Agent finished:', {
         runId,
@@ -176,6 +209,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         toolsConsidered: agentResult.toolsConsidered,
         stopReason: agentResult.stopReason,
         budgetUsage: agentResult.budgetUsage,
+        critique: agentResult.critique,
       });
 
       save({
@@ -198,6 +232,9 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           stopReason: agentResult.stopReason,
           budgetUsage: agentResult.budgetUsage,
           ragJudgments: agentResult.ragJudgments,
+          plan: agentResult.plan,
+          critique: agentResult.critique,
+          route: agentResult.route,
         },
       });
       // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.

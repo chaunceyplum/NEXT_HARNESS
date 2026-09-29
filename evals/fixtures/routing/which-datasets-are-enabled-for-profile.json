@@ -1,0 +1,5 @@
+{
+  "id": "which-datasets-are-enabled-for-profile",
+  "request": "Which datasets are enabled for Profile?",
+  "expected": "lookup"
+}

@@ -1,0 +1,5 @@
+{
+  "id": "disable-the-dataflow-for-the-legacy-sftp-source",
+  "request": "Disable the dataflow for the legacy SFTP source",
+  "expected": "change"
+}
