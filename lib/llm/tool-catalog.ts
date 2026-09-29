@@ -93,12 +93,12 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
 }
 
 /** Local tools first (no network round-trip), then the MCP server — with the pre-commit syntax check gating msb_github_commit_code either way. */
-async function callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+async function callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (isLocalTool(toolName)) {
-    return executeLocalTool(toolName, args);
+    return executeLocalTool(toolName, args, signal);
   }
   await validateBeforeCommit(toolName, args);
-  return callMcpTool(toolName, args);
+  return callMcpTool(toolName, args, { signal });
 }
 
 /** Force the next getMcpToolCatalog() call to refetch (e.g. after MCP redeploy). */
@@ -187,10 +187,31 @@ export function isRateLimitError(message: string): boolean {
   return RATE_LIMIT_ERROR_PATTERNS.some((re) => re.test(message));
 }
 
-/** Back-off before transient retry N (1-based): 500ms, 1s, 2s…; longer for rate limits. */
-function retryDelayMs(attempt: number, message: string): number {
+/**
+ * Back-off before transient retry N (1-based): 500ms, 1s, 2s…; longer for
+ * rate limits. Jittered to 50–100% of that, so concurrent runs that failed
+ * together don't all retry in the same instant.
+ */
+export function retryDelayMs(attempt: number, message: string, random: () => number = Math.random): number {
   const base = isRateLimitError(message) ? 2_000 : 500;
-  return base * 2 ** (attempt - 1);
+  const ceiling = base * 2 ** (attempt - 1);
+  return Math.round(ceiling * (0.5 + random() * 0.5));
+}
+
+/** setTimeout as a promise that rejects early (with the abort reason) if `signal` fires. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -361,6 +382,8 @@ export interface ExecuteMcpToolWithRetryOptions {
   availableNames: Set<string>;
   /** Per-run lookup state (see GroundingState). A fresh one is used if omitted. */
   grounding?: GroundingState;
+  /** The run was stopped: abort the in-flight request and skip any remaining retries. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -395,12 +418,12 @@ export async function executeMcpToolWithRetry(
   args: Record<string, unknown>,
   opts: ExecuteMcpToolWithRetryOptions
 ): Promise<unknown> {
-  const { maxRetries, availableNames } = opts;
+  const { maxRetries, availableNames, abortSignal } = opts;
   const grounding = opts.grounding ?? createGroundingState();
   const isRagTool = RAG_TOOLS.has(toolName);
 
   if (isRagTool || maxRetries <= 0) {
-    const result = await callTool(toolName, args);
+    const result = await callTool(toolName, args, abortSignal);
     return isRagTool ? withRagJudgment(toolName, args, result) : result;
   }
 
@@ -409,7 +432,7 @@ export async function executeMcpToolWithRetry(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const result = await callTool(toolName, args);
+      const result = await callTool(toolName, args, abortSignal);
       if (attempts.length === 0) return result;
       // Succeeded after retrying — attach retry history without
       // disturbing the shape callers rely on for reading fields directly
@@ -420,6 +443,8 @@ export async function executeMcpToolWithRetry(
       return result;
     } catch (err) {
       lastError = err;
+      // Stopped by the caller — not a failure of the tool, never retried.
+      if (abortSignal?.aborted) throw err;
       const message = err instanceof Error ? err.message : String(err);
 
       // Tier 1: permanent auth/permission error — fail immediately.
@@ -446,7 +471,7 @@ export async function executeMcpToolWithRetry(
             const key = `${ragTool}\u0000${toolName}\u0000${message}`;
             let lookup = grounding.lookups.get(key);
             if (!lookup) {
-              lookup = callMcpTool(ragTool, { query });
+              lookup = callMcpTool(ragTool, { query }, { signal: abortSignal });
               grounding.lookups.set(key, lookup);
               lookup.catch(() => grounding.lookups.delete(key)); // don't cache a failed lookup
             }
@@ -465,7 +490,7 @@ export async function executeMcpToolWithRetry(
       // Tier 3: transient error — back off and retry.
       attempts.push({ attempt: attempt + 1, error: message });
       if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt + 1, message)));
+        await sleep(retryDelayMs(attempt + 1, message), abortSignal);
       }
     }
   }
@@ -529,11 +554,11 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       // MCP inputSchema is already JSON Schema; jsonSchema() takes it as-is
       // without requiring a hand-written Zod schema per tool.
       inputSchema: jsonSchema(def.inputSchema as never),
-      execute: async (input: unknown) => {
+      execute: async (input: unknown, { abortSignal }) => {
         const result = await executeMcpToolWithRetry(
           def.name,
           (input as Record<string, unknown>) ?? {},
-          { maxRetries, availableNames, grounding }
+          { maxRetries, availableNames, grounding, abortSignal }
         );
         return capToolResult(def.name, result);
       },

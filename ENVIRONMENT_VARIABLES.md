@@ -219,6 +219,20 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Tool call timeouts (`lib/fetch-timeout.ts`)
+
+Every outbound request in the tool path has a deadline. A timeout surfaces
+as `… timed out after Ns (timeout)`, which the retry logic treats as
+transient. Stopping a run aborts its in-flight tool requests and skips
+remaining retries. Retry back-off is jittered (50–100% of 500ms·2ⁿ, or
+2s·2ⁿ for rate limits).
+
+| Variable | Default | Applies to |
+| --- | --- | --- |
+| `MCP_TOOL_TIMEOUT_MS` | `60000` | Each MCP `tools/call` |
+| `MCP_LIST_TIMEOUT_MS` | `30000` | MCP `tools/list` |
+| `GITHUB_TIMEOUT_MS` | `30000` | `github_read_file` / `github_list_directory` |
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
