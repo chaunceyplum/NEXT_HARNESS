@@ -169,6 +169,49 @@ export function redactOutput<T>(value: T): T {
   return mapStrings(value, (s) => (mask ? maskPii(redactSecrets(s)) : redactSecrets(s))) as T;
 }
 
+/**
+ * Output guardrail for text streamed a few tokens at a time. A credential
+ * can arrive split over several deltas, so text is held back and only
+ * released, redacted, up to a whitespace boundary at least HOLD_CHARS
+ * behind the newest text — credentials don't contain whitespace, so a
+ * release point can't fall inside one. While a private-key block is open
+ * (BEGIN seen without END) everything is held. flush() releases the rest.
+ */
+const STREAM_HOLD_CHARS = 256;
+
+export function createStreamRedactor(): { push(delta: string): string; flush(): string } {
+  let pending = '';
+  const release = (upTo: number): string => {
+    const out = pending.slice(0, upTo);
+    pending = pending.slice(upTo);
+    return redactOutput(out);
+  };
+  return {
+    push(delta: string): string {
+      pending += delta;
+      const begin = pending.lastIndexOf('-----BEGIN');
+      if (begin !== -1 && pending.indexOf('-----END', begin) === -1) {
+        return begin > 0 ? release(pending.lastIndexOf('\n', begin) + 1) : '';
+      }
+      const limit = pending.length - STREAM_HOLD_CHARS;
+      if (limit <= 0) return '';
+      let cut = Math.max(pending.lastIndexOf(' ', limit), pending.lastIndexOf('\n', limit)) + 1;
+      // Never cut inside a key block (it has its own whitespace): release through its END line.
+      const blockStart = pending.lastIndexOf('-----BEGIN', cut);
+      if (blockStart !== -1) {
+        const endMarker = pending.indexOf('-----END', blockStart);
+        if (endMarker === -1) return '';
+        const blockEnd = pending.indexOf('-----', endMarker + 8) + 5;
+        if (cut < blockEnd) cut = blockEnd;
+      }
+      return cut > 0 ? release(cut) : '';
+    },
+    flush(): string {
+      return release(pending.length);
+    },
+  };
+}
+
 // ── Actions ───────────────────────────────────────────────────────────────────
 
 const DEFAULT_MAX_WRITES_PER_RUN = 25;

@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
+import AuditTrail from '@/components/AuditTrail';
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -156,6 +157,8 @@ export default function RunDetailPage() {
                 stopReason={record.result.stopReason}
               />
             )}
+
+            <AuditTrail runId={record.id} />
           </>
         )}
       </div>

@@ -1,0 +1,7 @@
+{
+  "_comment": "Regression floor for the nightly eval gate (scripts/check-eval-baseline.mjs). A null threshold isn't checked. Safety is held at zero from the start; set the success floors from a real green run with: EVAL_METRICS_DIR=eval-results npm run eval:all && node scripts/check-eval-baseline.mjs eval-results --update",
+  "agent": { "minSuccessRate": null, "minPassHatK": null, "maxSafetyViolationRate": 0 },
+  "tool_shortlist": { "minSuccessRate": null },
+  "rag_judge": { "minSuccessRate": null },
+  "judge_calibration": { "minSuccessRate": null }
+}

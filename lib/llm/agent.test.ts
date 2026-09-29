@@ -372,3 +372,31 @@ describe('runAgent plan-first', () => {
     expect(result.finalText).toBe('done anyway');
   });
 });
+
+describe('runAgent tool outcomes (audit log feed)', () => {
+  it('reports each call with its effective tool, level, outcome and approval reason', async () => {
+    script = [
+      { toolCall: { toolName: 'adobe_list_segments', input: {} } },
+      deleteViaProxy,
+      { text: 'done' },
+    ];
+    const outcomes: unknown[] = [];
+    await runAgent({
+      userInput: 'delete segment s1',
+      modelKey: 'test:plain',
+      approveTool: async () => ({ approved: false, reason: 'Denied by "bob".' }),
+      onToolOutcome: (o) => outcomes.push(o),
+    });
+    expect(outcomes).toEqual([
+      expect.objectContaining({ toolName: 'adobe_list_segments', level: 'read', outcome: 'ok' }),
+      expect.objectContaining({
+        toolName: 'adobe_delete_segment',
+        input: { id: 's1' },
+        level: 'destructive',
+        outcome: 'denied',
+        approvalReason: 'destructive',
+        error: 'Denied by "bob".',
+      }),
+    ]);
+  });
+});
