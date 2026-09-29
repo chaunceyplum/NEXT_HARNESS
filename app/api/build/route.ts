@@ -32,6 +32,7 @@
 
 import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
+import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
@@ -272,8 +273,20 @@ export async function POST(request: Request): Promise<Response> {
           },
         });
 
+        // Grounding check (answer-critic.ts): the final answer is checked
+        // against the tool results; CRITIC_MODE=revise also fixes it once.
+        const critiqued = await critiqueAnswer({
+          task: req.description,
+          answer: rawResult.finalText,
+          steps: rawResult.steps,
+          modelKey: rawResult.modelKey,
+        });
+        const checked: typeof rawResult & { critique?: Critique } = critiqued
+          ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }
+          : rawResult;
+
         // Output guardrail: nothing leaves the server (stream or run history) unredacted.
-        const agentResult = redactOutput(rawResult);
+        const agentResult = redactOutput(checked);
 
         console.log('[BUILD] Agent finished:', {
           runId,
@@ -290,6 +303,7 @@ export async function POST(request: Request): Promise<Response> {
           runId,
           modelKey: agentResult.modelKey,
           toolsConsidered: agentResult.toolsConsidered,
+          critique: agentResult.critique,
           stopReason: agentResult.stopReason,
           budgetUsage: agentResult.budgetUsage,
         });
@@ -314,6 +328,7 @@ export async function POST(request: Request): Promise<Response> {
             toolsConsidered: agentResult.toolsConsidered,
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
+            critique: agentResult.critique,
             stopReason: agentResult.stopReason,
             budgetUsage: agentResult.budgetUsage,
             ragJudgments: agentResult.ragJudgments,

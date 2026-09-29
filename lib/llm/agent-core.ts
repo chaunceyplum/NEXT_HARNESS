@@ -77,7 +77,7 @@ export function systemPrompt(opts: { toolDiscovery?: boolean } = {}): string {
     ...(opts.toolDiscovery
       ? ['- If a step needs a tool that is not in your tool list, call find_tools with a short description of the capability, then run the match with call_tool. Only do this for a concrete gap — not to browse the catalog.']
       : []),
-    '- When it would help, ground yourself first with search_adobe_knowledge before taking action.',
+    '- When it would help, ground yourself first with search_adobe_knowledge before taking action. When your answer relies on knowledge-base results, name the source titles you used. If a search result carries a _retrievalHint, follow it before answering.',
     '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach, and do not run another knowledge-base search hoping a different query surfaces something new. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
     // TASK 4: destructive-scope rule. The human confirmation itself is
     // enforced in code (agent.ts toolApproval) — this keeps the model from

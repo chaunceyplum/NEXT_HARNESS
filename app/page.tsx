@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, ModelOption, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
 import KillSwitch from '@/components/KillSwitch';
 
@@ -10,6 +10,7 @@ import KillSwitch from '@/components/KillSwitch';
 
 interface RunState {
   runId: string;
+  critique?: CritiqueInfo;
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finalText: string;
@@ -179,6 +180,7 @@ export default function Home() {
                   finishReason: event.finishReason,
                   usage: event.usage,
                   stopReason: event.stopReason,
+                  critique: event.critique,
                   done: true,
                 }
               : prev
@@ -394,6 +396,7 @@ export default function Home() {
               finalText={runState.done ? runState.finalText : runState.streamingText}
               usage={runState.done ? runState.usage : undefined}
               stopReason={runState.done ? runState.stopReason : undefined}
+              critique={runState.done ? runState.critique : undefined}
             />
           </div>
         )}

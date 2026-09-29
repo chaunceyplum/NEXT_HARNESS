@@ -340,6 +340,25 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
+## Grounded answers (`lib/llm/answer-critic.ts`, `lib/llm/retrieval-hints.ts`)
+
+- **Answer critic:** after a run that used tools, a critic checks the final
+  answer against the tool results. Every claim must be supported, the
+  request must be answered or a blocker stated, and nothing that failed may
+  be claimed as done. The result shows under the answer.
+  - `CRITIC_MODE=flag` (default): check and flag, never rewrite (+1 model call)
+  - `CRITIC_MODE=revise`: on failure, rewrite once from the critic's
+    issues, then re-check. Hard cap of one revision. A revision that still
+    fails is returned flagged (up to +3 calls).
+  - `CRITIC_MODE=off`
+  - `CRITIC_MODEL`: model for the critic and the revision (default: the run's model)
+- **Retrieval hints:** a knowledge search that returns nothing, or results
+  sharing almost none of the query's key terms, gets a `_retrievalHint`
+  telling the model to rewrite the query and search once more (or say
+  there's no documentation), instead of answering from memory. The system
+  prompt also asks for source titles when the answer relies on the
+  knowledge base.
+
 ## Execution history / replay (lib/execution-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
