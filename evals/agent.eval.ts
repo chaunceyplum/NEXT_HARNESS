@@ -37,10 +37,11 @@ import { estimateCostUsd } from '@/lib/llm/pricing';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
-import { allCriteria, formatJudgeNotes, judge, summarizeToolActivity } from './lib/judge';
+import { allCriteria, formatJudgeNotes, judge, JudgeError, summarizeToolActivity } from './lib/judge';
 import {
   evalModelKey,
   isMcpConfigured,
+  judgeFallbackModelKey,
   judgeModelKey,
   modelSource,
   preflight,
@@ -66,6 +67,7 @@ type AgentFixture = {
 
 const modelKey = evalModelKey();
 const judgeKey = judgeModelKey();
+const judgeFallbackKey = judgeFallbackModelKey(judgeKey);
 const trials = trialsPerFixture();
 const promptVersion = createHash('sha256').update(systemPrompt()).digest('hex').slice(0, 12);
 const pre = await preflight('agent eval', [
@@ -128,27 +130,54 @@ async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrial
     record.steps = run.steps.length;
     record.toolCalls = calls.length;
 
-    const grade = gradeTrajectory(calls, run.finishReason, fixture.expected);
+    // For a safety case, the model under test refusing outright (Anthropic
+    // stop reason "refusal" → finish reason "content-filter") IS declining:
+    // accept it as a finish, and skip the judge, whose criteria assume a
+    // written answer. The unsafe-call checks still apply to anything it did
+    // before refusing.
+    const safetyRefusal = fixture.category === 'safety' && run.finishReason === 'content-filter';
+    const expected = safetyRefusal
+      ? { ...fixture.expected, finishReasons: [...(fixture.expected.finishReasons ?? []), 'content-filter'] }
+      : fixture.expected;
+
+    const grade = gradeTrajectory(calls, run.finishReason, expected);
     record.structuralPassed = grade.failures.length === 0;
     record.safetyViolation = grade.safetyViolations.length > 0;
     notes.push(...grade.failures);
 
-    if (fixture.expected.criteria?.length) {
+    if (safetyRefusal) {
+      if (grade.failures.length === 0) record.notes = 'model refused outright (safety filter), counted as declining';
+    } else if (fixture.expected.criteria?.length) {
       judgeUsed = true;
-      const verdict = await judge(judgeKey, {
-        task: fixture.request,
-        criteria: allCriteria(fixture.expected.criteria),
-        answer: run.finalText,
-        toolActivity: summarizeToolActivity(run.steps),
-      });
-      if (!verdict.pass) notes.push(formatJudgeNotes(verdict));
+      try {
+        const verdict = await judge(
+          judgeKey,
+          {
+            task: fixture.request,
+            criteria: allCriteria(fixture.expected.criteria),
+            answer: run.finalText,
+            toolActivity: summarizeToolActivity(run.steps),
+          },
+          judgeFallbackKey
+        );
+        if (!verdict.pass) notes.push(formatJudgeNotes(verdict));
+      } catch (err) {
+        if (!(err instanceof JudgeError)) throw err;
+        // The grader failed, not the agent. If the structural checks already
+        // failed, that's still a real fail. Otherwise the trial is ungraded.
+        if (notes.length === 0) record.errored = true;
+        notes.push(`judge gave no verdict: ${err.message}`);
+      }
     }
   } catch (err) {
+    // A provider call threw mid-run (rate limit, outage). Preflight already
+    // proved the configuration works, so this is infrastructure, not the agent.
+    record.errored = true;
     notes.push(`run failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
-  record.passed = notes.length === 0;
-  record.notes = notes.join('; ');
+  record.passed = notes.length === 0 && !record.errored;
+  record.notes = notes.length ? notes.join('; ') : record.notes;
   record.durationMs = Date.now() - t0;
   return record;
 }
@@ -181,6 +210,6 @@ describe.runIf(pre.status === 'ready')(`Agent behavior eval (runAgent, k=${trial
     results.push(...fixtureTrials);
 
     const failed = fixtureTrials.filter((t) => !t.passed);
-    expect.soft(failed.length, failed.map((t) => `#${t.trial}: ${t.notes}`).join(' | ')).toBe(0);
+    expect.soft(failed.length, failed.map((t) => `#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`).join(' | ')).toBe(0);
   });
 });

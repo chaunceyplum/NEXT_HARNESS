@@ -19,7 +19,7 @@ import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
 import { allCriteria, formatJudgeNotes, judge } from './lib/judge';
-import { judgeModelKey, modelSource, preflight, trialsPerFixture, warnSkip } from './lib/env';
+import { judgeFallbackModelKey, judgeModelKey, modelSource, preflight, trialsPerFixture, warnSkip } from './lib/env';
 
 type JudgeFixture = {
   id: string;
@@ -32,6 +32,7 @@ type JudgeFixture = {
 };
 
 const judgeKey = judgeModelKey();
+const fallbackKey = judgeFallbackModelKey(judgeKey);
 const trials = trialsPerFixture();
 const pre = await preflight('judge calibration eval', [{ role: 'judge', key: judgeKey, source: modelSource('judge') }]);
 if (pre.status === 'skip') warnSkip('judge calibration eval', pre.reason);
@@ -63,24 +64,28 @@ describe.runIf(pre.status === 'ready')(`Judge calibration eval (k=${trials})`, (
     for (let trial = 1; trial <= trials; trial++) {
       const t0 = Date.now();
       let passed = false;
+      let errored = false;
       let notes: string;
       try {
-        const verdict = await judge(judgeKey, {
-          task: fixture.task,
-          criteria: allCriteria(fixture.criteria),
-          answer: fixture.answer,
-          toolActivity: fixture.toolActivity,
-        });
+        const verdict = await judge(
+          judgeKey,
+          { task: fixture.task, criteria: allCriteria(fixture.criteria), answer: fixture.answer, toolActivity: fixture.toolActivity },
+          fallbackKey
+        );
         const judged = verdict.pass ? 'pass' : 'fail';
         passed = judged === fixture.humanVerdict;
-        notes = passed ? '' : `human said ${fixture.humanVerdict}, judge said ${judged} — ${formatJudgeNotes(verdict)}`;
+        const by = verdict.fallbackReason ? `judged by fallback ${verdict.judgedBy} (${verdict.fallbackReason})` : '';
+        notes = passed ? by : `human said ${fixture.humanVerdict}, judge said ${judged} — ${formatJudgeNotes(verdict)}`;
       } catch (err) {
-        notes = `judge call failed: ${err instanceof Error ? err.message : String(err)}`;
+        // No verdict at all: the grader failed, not the calibration. Excluded from agreement.
+        errored = true;
+        notes = `no verdict: ${err instanceof Error ? err.message : String(err)}`;
       }
-      fixtureTrials.push({ fixtureId: fixture.id, trial, passed, notes, durationMs: Date.now() - t0 });
+      fixtureTrials.push({ fixtureId: fixture.id, trial, passed, errored, notes, durationMs: Date.now() - t0 });
     }
     results.push(...fixtureTrials);
+    // Errored trials still fail the test run (loudly) even though the metrics exclude them.
     const failed = fixtureTrials.filter((t) => !t.passed);
-    expect.soft(failed.length, failed.map((t) => `#${t.trial}: ${t.notes}`).join(' | ')).toBe(0);
+    expect.soft(failed.length, failed.map((t) => `#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`).join(' | ')).toBe(0);
   });
 });

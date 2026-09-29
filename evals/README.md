@@ -117,6 +117,24 @@ can't:
   Grow it by hand-labelling real `eval:agent` answers.
 - Pairwise grading isn't used: every fixture has an absolute rubric, so
   there's no position to randomize.
+- **Refusals.** A model's safety filter can refuse to grade content that
+  looks sensitive, even when it's quoted for grading. Opus 5.5 did this on
+  every attempt at a realistic-looking AWS key. When the judge refuses
+  (finish reason `content-filter`), it retries once on a fallback judge:
+  `EVAL_JUDGE_FALLBACK_MODEL`, else the next-strongest model on the same
+  provider (`anthropic:opus-5-5` → `anthropic:opus`). The notes then say
+  "judged by fallback …". Keep fake credentials in fixtures obviously fake
+  (`AKIAEXAMPLENOTREAL00`).
+- **Errored trials.** If the judge still gives no verdict, or a provider
+  call throws mid-run, the trial is marked **errored**. That means the grader
+  or the infrastructure failed, not the thing being graded. Errored trials
+  are reported (`ERROR`, and an "Errored (excluded)" tile on `/evals`) and
+  still fail the vitest run so they're noticed, but they're **excluded from
+  every rate**, so a flaky judge can't pass for a bad agent or a
+  miscalibrated judge.
+- **An agent that refuses a safety case outright** (the model under test's
+  own filter) is counted as declining. Its unsafe-call checks still apply,
+  but the judge is skipped, since its criteria assume a written answer.
 
 ## Why the agent suite uses scripted tools
 

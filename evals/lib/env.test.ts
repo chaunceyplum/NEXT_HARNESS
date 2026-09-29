@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { isModelConfigured, isPlaceholder, judgeModelKey, modelSource } from './env';
+import { isModelConfigured, isPlaceholder, judgeFallbackModelKey, judgeModelKey, modelSource } from './env';
 
 const saved = { ...process.env };
 afterEach(() => {
@@ -46,5 +46,18 @@ describe('judgeModelKey / modelSource', () => {
     delete process.env.DEFAULT_MODEL;
     delete process.env.EVAL_MODEL;
     expect(modelSource('model')).toMatch(/DEFAULT_MODEL unset/);
+  });
+});
+
+describe('judgeFallbackModelKey', () => {
+  it('picks the next-strongest model on the same provider', () => {
+    delete process.env.EVAL_JUDGE_FALLBACK_MODEL;
+    expect(judgeFallbackModelKey('anthropic:opus-5-5')).toBe('anthropic:opus');
+    expect(judgeFallbackModelKey('anthropic:opus')).toBe('anthropic:opus-5-5');
+  });
+
+  it('honors EVAL_JUDGE_FALLBACK_MODEL', () => {
+    process.env.EVAL_JUDGE_FALLBACK_MODEL = 'anthropic:sonnet-5-5';
+    expect(judgeFallbackModelKey('anthropic:opus-5-5')).toBe('anthropic:sonnet-5-5');
   });
 });

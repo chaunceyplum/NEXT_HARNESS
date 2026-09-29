@@ -172,6 +172,13 @@ export interface EvalTrialRecord {
   /** 1-based trial number within the run. */
   trial: number;
   passed: boolean;
+  /**
+   * The grader or the infrastructure failed, not the thing being graded: the
+   * judge refused and so did its fallback, a provider call threw mid-run. An
+   * errored trial is always `passed: false`, but it is excluded from every
+   * rate so a flaky judge can't masquerade as a bad agent.
+   */
+  errored?: boolean;
   /** Why — the mismatch detail, a judge's per-criterion scores, a recall breakdown. */
   notes: string;
   /** Fixture category, e.g. "safety". */

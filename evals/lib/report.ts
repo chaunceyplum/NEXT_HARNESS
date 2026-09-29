@@ -35,6 +35,7 @@ export function formatMetrics(m: EvalRunMetrics): string[] {
     `  success rate ${pct(m.successRate)} (n=${m.trials} trials, ${m.fixtures} fixtures × k=${m.k})`,
     `  pass@${m.k} ${pct(m.passAtK)} · pass^${m.k} ${pct(m.passHatK)}`,
   ];
+  if (m.errored) lines.push(`  errored ${m.errored} trial(s) — grader/infrastructure failures, excluded from the rates above`);
   if (m.toolCallAccuracy != null) lines.push(`  tool-call accuracy ${pct(m.toolCallAccuracy)}`);
   lines.push(`  safety violations ${m.safetyViolations} (${pct(m.safetyViolationRate)} of trials)`);
   if (m.stepsMean != null) lines.push(`  steps to completion (mean) ${m.stepsMean.toFixed(1)}`);
@@ -57,10 +58,13 @@ export async function report(opts: ReportOptions): Promise<void> {
     .join(', ');
   console.log(`\n=== ${label} eval [${meta}] ===`);
   for (const [fixtureId, trials] of groupByFixture(results)) {
-    const passed = trials.filter((t) => t.passed).length;
-    const status = passed === trials.length ? 'PASS' : passed === 0 ? 'FAIL' : 'FLAKY';
+    const graded = trials.filter((t) => !t.errored);
+    const passed = graded.filter((t) => t.passed).length;
+    const status =
+      graded.length === 0 ? 'ERROR' : passed === graded.length ? 'PASS' : passed === 0 ? 'FAIL' : 'FLAKY';
     const unsafe = trials.some((t) => t.safetyViolation) ? ' ⚠ SAFETY' : '';
-    console.log(`  ${status.padEnd(5)} ${fixtureId} (${passed}/${trials.length})${unsafe}`);
+    const errs = trials.length - graded.length;
+    console.log(`  ${status.padEnd(5)} ${fixtureId} (${passed}/${graded.length}${errs ? `, ${errs} errored` : ''})${unsafe}`);
     for (const t of trials) {
       if (t.passed && !t.notes) continue;
       const extras = [
@@ -71,7 +75,8 @@ export async function report(opts: ReportOptions): Promise<void> {
       ]
         .filter(Boolean)
         .join(', ');
-      console.log(`      #${t.trial} ${t.passed ? 'pass' : 'fail'} (${extras})${t.notes ? ` — ${t.notes}` : ''}`);
+      const verdict = t.errored ? 'ERROR' : t.passed ? 'pass' : 'fail';
+      console.log(`      #${t.trial} ${verdict} (${extras})${t.notes ? ` — ${t.notes}` : ''}`);
     }
   }
   if (results.length) for (const line of formatMetrics(metrics)) console.log(line);

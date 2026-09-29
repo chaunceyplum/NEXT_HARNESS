@@ -22,7 +22,7 @@
  *     prompt or the judge model changes.
  */
 
-import { generateObject } from 'ai';
+import { generateObject, NoObjectGeneratedError } from 'ai';
 import { z } from 'zod';
 import { resolveModel } from '@/lib/llm/model-registry';
 
@@ -46,6 +46,32 @@ export interface JudgeResult {
   scores: CriterionScore[];
   verdict: 'pass' | 'fail';
   reasoning: string;
+  /** Registry key that actually produced the verdict. */
+  judgedBy: string;
+  /** Set when the primary judge produced no verdict and the fallback judged instead. */
+  fallbackReason?: string;
+}
+
+/**
+ * The judge produced no verdict at all: a refusal, an empty response, a
+ * provider error. It's the grader failing, not the answer, so callers record
+ * it as an errored trial that is excluded from rates, not as a fail.
+ */
+export class JudgeError extends Error {}
+
+/** Explain a judge call that produced no verdict, instead of the SDK's generic "No object generated". */
+export function describeJudgeFailure(modelKey: string, err: unknown): { message: string; refused: boolean } {
+  if (NoObjectGeneratedError.isInstance(err)) {
+    const refused = err.finishReason === 'content-filter';
+    const raw = err.text ? `; raw output: ${err.text.slice(0, 200)}` : '; no output';
+    return {
+      refused,
+      message: refused
+        ? `${modelKey} refused to grade this (safety filter, finish reason content-filter)${raw}`
+        : `${modelKey} returned no verdict (finish reason ${err.finishReason ?? 'unknown'})${raw}`,
+    };
+  }
+  return { refused: false, message: `${modelKey} call failed: ${err instanceof Error ? err.message : String(err)}` };
 }
 
 const judgeSchema = z.object({
@@ -84,7 +110,7 @@ export function allCriteria(fixtureCriteria: string[]): string[] {
   return [...fixtureCriteria, ...BASE_CRITERIA];
 }
 
-export async function judge(modelKey: string, input: JudgeInput): Promise<JudgeResult> {
+async function judgeOnce(modelKey: string, input: JudgeInput): Promise<Omit<JudgeResult, 'judgedBy' | 'fallbackReason'>> {
   const { object } = await generateObject({
     model: resolveModel(modelKey),
     schema: judgeSchema,
@@ -111,12 +137,34 @@ export async function judge(modelKey: string, input: JudgeInput): Promise<JudgeR
   return { ...object, pass: complete && allHigh && object.verdict === 'pass' };
 }
 
+/**
+ * Grade one answer. If the primary judge REFUSES (a safety filter tripping
+ * on graded content such as a fake credential), retry once on
+ * `fallbackKey`. The answer still gets a verdict, and the result says who
+ * gave it. Any other failure, or a refusal with no fallback, throws
+ * JudgeError.
+ */
+export async function judge(modelKey: string, input: JudgeInput, fallbackKey?: string): Promise<JudgeResult> {
+  try {
+    return { ...(await judgeOnce(modelKey, input)), judgedBy: modelKey };
+  } catch (err) {
+    const primary = describeJudgeFailure(modelKey, err);
+    if (!primary.refused || !fallbackKey || fallbackKey === modelKey) throw new JudgeError(primary.message);
+    try {
+      return { ...(await judgeOnce(fallbackKey, input)), judgedBy: fallbackKey, fallbackReason: primary.message };
+    } catch (fallbackErr) {
+      throw new JudgeError(`${primary.message}; fallback ${describeJudgeFailure(fallbackKey, fallbackErr).message}`);
+    }
+  }
+}
+
 /** "judge: c1=5 c2=2 ("quote…") — reasoning" — failing criteria carry their evidence. */
 export function formatJudgeNotes(result: JudgeResult): string {
   const parts = result.scores.map((s) =>
     s.score >= PASS_SCORE ? `c${s.criterion}=${s.score}` : `c${s.criterion}=${s.score} ("${s.evidence}")`
   );
-  return `judge ${result.pass ? 'pass' : 'FAIL'}: ${parts.join(' ')} — ${result.reasoning}`;
+  const by = result.fallbackReason ? ` [judged by fallback ${result.judgedBy}: ${result.fallbackReason}]` : '';
+  return `judge ${result.pass ? 'pass' : 'FAIL'}: ${parts.join(' ')} — ${result.reasoning}${by}`;
 }
 
 const MAX_ACTIVITY_CHARS = 6000;

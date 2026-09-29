@@ -72,7 +72,8 @@ function ensureTables(): Promise<void> {
           ADD COLUMN IF NOT EXISTS safety_violation BOOLEAN,
           ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION,
           ADD COLUMN IF NOT EXISTS steps INTEGER,
-          ADD COLUMN IF NOT EXISTS tool_calls INTEGER`.replace(/\s+/g, ' ')
+          ADD COLUMN IF NOT EXISTS tool_calls INTEGER,
+          ADD COLUMN IF NOT EXISTS errored BOOLEAN`.replace(/\s+/g, ' ')
       );
       // The first release keyed rows by (run, fixture); trials need
       // (run, fixture, trial). Dropping a constraint that's already gone and
@@ -135,13 +136,13 @@ export async function saveEvalRun(input: SaveEvalRunInput): Promise<string> {
           `(${sqlStr(id)}, ${sqlStr(r.fixtureId)}, ${sqlInt(r.trial)}, ${sqlBool(r.passed)}, ${sqlStr(r.notes)}, ` +
           `${sqlStrOrNull(r.category)}, ${sqlBoolOrNull(r.structuralPassed)}, ${sqlBoolOrNull(r.safetyViolation)}, ` +
           `${sqlIntOrNull(r.durationMs)}, ${sqlIntOrNull(r.totalTokens)}, ${sqlFloatOrNull(r.costUsd)}, ` +
-          `${sqlIntOrNull(r.steps)}, ${sqlIntOrNull(r.toolCalls)})`
+          `${sqlIntOrNull(r.steps)}, ${sqlIntOrNull(r.toolCalls)}, ${sqlBoolOrNull(r.errored)})`
       )
       .join(', ');
     await execSql(
       `INSERT INTO ${RESULTS_TABLE}
          (eval_run_id, fixture_id, trial, passed, notes, category, structural_passed, safety_violation,
-          duration_ms, total_tokens, cost_usd, steps, tool_calls)
+          duration_ms, total_tokens, cost_usd, steps, tool_calls, errored)
        VALUES ${values}`.replace(/\s+/g, ' ')
     );
   }
@@ -198,6 +199,7 @@ export async function getEvalRun(id: string): Promise<EvalRunDetail | null> {
     fixtureId: r.fixture_id as string,
     trial: Number(r.trial ?? 1),
     passed: r.passed as boolean,
+    errored: bool(r.errored),
     notes: r.notes as string,
     category: (r.category as string | null) ?? undefined,
     structuralPassed: bool(r.structural_passed),
