@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   capRagResult,
+  capToolResult,
   isAdobeScoped,
   isNonRetryableError,
+  isRateLimitError,
+  isValidationError,
   pickRagTool,
   summarizeArgsForRagQuery,
   summarizeFindingsForRetryHistory,
@@ -152,5 +155,33 @@ describe('pickRagTool', () => {
     expect(pickRagTool('msb_github_create_branch', available)).toBeUndefined();
     expect(pickRagTool('github_read_file', available)).toBeUndefined();
     expect(pickRagTool('github_list_directory', available)).toBeUndefined();
+  });
+});
+
+describe('isValidationError', () => {
+  it('matches 4xx argument errors in MCP / HTTP message shapes', () => {
+    for (const m of ['422: {"errorCode":"x"}', 'HTTP 400', 'Request failed with status code 404', 'Schema already exists']) {
+      expect(isValidationError(m), m).toBe(true);
+    }
+  });
+
+  it('does not match bare numbers, rate limits, auth errors, or 5xx', () => {
+    for (const m of ['timed out after 400 ms', 'segment 400123 failed', '429: Too Many Requests', '403: forbidden', '500 Internal Server Error']) {
+      expect(isValidationError(m), m).toBe(false);
+    }
+  });
+});
+
+describe('isRateLimitError', () => {
+  it('treats 429 / rate limit messages as rate limits', () => {
+    expect(isRateLimitError('429: Too Many Requests')).toBe(true);
+    expect(isRateLimitError('Rate limit exceeded')).toBe(true);
+    expect(isRateLimitError('422: bad field')).toBe(false);
+  });
+});
+
+describe('capToolResult', () => {
+  it('passes through undefined results instead of throwing', () => {
+    expect(capToolResult('t', undefined)).toBeUndefined();
   });
 });

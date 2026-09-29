@@ -155,12 +155,12 @@ export function isNonRetryableError(message: string): boolean {
  * isNonRetryableError (401/403/forbidden/unauthorized/permission denied).
  */
 const VALIDATION_ERROR_PATTERNS = [
-  /\b400\b/,   // Bad Request — invalid field, missing required param
-  /\b404\b/,   // Not Found — referenced resource doesn't exist
-  /\b409\b/,   // Conflict — duplicate name, state machine violation
-  /\b410\b/,   // Gone — resource was deleted
-  /\b422\b/,   // Unprocessable Entity — schema/constraint violation (most common)
-  /\b429\b/,   // Too Many Requests — rate limit (don't retry immediately)
+  // A status code only counts at the start of the message (MCP's
+  // `422: {...}` shape) or right after status/code/http/error — a bare
+  // `\b400\b` also matched ids and durations like "timed out after 400 ms".
+  // 400 Bad Request, 404 Not Found, 409 Conflict, 410 Gone, 422 Unprocessable.
+  // 429 is deliberately absent: a rate limit is transient, not bad arguments.
+  /(?:^\s*|\b(?:status|code|http|error)\W{0,3})(?:400|404|409|410|422)\b/i,
   /bad request/i,
   /not found/i,
   /unprocessable/i,
@@ -173,7 +173,24 @@ const VALIDATION_ERROR_PATTERNS = [
 
 export function isValidationError(message: string): boolean {
   if (isNonRetryableError(message)) return false; // auth errors take priority
+  if (isRateLimitError(message)) return false;    // transient — retry instead
   return VALIDATION_ERROR_PATTERNS.some((re) => re.test(message));
+}
+
+const RATE_LIMIT_ERROR_PATTERNS = [
+  /(?:^\s*|\b(?:status|code|http|error)\W{0,3})429\b/i,
+  /too many requests/i,
+  /rate.?limit/i,
+];
+
+export function isRateLimitError(message: string): boolean {
+  return RATE_LIMIT_ERROR_PATTERNS.some((re) => re.test(message));
+}
+
+/** Back-off before transient retry N (1-based): 500ms, 1s, 2s…; longer for rate limits. */
+function retryDelayMs(attempt: number, message: string): number {
+  const base = isRateLimitError(message) ? 2_000 : 500;
+  return base * 2 ** (attempt - 1);
 }
 
 /**
@@ -306,13 +323,15 @@ export interface ExecuteMcpToolWithRetryOptions {
  *
  *   2. Validation errors (400/404/409/422/etc): the arguments are wrong and
  *      retrying the same call cannot fix that. Do the RAG grounding lookup
- *      once to get relevant docs, then return a structured error object with
- *      the findings attached so the model can correct its arguments on the
- *      next step — don't waste a retry attempt.
+ *      once to get relevant docs, then throw immediately with the findings
+ *      in the message — don't waste a retry attempt. The AI SDK hands a
+ *      thrown tool error back to the model as a tool-error result, so it
+ *      still sees the error + docs and can correct its arguments, and the
+ *      trace/evals still record it as a failure.
  *
- *   3. Transient errors (5xx, timeouts, network): retry with exponential
- *      back-off, doing a RAG lookup before each retry attempt so the model
- *      has context even if all retries fail.
+ *   3. Transient errors (5xx, timeouts, network, 429 rate limits): retry
+ *      with exponential back-off, doing a RAG lookup before each retry
+ *      attempt so the model has context even if all retries fail.
  *
  * Retry history (including what the RAG lookup found) rides along on the
  * eventual result/error so it's visible in the trace, not just to the model.
@@ -357,9 +376,8 @@ export async function executeMcpToolWithRetry(
 
       // TASK 7 — Tier 2: validation error — arguments are wrong, retrying
       // the same call is pointless. Do the RAG grounding lookup once to give
-      // the model context for fixing its arguments, then return a structured
-      // error object (not a throw) so the AI SDK surfaces it as a tool result
-      // the model can read and act on rather than an exception that stops the run.
+      // the model context for fixing its arguments, then fail without
+      // retrying (see the tier list above for why this throws).
       if (isValidationError(message)) {
         const ragTool = pickRagTool(toolName, availableNames);
         const record: RetryAttemptRecord = { attempt: attempt + 1, error: message };
@@ -374,14 +392,11 @@ export async function executeMcpToolWithRetry(
             record.raggedBefore.lookupError = ragErr instanceof Error ? ragErr.message : String(ragErr);
           }
         }
-        // Return as a structured object so the model sees the error + docs and
-        // can correct its arguments — throwing would bypass the model entirely.
-        return {
-          _error: message,
-          _validationError: true,
-          _hint: 'This is an argument/validation error, not a transient failure. Fix the arguments and call the tool again.',
-          _ragFindings: record.raggedBefore?.findings,
-        };
+        attempts.push(record);
+        throw new Error(
+          `${toolName} rejected its arguments (validation error — not retried; fix the arguments and call it again): ${message}\n` +
+            `Retry history: ${JSON.stringify(attempts)}`
+        );
       }
 
       // Tier 3: transient error — retry with a RAG grounding lookup first.
@@ -400,6 +415,7 @@ export async function executeMcpToolWithRetry(
           }
         }
         attempts.push(record);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt + 1, message)));
       } else {
         attempts.push({ attempt: attempt + 1, error: message });
       }
@@ -416,7 +432,8 @@ export async function executeMcpToolWithRetry(
 /**
  * Universal cap applied to every tool's result before it's returned to the
  * model. Prevents large list/read payloads from accumulating in context the
- * same way capRagResult() already does for knowledge-search results.
+ * same way capRagResult() already does for knowledge-search results. This is
+ * also what the trace and persisted run record see — there's no uncapped copy.
  *
  * 12 000 chars covers a large list_* response or a moderate read (e.g. a
  * CJA project definition) without truncating typical narrow-tool results
@@ -431,8 +448,9 @@ export async function executeMcpToolWithRetry(
 const MAX_CHARS_PER_TOOL_RESULT = 12_000;
 
 export function capToolResult(toolName: string, result: unknown): unknown {
+  // JSON.stringify returns undefined (not a string) for undefined/functions.
   const json = JSON.stringify(result);
-  if (json.length <= MAX_CHARS_PER_TOOL_RESULT) return result;
+  if (json === undefined || json.length <= MAX_CHARS_PER_TOOL_RESULT) return result;
   return (
     `${json.slice(0, MAX_CHARS_PER_TOOL_RESULT)}… (truncated — ${json.length} chars total. ` +
     `Use more specific arguments to ${toolName} to get a smaller, focused result.)`

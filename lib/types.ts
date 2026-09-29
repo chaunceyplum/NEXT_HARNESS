@@ -68,10 +68,10 @@ export interface BuildRequest {
    */
   dryRun?: boolean;
   /**
-   * TASK 10: Token budget for extended thinking (Anthropic/Bedrock only).
-   * When set, enables the model's internal reasoning before responding.
-   * Minimum 1 000. Good starting point: 8 000–16 000 for complex tasks.
-   * Can also be set globally via THINKING_BUDGET_TOKENS env var.
+   * TASK 10: Extended thinking (Claude via Anthropic/Bedrock only), 1 024–64 000.
+   * On Haiku 4.5 and older it's the thinking token budget (8 000–16 000 is a
+   * good start); newer models only take adaptive thinking, so there any value
+   * just switches it on. Can also be set globally via THINKING_BUDGET_TOKENS.
    */
   thinkingBudget?: number;
 }
@@ -89,12 +89,23 @@ export interface BuildResponse {
 // ── TASK 8: Streaming event types ─────────────────────────────────────────────
 // POST /api/build returns a streaming response of newline-delimited JSON events.
 // Each line is one BuildStreamEvent. The client accumulates step events and
-// replaces the trace on each update; the 'done' event carries the final summary.
+// replaces the trace on each update; 'restart' means a fallback model is
+// re-running from scratch, so discard steps so far; 'done' carries the final summary.
 
 export type BuildStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
   | { type: 'step'; step: AgentStepDTO }
-  | { type: 'done'; finalText: string; finishReason: string; usage: TokenUsage; runId: string }
+  | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  | {
+      type: 'done';
+      finalText: string;
+      finishReason: string;
+      usage: TokenUsage;
+      runId: string;
+      /** Model that produced the result — differs from the requested one after a fallback. */
+      modelKey: string;
+      toolsConsidered: string[];
+    }
   | { type: 'error'; error: string; code?: string };
 
 export interface ModelOption {

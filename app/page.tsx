@@ -97,11 +97,16 @@ export default function Home() {
           setRunState((prev) =>
             prev ? { ...prev, steps: [...prev.steps, event.step] } : prev
           );
+        } else if (event.type === 'restart') {
+          // A fallback model is re-running from scratch — the steps so far
+          // belong to the abandoned attempt.
+          setRunState((prev) => (prev ? { ...prev, steps: [] } : prev));
         } else if (event.type === 'done') {
           setRunState((prev) =>
             prev
               ? {
                   ...prev,
+                  toolsConsidered: event.toolsConsidered,
                   finalText: event.finalText,
                   finishReason: event.finishReason,
                   usage: event.usage,
