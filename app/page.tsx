@@ -42,6 +42,9 @@ interface PendingApproval {
   submitting?: boolean;
 }
 
+/** Reconnect attempts after a dropped stream before giving up. */
+const MAX_RECONNECTS = 3;
+
 export default function Home() {
   const [description, setDescription] = useState('');
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -54,6 +57,14 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [runState, setRunState] = useState<RunState | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
+
+  // /?run=<id>: attach to a run that's live on the server (e.g. after a reload or a resume).
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('run');
+    if (!id) return;
+    void streamRun((signal) => fetch(`/api/runs/${encodeURIComponent(id)}/events`, { signal }));
+  }, []);
 
   useEffect(() => {
     fetch('/api/models')
@@ -65,8 +76,11 @@ export default function Home() {
       .catch((err) => console.error('Failed to load models:', err));
   }, []);
 
-  function handleStop() {
-    abortRef.current?.abort();
+  /** Stop the run on the server; its stream then ends with the stop as an error event. */
+  async function handleStop() {
+    const runId = runIdRef.current;
+    const res = runId ? await fetch(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }).catch(() => null) : null;
+    if (!res?.ok) abortRef.current?.abort();
   }
 
   async function handleApproval(runId: string, toolCallId: string, approved: boolean) {
@@ -96,17 +110,158 @@ export default function Home() {
     }
   }
 
-  async function handleBuild(e: React.FormEvent) {
-    e.preventDefault();
+  /**
+   * Stream a run's events into the page. Runs keep going on the server if
+   * this connection drops (lib/run-jobs.ts), so a stream that ends without
+   * `done` or `error` reconnects to /api/runs/:id/events, which replays the
+   * run from its start (the run_start event resets this page's state).
+   */
+  async function streamRun(open: (signal: AbortSignal) => Promise<Response>) {
     setError(null);
     setRunState(null);
     setLoading(true);
+    runIdRef.current = null;
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    let terminal = false;
+
+    const readEvents = async (response: Response) => {
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+    const processLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let event: BuildStreamEvent;
+      try { event = JSON.parse(trimmed); } catch { return; }
+
+      if (event.type === 'done' || event.type === 'error') terminal = true;
+      if (event.type === 'run_start') {
+        runIdRef.current = event.runId;
+        setRunState({
+          runId: event.runId,
+          steps: [],
+          toolsConsidered: event.toolsConsidered,
+          finalText: '',
+          streamingText: '',
+          finishReason: 'running',
+          usage: {},
+          done: false,
+          pendingApprovals: [],
+        });
+      } else if (event.type === 'step') {
+        setRunState((prev) =>
+          // A step just finished — its text is now captured in the trace, so
+          // reset the live buffer for the next step's streaming text.
+          prev ? { ...prev, steps: [...prev.steps, event.step], streamingText: '' } : prev
+        );
+      } else if (event.type === 'text_delta') {
+        setRunState((prev) =>
+          prev ? { ...prev, streamingText: prev.streamingText + event.delta } : prev
+        );
+      } else if (event.type === 'approval_request') {
+        setRunState((prev) =>
+          prev
+            ? {
+                ...prev,
+                pendingApprovals: [
+                  ...prev.pendingApprovals,
+                  { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, reasonText: event.reasonText },
+                ],
+              }
+            : prev
+        );
+      } else if (event.type === 'plan') {
+        setRunState((prev) =>
+          prev ? { ...prev, plan: event.plan, planAwaitingApproval: Boolean(event.awaitingApproval), planSubmitting: false } : prev
+        );
+      } else if (event.type === 'approval_resolved') {
+        setRunState((prev) =>
+          prev
+            ? {
+                ...prev,
+                pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId),
+                ...(event.toolCallId === 'plan' ? { planAwaitingApproval: false, planSubmitting: false } : {}),
+              }
+            : prev
+        );
+      } else if (event.type === 'route') {
+        setRunState((prev) => (prev ? { ...prev, route: event.route } : prev));
+      } else if (event.type === 'restart') {
+        // A fallback model is re-running from scratch — the steps so far
+        // and any streamed text belong to the abandoned attempt.
+        setRunState((prev) => (prev ? { ...prev, steps: [], streamingText: '' } : prev));
+      } else if (event.type === 'done') {
+        setRunState((prev) =>
+          prev
+            ? {
+                ...prev,
+                toolsConsidered: event.toolsConsidered,
+                finalText: event.finalText,
+                streamingText: '',
+                finishReason: event.finishReason,
+                usage: event.usage,
+                stopReason: event.stopReason,
+                critique: event.critique,
+                done: true,
+              }
+            : prev
+        );
+      } else if (event.type === 'error') {
+        setError(event.error);
+      }
+    };
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) processLine(line);
+      }
+      if (buffer.trim()) processLine(buffer);
+    };
 
     try {
-      const response = await fetch('/api/build', {
+      for (let attempt = 0; ; attempt++) {
+        const response = await open(ctrl.signal);
+        if (!response.ok || !response.body) {
+          const text = await response.text();
+          let msg = `HTTP ${response.status}`;
+          try { msg = JSON.parse(text).error ?? msg; } catch { /* plain text error */ }
+          throw new Error(msg);
+        }
+        try {
+          await readEvents(response);
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') throw err;
+          // A dropped connection: fall through and reconnect.
+        }
+        const runId = runIdRef.current;
+        if (terminal || ctrl.signal.aborted || !runId || attempt >= MAX_RECONNECTS) {
+          if (!terminal && !ctrl.signal.aborted) setError('Lost the connection to this run. It may still be running: reload to check.');
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        open = (signal) => fetch(`/api/runs/${encodeURIComponent(runId)}/events`, { signal });
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        setError(err instanceof Error ? err.message : 'Failed to run agent');
+      }
+    } finally {
+      setLoading(false);
+      abortRef.current = null;
+    }
+  }
+
+  async function handleBuild(e: React.FormEvent) {
+    e.preventDefault();
+    await streamRun((signal) =>
+      fetch('/api/build', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -116,120 +271,9 @@ export default function Home() {
           maxSteps,
           ...(planFirst ? { planFirst: true, requirePlanApproval } : {}),
         }),
-        signal: ctrl.signal,
-      });
-
-      if (!response.ok || !response.body) {
-        const text = await response.text();
-        let msg = `HTTP ${response.status}`;
-        try { msg = JSON.parse(text).error ?? msg; } catch { /* plain text error */ }
-        throw new Error(msg);
-      }
-
-      // Read the NDJSON stream line by line
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      const processLine = (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-        let event: BuildStreamEvent;
-        try { event = JSON.parse(trimmed); } catch { return; }
-
-        if (event.type === 'run_start') {
-          setRunState({
-            runId: event.runId,
-            steps: [],
-            toolsConsidered: event.toolsConsidered,
-            finalText: '',
-            streamingText: '',
-            finishReason: 'running',
-            usage: {},
-            done: false,
-            pendingApprovals: [],
-          });
-        } else if (event.type === 'step') {
-          setRunState((prev) =>
-            // A step just finished — its text is now captured in the trace, so
-            // reset the live buffer for the next step's streaming text.
-            prev ? { ...prev, steps: [...prev.steps, event.step], streamingText: '' } : prev
-          );
-        } else if (event.type === 'text_delta') {
-          setRunState((prev) =>
-            prev ? { ...prev, streamingText: prev.streamingText + event.delta } : prev
-          );
-        } else if (event.type === 'approval_request') {
-          setRunState((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  pendingApprovals: [
-                    ...prev.pendingApprovals,
-                    { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, reasonText: event.reasonText },
-                  ],
-                }
-              : prev
-          );
-        } else if (event.type === 'plan') {
-          setRunState((prev) =>
-            prev ? { ...prev, plan: event.plan, planAwaitingApproval: Boolean(event.awaitingApproval), planSubmitting: false } : prev
-          );
-        } else if (event.type === 'approval_resolved') {
-          setRunState((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  pendingApprovals: prev.pendingApprovals.filter((p) => p.toolCallId !== event.toolCallId),
-                  ...(event.toolCallId === 'plan' ? { planAwaitingApproval: false, planSubmitting: false } : {}),
-                }
-              : prev
-          );
-        } else if (event.type === 'route') {
-          setRunState((prev) => (prev ? { ...prev, route: event.route } : prev));
-        } else if (event.type === 'restart') {
-          // A fallback model is re-running from scratch — the steps so far
-          // and any streamed text belong to the abandoned attempt.
-          setRunState((prev) => (prev ? { ...prev, steps: [], streamingText: '' } : prev));
-        } else if (event.type === 'done') {
-          setRunState((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  toolsConsidered: event.toolsConsidered,
-                  finalText: event.finalText,
-                  streamingText: '',
-                  finishReason: event.finishReason,
-                  usage: event.usage,
-                  stopReason: event.stopReason,
-                  critique: event.critique,
-                  done: true,
-                }
-              : prev
-          );
-        } else if (event.type === 'error') {
-          setError(event.error);
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) processLine(line);
-      }
-      // Flush remaining buffer
-      if (buffer.trim()) processLine(buffer);
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        setError(err instanceof Error ? err.message : 'Failed to run agent');
-      }
-    } finally {
-      setLoading(false);
-      abortRef.current = null;
-    }
+        signal,
+      })
+    );
   }
 
   return (

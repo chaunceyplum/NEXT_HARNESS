@@ -6,6 +6,14 @@ import { RunSummary, RunsListResponse } from '@/lib/types';
 
 const PAGE_SIZE = 20;
 
+/** Status badge colors; the badge text always carries the status too. */
+const STATUS_BADGE: Record<string, string> = {
+  completed: 'bg-green-100 text-green-800',
+  failed: 'bg-red-100 text-red-800',
+  running: 'bg-blue-100 text-blue-800',
+  interrupted: 'bg-amber-100 text-amber-800',
+};
+
 export default function ResultsPage() {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -87,7 +95,7 @@ export default function ResultsPage() {
                   )}
                   <span
                     className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold ${
-                      run.status === 'completed' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                      STATUS_BADGE[run.status] ?? 'bg-red-100 text-red-800'
                     }`}
                   >
                     {run.status}

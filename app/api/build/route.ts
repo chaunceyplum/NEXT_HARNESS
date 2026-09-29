@@ -26,23 +26,26 @@
  *   {"type":"error","error":"...","code":"..."}
  *
  * The client reads the stream with a ReadableStream reader, parsing each
- * newline-delimited JSON line as it arrives. If the client disconnects (or
- * hits Stop), the agent run is aborted rather than left running tools.
+ * newline-delimited JSON line as it arrives. Every event carries a `seq`.
+ *
+ * The run is a job (lib/run-jobs.ts, lib/build-run.ts), not part of this
+ * request: if the client disconnects, the run keeps going, and the client
+ * can reconnect with GET /api/runs/:id/events (buffered events replay).
+ * Stop it with POST /api/runs/:id/cancel (or the kill switch). The run
+ * record is checkpointed as 'running' after every step; a run cut off by a
+ * server restart is marked 'interrupted' and can be resumed from
+ * /results/[id] (POST /api/runs/:id/resume).
  */
 
-import { runAgent } from '@/lib/llm/agent';
-import { waitForApproval } from '@/lib/llm/approvals';
+import { parseRolloutMode } from '@/lib/llm/approval-policy';
 import { planFirstByDefault } from '@/lib/llm/planner';
-import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
-import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
-import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
-import { newRunId, saveExecution } from '@/lib/execution-store';
-import { checkInput, createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
-import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
-import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
-import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
-import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
+import { getModelRegistry } from '@/lib/llm/model-registry';
+import { checkInput } from '@/lib/llm/guardrails';
+import { runsBlockedReason } from '@/lib/kill-switch';
+import { streamJob } from '@/lib/run-jobs';
+import { startBuildRun } from '@/lib/build-run';
+import { ApiError, BuildRequest } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
@@ -189,9 +192,6 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
   };
 }
 
-/** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
-const PLAN_APPROVAL_ID = 'plan';
-
 // ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: Request): Promise<Response> {
@@ -213,258 +213,5 @@ export async function POST(request: Request): Promise<Response> {
   }
   const req = validation.req;
 
-  console.log('[BUILD] Running agent for:', req.description.slice(0, 80));
-
-  const runId = newRunId();
-  const startedAt = Date.now();
-  const createdAt = new Date(startedAt).toISOString();
-  const actor = request.headers.get('x-harness-user') || 'anonymous';
-  // Who started the run, persisted with it (server-set, never from the body).
-  req.requestedBy = actor;
-  void recordAudit([{ type: 'run_start', runId, actor, input: { description: req.description, model: req.model } }]);
-  // Tool outcomes are buffered per step and written in one insert.
-  let pendingAudit: AuditEvent[] = [];
-  const flushAudit = () => {
-    const batch = pendingAudit;
-    pendingAudit = [];
-    void recordAudit(batch);
-  };
-
-  // Aborts the agent run when the client goes away — the request's own signal
-  // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
-  const abort = new AbortController();
-  request.signal.addEventListener('abort', () => abort.abort(), { once: true });
-  // The kill switch aborts runs through this same controller.
-  const unregister = registerRun(runId, {
-    abort,
-    startedAt,
-    user: actor,
-    description: req.description,
-  });
-
-  // TASK 8: Create a ReadableStream that pushes NDJSON events
-  const stream = new ReadableStream({
-    async start(controller) {
-      const enc = new TextEncoder();
-      let closed = false;
-      // Writing to a stream the client has cancelled throws; after a
-      // disconnect, events just have nowhere to go.
-      const push = (event: BuildStreamEvent) => {
-        if (closed) return;
-        try {
-          controller.enqueue(enc.encode(JSON.stringify(event) + '\n'));
-        } catch {
-          closed = true;
-        }
-      };
-      // Streamed tokens pass through the output guardrail too. A credential can
-      // span several deltas, so text is held back until it's safe to redact.
-      const textRedactor = createStreamRedactor();
-      const pushDelta = (delta: string) => {
-        if (delta) push({ type: 'text_delta', delta });
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        try { controller.close(); } catch { /* already closed/cancelled */ }
-      };
-
-      try {
-        // Emit run_start immediately so the client can show a run ID before
-        // any steps. The tool list isn't known until tool selection resolves
-        // inside runAgent, so it's sent on `done` instead.
-        push({ type: 'run_start', runId, toolsConsidered: [] });
-
-        const rawResult = await runAgent({
-          userInput: req.description,
-          modelKey: req.model,
-          toolRetries: req.toolRetries,
-          toolShortlistSize: req.toolShortlistSize,
-          maxSteps: req.maxSteps,
-          budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
-          policy: req.policy,
-          dryRun: req.dryRun,
-          rolloutMode: req.rolloutMode,
-          thinkingBudget: req.thinkingBudget,
-          abortSignal: abort.signal,
-          // TASK 8: stream each step as it completes
-          onStep: (step) => {
-            pushDelta(textRedactor.flush());
-            push({ type: 'step', step: redactOutput(step) });
-            flushAudit();
-          },
-          // Audit log: every write/destructive call's outcome (reads with AUDIT_READS=true)
-          onToolOutcome: (o) => {
-            if (o.level === 'read' && !o.approvalReason && !auditReads()) return;
-            pendingAudit.push({
-              type: 'tool_call',
-              runId,
-              actor,
-              tool: o.toolName,
-              level: o.level,
-              reason: o.approvalReason,
-              input: o.input,
-              outcome: o.outcome,
-              error: o.error,
-            });
-          },
-          // TASK 1: stream assistant text token-by-token as it's generated
-          onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
-          onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
-          runId,
-          actor: request.headers.get('x-harness-user') || 'anonymous',
-          // Plan-and-execute: the plan, then every status change and revision
-          planFirst: req.planFirst,
-          onPlan: (plan) => push({ type: 'plan', plan: redactOutput(plan) }),
-          ...(req.requirePlanApproval
-            ? {
-                approvePlan: async (plan) => {
-                  push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
-                  const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
-                  push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
-                  return decision;
-                },
-              }
-            : {}),
-          onRoute: (route) => push({ type: 'route', route }),
-          // TASK 9: flagged calls wait here for the user's decision
-          approveTool: async ({ toolCallId, toolName, input, reason }) => {
-            push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
-            const decision = await waitForApproval(runId, toolCallId, abort.signal);
-            push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
-            void recordAudit([
-              {
-                type: 'approval',
-                runId,
-                // Who decided; timeouts and cancellations are the system's call.
-                actor: decision.decidedBy ?? 'system',
-                tool: toolName,
-                reason,
-                input,
-                outcome: decision.approved ? 'approved' : 'denied',
-                error: decision.approved ? undefined : decision.reason,
-              },
-            ]);
-            return decision;
-          },
-        });
-
-        // Grounding check (answer-critic.ts): the final answer is checked
-        // against the tool results; CRITIC_MODE=revise also fixes it once.
-        const critiqued = await critiqueAnswer({
-          task: req.description,
-          answer: rawResult.finalText,
-          steps: rawResult.steps,
-          modelKey: rawResult.modelKey,
-        });
-        const checked: typeof rawResult & { critique?: Critique } = critiqued
-          ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }
-          : rawResult;
-
-        // Output guardrail: nothing leaves the server (stream or run history) unredacted.
-        const agentResult = redactOutput(checked);
-
-        console.log('[BUILD] Agent finished:', {
-          runId,
-          steps: agentResult.steps.length,
-          finishReason: agentResult.finishReason,
-          usage: agentResult.usage,
-        });
-
-        pushDelta(textRedactor.flush());
-        push({
-          type: 'done',
-          finalText: agentResult.finalText,
-          finishReason: agentResult.finishReason,
-          usage: agentResult.usage,
-          runId,
-          modelKey: agentResult.modelKey,
-          toolsConsidered: agentResult.toolsConsidered,
-          critique: agentResult.critique,
-          stopReason: agentResult.stopReason,
-          budgetUsage: agentResult.budgetUsage,
-        });
-
-        close();
-
-        // Persist after streaming so we don't delay the response
-        const completedRecord: ExecutionRecord = {
-          id: runId,
-          createdAt,
-          description: req.description,
-          model: agentResult.modelKey,
-          allowFullBuild: false,
-          status: 'completed',
-          durationMs: Date.now() - startedAt,
-          toolsConsidered: agentResult.toolsConsidered,
-          request: req,
-          result: {
-            runId,
-            finalText: agentResult.finalText,
-            steps: agentResult.steps,
-            toolsConsidered: agentResult.toolsConsidered,
-            finishReason: agentResult.finishReason,
-            usage: agentResult.usage,
-            plan: agentResult.plan,
-            critique: agentResult.critique,
-            route: agentResult.route,
-            stopReason: agentResult.stopReason,
-            budgetUsage: agentResult.budgetUsage,
-            ragJudgments: agentResult.ragJudgments,
-          },
-        };
-        saveExecution(completedRecord)
-          .then(() => {
-            // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.
-            if (shouldJudgeRun()) {
-              void judgeRun({ runId, task: req.description, answer: agentResult.finalText, steps: agentResult.steps });
-            }
-          })
-          .catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
-      } catch (error) {
-        const cancelled = abort.signal.aborted;
-        const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
-        const message = redactOutput(
-          cancelled
-            ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
-            : error instanceof Error ? error.message : String(error),
-        );
-        if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
-        else console.error('[BUILD] Agent run failed:', error);
-
-        push({ type: 'error', error: `Agent run failed: ${message}`, code: cancelled ? 'CANCELLED' : 'AGENT_ERROR' });
-        close();
-
-        const failedRecord: ExecutionRecord = {
-          id: runId,
-          createdAt,
-          description: req.description,
-          model: req.model || getDefaultModelKey(),
-          allowFullBuild: false,
-          status: 'failed',
-          durationMs: Date.now() - startedAt,
-          request: req,
-          error: message,
-        };
-        saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
-      } finally {
-        flushAudit();
-        unregister();
-      }
-    },
-    cancel() {
-      abort.abort();
-    },
-  });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/x-ndjson',
-      'Transfer-Encoding': 'chunked',
-      'Cache-Control': 'no-cache',
-      // Allow the client to read the stream cross-origin if needed
-      'X-Content-Type-Options': 'nosniff',
-    },
-  });
+  return streamJob(startBuildRun(req, request.headers.get('x-harness-user') || 'anonymous'));
 }
