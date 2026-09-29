@@ -64,9 +64,10 @@ export function waitForApproval(runId: string, toolCallId: string, signal?: Abor
 }
 
 /** Record a decision for a pending call. Returns false if nothing was waiting on it. */
-export function resolveApproval(runId: string, toolCallId: string, approved: boolean): boolean {
+export function resolveApproval(runId: string, toolCallId: string, approved: boolean, user?: string): boolean {
   const pending = registry.get(key(runId, toolCallId));
   if (!pending) return false;
-  pending.resolve({ approved, reason: approved ? 'Approved by the user.' : 'Denied by the user.' });
+  const who = user ? `"${user}"` : 'the user';
+  pending.resolve({ approved, reason: approved ? `Approved by ${who}.` : `Denied by ${who}.` });
   return true;
 }
