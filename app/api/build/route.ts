@@ -32,6 +32,7 @@
 
 import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
+import { planFirstByDefault } from '@/lib/llm/planner';
 import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
@@ -179,11 +180,17 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
+      planFirst: typeof b.planFirst === 'boolean' ? b.planFirst : planFirstByDefault(),
+      // A request can ask for plan approval; PLAN_APPROVAL=true requires it for every planned run.
+      requirePlanApproval: b.requirePlanApproval === true || process.env.PLAN_APPROVAL?.trim().toLowerCase() === 'true',
       rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
     },
   };
 }
+
+/** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
+const PLAN_APPROVAL_ID = 'plan';
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
@@ -304,6 +311,19 @@ export async function POST(request: Request): Promise<Response> {
           // TASK 1: stream assistant text token-by-token as it's generated
           onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
+          // Plan-and-execute: the plan, then every status change and revision
+          planFirst: req.planFirst,
+          onPlan: (plan) => push({ type: 'plan', plan: redactOutput(plan) }),
+          ...(req.requirePlanApproval
+            ? {
+                approvePlan: async (plan) => {
+                  push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
+                  const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
+                  push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
+                  return decision;
+                },
+              }
+            : {}),
           onRoute: (route) => push({ type: 'route', route }),
           // TASK 9: flagged calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
@@ -383,6 +403,7 @@ export async function POST(request: Request): Promise<Response> {
             toolsConsidered: agentResult.toolsConsidered,
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
+            plan: agentResult.plan,
             critique: agentResult.critique,
             route: agentResult.route,
             stopReason: agentResult.stopReason,

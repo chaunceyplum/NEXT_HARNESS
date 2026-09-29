@@ -42,6 +42,7 @@ import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './age
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
+import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
@@ -96,6 +97,8 @@ export interface AgentRunResult {
    * nothing was sampled, judging is disabled, or the eval path was used.
    */
   ragJudgments: RagJudgmentEntry[];
+  /** The plan as executed (statuses and revisions included), when planFirst was set. */
+  plan?: Plan;
   /** Set when the request asked for model "auto": how the model was chosen. */
   route?: RouteDecision;
 }
@@ -170,6 +173,12 @@ export interface RunAgentOptions {
   thinkingBudget?: number;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
+  /** Plan before acting (planner.ts). */
+  planFirst?: boolean;
+  /** Called with the plan when it's made and whenever a step's status or the plan changes. */
+  onPlan?: (plan: Plan) => void;
+  /** Ask a person to approve the plan before anything runs. A denial ends the run without tool calls. */
+  approvePlan?: (plan: Plan) => Promise<{ approved: boolean; reason?: string }>;
   /** Called once with the routing decision when modelKey is "auto". */
   onRoute?: (route: RouteDecision) => void;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
@@ -630,6 +639,41 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     toolsConsidered = live.toolsConsidered;
   }
 
+  // Plan-and-execute (planner.ts): plan first, optionally have a person
+  // approve it, then execute with update_plan / revise_plan available.
+  let planTracker: PlanTracker | undefined;
+  let userMessage = userInput;
+  if (opts.planFirst) {
+    const planModel = startModelKey || getDefaultModelKey();
+    try {
+      const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
+      planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
+    } catch (err) {
+      console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+    }
+    if (planTracker) {
+      opts.onPlan?.(planTracker.plan);
+      if (opts.approvePlan) {
+        const decision = await opts.approvePlan(planTracker.plan);
+        if (!decision.approved) {
+          return {
+            finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
+            steps: [],
+            toolsConsidered,
+            finishReason: 'stop',
+            modelKey: planModel,
+            budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+            usage: {},
+            ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
+            plan: planTracker.plan,
+          };
+        }
+      }
+      tools = { ...tools, ...buildPlanTools(planTracker) };
+      userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userInput}`;
+    }
+  }
+
   // TASK 9: gate risky calls on a human decision (live runs only).
   const approvalReasons = new Map<string, ApprovalReason>();
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
@@ -697,7 +741,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
         instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
-        messages: [{ role: 'user', content: userInput }],
+        messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
         abortSignal: opts.abortSignal,
@@ -855,6 +899,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       totalTokens: result.usage.totalTokens,
     },
     ragJudgments,
+    ...(planTracker ? { plan: planTracker.plan } : {}),
     ...(route ? { route } : {}),
   };
 }

@@ -365,6 +365,29 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
+## Plan-and-execute (`lib/llm/planner.ts`)
+
+Tick **Plan first** on the home page (or send `"planFirst": true`) for
+multi-step work:
+
+1. A planner call produces the minimum plan: at most 8 steps, each naming
+   the tool it will call and a checkable expected output.
+2. With **Ask me to approve the plan** (`"requirePlanApproval": true`), the
+   run pauses on the plan until someone approves or denies it (through the
+   same `/api/build/approve` endpoint, `toolCallId: "plan"`). A denied plan
+   runs nothing.
+3. The agent executes with two extra tools: `update_plan` marks steps
+   running, done, failed or skipped, and `revise_plan` replaces the
+   unfinished steps when something fails or changes the approach. The plan
+   card updates live, and the final plan is saved with the run.
+
+If planning fails, the run continues without a plan.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PLAN_FIRST` | `false` | Plan every run unless the request says otherwise |
+| `PLAN_APPROVAL` | `false` | Require plan approval for every planned run |
+
 ## Grounded answers (`lib/llm/answer-critic.ts`, `lib/llm/retrieval-hints.ts`)
 
 - **Answer critic:** after a run that used tools, a critic checks the final

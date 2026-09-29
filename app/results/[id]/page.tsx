@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
 import AuditTrail from '@/components/AuditTrail';
 
@@ -144,6 +145,8 @@ export default function RunDetailPage() {
                 <p className="text-red-700 text-sm mt-2 font-mono whitespace-pre-wrap">{record.error}</p>
               </div>
             )}
+
+            {record.result?.plan && <PlanView plan={record.result.plan} />}
 
             {record.result && (
               <AgentTrace

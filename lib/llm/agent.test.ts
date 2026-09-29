@@ -324,6 +324,55 @@ describe('runAgent token streaming (TASK 1)', () => {
   });
 });
 
+describe('runAgent plan-first', () => {
+  const plan = {
+    goal: 'List segments',
+    steps: [
+      { id: 1, description: 'List the segments', tool: 'adobe_list_segments', expectedOutput: 'segment names', dependsOn: [] },
+      { id: 2, description: 'Answer', tool: null, expectedOutput: 'the list', dependsOn: [1] },
+    ],
+  };
+
+  it('plans, gives the executor the plan and the plan tools, and returns the tracked plan', async () => {
+    script = [
+      { text: JSON.stringify(plan) },
+      { toolCall: { toolName: 'update_plan', input: { stepId: 1, status: 'done', note: '2 segments' } } },
+      { text: 'There are 2 segments.' },
+    ];
+    const updates: unknown[] = [];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true, onPlan: (p) => updates.push(JSON.parse(JSON.stringify(p))) });
+
+    const executorPrompt = JSON.stringify(calls[1].prompt);
+    expect(executorPrompt).toContain('Execute this plan');
+    expect(executorPrompt).toContain('1. [pending] List the segments');
+    expect(calls[1].tools?.map((t) => t.name)).toEqual(expect.arrayContaining(['update_plan', 'revise_plan']));
+    expect(result.plan?.steps[0]).toMatchObject({ status: 'done', note: '2 segments' });
+    expect(updates.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('runs nothing when the plan is denied', async () => {
+    script = [{ text: JSON.stringify(plan) }];
+    const result = await runAgent({
+      userInput: 'list segments',
+      modelKey: 'test:plain',
+      planFirst: true,
+      approvePlan: async () => ({ approved: false, reason: 'Denied by "bob".' }),
+    });
+    expect(result.finalText).toMatch(/plan wasn't approved/);
+    expect(calls).toHaveLength(1);
+    expect(executed).toEqual([]);
+  });
+
+  it('falls back to running without a plan when planning fails', async () => {
+    script = [{ text: 'not json' }, { text: 'done anyway' }];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true });
+    warn.mockRestore();
+    expect(result.plan).toBeUndefined();
+    expect(result.finalText).toBe('done anyway');
+  });
+});
+
 describe('runAgent with model "auto"', () => {
   it('routes a clear change request by rules and records the decision, without pinning', async () => {
     script = [{ text: 'done' }];
@@ -360,5 +409,15 @@ describe('runAgent tool outcomes (audit log feed)', () => {
         error: 'Denied by "bob".',
       }),
     ]);
+  });
+});
+
+describe('runAgent plan-first with model "auto"', () => {
+  it('plans on the routed model rather than the literal "auto"', async () => {
+    const plan = { goal: 'g', steps: [{ id: 1, description: 'Answer', tool: null, expectedOutput: 'x', dependsOn: [] }] };
+    script = [{ text: JSON.stringify(plan) }, { text: 'done' }];
+    const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', planFirst: true });
+    expect(result.route?.modelKey).toBe('test:plain');
+    expect(result.plan?.goal).toBe('g');
   });
 });
