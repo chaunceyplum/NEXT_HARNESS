@@ -311,6 +311,8 @@ export async function POST(request: Request): Promise<Response> {
           // TASK 1: stream assistant text token-by-token as it's generated
           onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
+          runId,
+          actor: request.headers.get('x-harness-user') || 'anonymous',
           // Plan-and-execute: the plan, then every status change and revision
           planFirst: req.planFirst,
           onPlan: (plan) => push({ type: 'plan', plan: redactOutput(plan) }),

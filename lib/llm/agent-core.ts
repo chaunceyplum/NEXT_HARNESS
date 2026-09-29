@@ -54,8 +54,9 @@ function getEnvironmentContext(): string {
 /**
  * @param opts.toolDiscovery include the find_tools/call_tool rule — only true
  *   when those tools are in the run's tool set (live runs; not the eval path).
+ * @param opts.memory include the remember_fact rule — only when that tool is present.
  */
-export function systemPrompt(opts: { toolDiscovery?: boolean } = {}): string {
+export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean } = {}): string {
   const envCtx = getEnvironmentContext();
 
   const lines = [
@@ -76,6 +77,11 @@ export function systemPrompt(opts: { toolDiscovery?: boolean } = {}): string {
     '- Always prefer the narrowest tool that satisfies the request. Do not call broad or unrelated tools "just in case" — the tools you see were picked for this request, so trust that they are the ones worth considering.',
     ...(opts.toolDiscovery
       ? ['- If a step needs a tool that is not in your tool list, call find_tools with a short description of the capability, then run the match with call_tool. Only do this for a concrete gap — not to browse the catalog.']
+      : []),
+    ...(opts.memory
+      ? [
+          '- When you confirm a stable identifier that later runs will need (which sandbox is production, a Launch property id, the repo tags live in, a merge policy id), save it with remember_fact. Only save identifiers you verified with a tool, never credentials, personal data or one-off results. If a fact from memory turns out to be wrong, correct it with remember_fact.',
+        ]
       : []),
     '- When it would help, ground yourself first with search_adobe_knowledge before taking action. When your answer relies on knowledge-base results, name the source titles you used. If a search result carries a _retrievalHint, follow it before answering.',
     '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach, and do not run another knowledge-base search hoping a different query surfaces something new. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
