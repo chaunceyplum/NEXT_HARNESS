@@ -40,4 +40,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+eval-results/
 evals/fixtures/agent-drafts/

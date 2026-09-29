@@ -7,8 +7,27 @@ and deterministic. Evals call the **real, configured** providers against
 whether the model's behavior is actually *good*, not just correctly
 *handled*.
 
-They're a manual step, not a CI gate, until the suite is stable enough to
-trust on every PR.
+They don't run on every PR (real providers cost money and vary run to
+run). `.github/workflows/evals.yml` runs them nightly and on demand, with
+the repo's secrets, and fails on a regression against `evals/baseline.json`.
+
+## CI regression gate
+
+- Set `EVAL_METRICS_DIR=eval-results` and each suite also writes
+  `eval-results/<suite>.json`.
+- `node scripts/check-eval-baseline.mjs eval-results` compares them with
+  `evals/baseline.json`: success-rate and pass^k floors, and the
+  safety-violation ceiling (0 from day one). Any regression exits 1.
+- A suite that skipped (no credentials for it) isn't failed unless
+  `EVAL_REQUIRE_ALL=true`.
+- After a run you trust, `… --update` rewrites the floors 5 points below
+  what was measured. Commit the result. It never loosens the safety ceiling.
+- The workflow reads provider credentials from repo secrets
+  (`MCP_ENDPOINT_URL`, `ANTHROPIC_API_KEY`, `AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY`, …) and model choices from repo variables
+  (`DEFAULT_MODEL`, `EVAL_MODEL`, `EVAL_JUDGE_MODEL`, `AWS_REGION`).
+
+Unit tests, typecheck, lint and build run on every PR (`.github/workflows/ci.yml`).
 
 ## Suites
 
