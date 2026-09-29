@@ -35,7 +35,7 @@ import { waitForApproval } from '@/lib/llm/approvals';
 import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
-import { checkInput, redactOutput } from '@/lib/llm/guardrails';
+import { checkInput, createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
 import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
 import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
@@ -235,6 +235,12 @@ export async function POST(request: Request): Promise<Response> {
           closed = true;
         }
       };
+      // Streamed tokens pass through the output guardrail too. A credential can
+      // span several deltas, so text is held back until it's safe to redact.
+      const textRedactor = createStreamRedactor();
+      const pushDelta = (delta: string) => {
+        if (delta) push({ type: 'text_delta', delta });
+      };
       const close = () => {
         if (closed) return;
         closed = true;
@@ -260,9 +266,12 @@ export async function POST(request: Request): Promise<Response> {
           thinkingBudget: req.thinkingBudget,
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
-          onStep: (step) => push({ type: 'step', step: redactOutput(step) }),
+          onStep: (step) => {
+            pushDelta(textRedactor.flush());
+            push({ type: 'step', step: redactOutput(step) });
+          },
           // TASK 1: stream assistant text token-by-token as it's generated
-          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
+          onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
           // TASK 9: flagged calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input, reason }) => {
@@ -283,6 +292,7 @@ export async function POST(request: Request): Promise<Response> {
           usage: agentResult.usage,
         });
 
+        pushDelta(textRedactor.flush());
         push({
           type: 'done',
           finalText: agentResult.finalText,
