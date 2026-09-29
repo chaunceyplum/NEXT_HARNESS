@@ -18,6 +18,7 @@
  */
 
 import type { McpToolDefinition } from './tool-catalog';
+import { envTimeoutMs, fetchWithTimeout } from '../fetch-timeout';
 
 const READ_FILE_SCHEMA = {
   type: 'object',
@@ -80,34 +81,40 @@ function requireString(args: Record<string, unknown>, key: string): string {
   return value;
 }
 
-async function githubApiRequest(path: string, ref?: string): Promise<unknown> {
+const GITHUB_TIMEOUT_MS = 30_000;
+
+async function githubApiRequest(path: string, ref: string | undefined, signal?: AbortSignal): Promise<unknown> {
   const token = requireGitHubToken();
   const url = `https://api.github.com/repos/${path}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`;
 
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'next-harness-agent',
+  return fetchWithTimeout(
+    url,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'next-harness-agent',
+      },
     },
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`GitHub API ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`);
-  }
-
-  return response.json();
+    { timeoutMs: envTimeoutMs('GITHUB_TIMEOUT_MS', GITHUB_TIMEOUT_MS), label: 'GitHub API', signal },
+    async (response) => {
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        throw new Error(`GitHub API ${response.status}: ${response.statusText}${body ? ` — ${body.slice(0, 300)}` : ''}`);
+      }
+      return response.json();
+    }
+  );
 }
 
-async function githubReadFile(args: Record<string, unknown>): Promise<unknown> {
+async function githubReadFile(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const owner = requireString(args, 'owner');
   const repo = requireString(args, 'repo');
   const path = requireString(args, 'path');
   const ref = typeof args.ref === 'string' ? args.ref : undefined;
 
-  const data = await githubApiRequest(`${owner}/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`, ref);
+  const data = await githubApiRequest(`${owner}/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`, ref, signal);
 
   if (Array.isArray(data)) {
     throw new Error(`"${path}" is a directory, not a file — use github_list_directory instead`);
@@ -121,7 +128,7 @@ async function githubReadFile(args: Record<string, unknown>): Promise<unknown> {
   return { path, content, sha: file.sha, size: file.size };
 }
 
-async function githubListDirectory(args: Record<string, unknown>): Promise<unknown> {
+async function githubListDirectory(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   const owner = requireString(args, 'owner');
   const repo = requireString(args, 'repo');
   const path = typeof args.path === 'string' ? args.path : '';
@@ -129,7 +136,8 @@ async function githubListDirectory(args: Record<string, unknown>): Promise<unkno
 
   const data = await githubApiRequest(
     `${owner}/${repo}/contents/${path.split('/').filter(Boolean).map(encodeURIComponent).join('/')}`,
-    ref
+    ref,
+    signal
   );
 
   if (!Array.isArray(data)) {
@@ -141,12 +149,12 @@ async function githubListDirectory(args: Record<string, unknown>): Promise<unkno
   });
 }
 
-export async function executeLocalTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+export async function executeLocalTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   switch (name) {
     case 'github_read_file':
-      return githubReadFile(args);
+      return githubReadFile(args, signal);
     case 'github_list_directory':
-      return githubListDirectory(args);
+      return githubListDirectory(args, signal);
     default:
       throw new Error(`Unknown local tool: ${name}`);
   }

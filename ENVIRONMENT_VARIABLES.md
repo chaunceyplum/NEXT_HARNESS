@@ -70,6 +70,24 @@ guessing at file contents.
 
 ---
 
+## Authentication (`proxy.ts`, `lib/auth.ts`) — required in production
+
+Every page and API route is authenticated. **A production build with none
+of these set refuses every request with 503**, so set at least one before
+deploying. `next dev` allows unauthenticated requests.
+
+| Variable | Format | Purpose |
+| --- | --- | --- |
+| `HARNESS_AUTH_USERS` | `alice:password,bob:password` | HTTP Basic for people. The browser shows its sign-in prompt. |
+| `HARNESS_API_TOKENS` | `ci-bot:token,cron:token` | `Authorization: Bearer <token>` for scripts. The name before `:` is the identity. |
+| `HARNESS_APPROVERS` | `alice,carol` | Only these users may approve or deny paused tool calls. Unset = any signed-in user. |
+| `HARNESS_AUTH_DISABLED` | `true` | Explicit opt-out, e.g. behind a VPN or an authenticating load balancer. |
+
+The authenticated name is passed to route handlers in the `x-harness-user`
+header. The proxy overwrites any value a client sends. Approval decisions
+record who made them. Serve the app over HTTPS: Basic credentials are
+only base64-encoded.
+
 ## LLM Provider Variables (agent — lib/llm/)
 
 The `/api/build` route no longer runs a fixed planner→orchestrator pipeline.
@@ -218,6 +236,95 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 ```
 
 ---
+
+## Tool call timeouts (`lib/fetch-timeout.ts`)
+
+Every outbound request in the tool path has a deadline. A timeout surfaces
+as `… timed out after Ns (timeout)`, which the retry logic treats as
+transient. Stopping a run aborts its in-flight tool requests and skips
+remaining retries. Retry back-off is jittered (50–100% of 500ms·2ⁿ, or
+2s·2ⁿ for rate limits).
+
+| Variable | Default | Applies to |
+| --- | --- | --- |
+| `MCP_TOOL_TIMEOUT_MS` | `60000` | Each MCP `tools/call` |
+| `MCP_LIST_TIMEOUT_MS` | `30000` | MCP `tools/list` |
+| `GITHUB_TIMEOUT_MS` | `30000` | `github_read_file` / `github_list_directory` |
+
+## Run budgets (`lib/llm/run-budget.ts`)
+
+Hard limits enforced in code on top of the step cap. When one is hit, the
+next step is forced to be a written wrap-up (no more tool calls), and the
+run's `stopReason` is set so the UI flags the answer as partial.
+
+| Variable | Default | Limit |
+| --- | --- | --- |
+| `RUN_MAX_TOKENS` | `1500000` | Input + output tokens across all steps |
+| `RUN_MAX_COST_USD` | none | Estimated cost via `lib/llm/pricing.ts` (ignored for unpriced models) |
+| `RUN_TIMEOUT_MS` | `1800000` | Wall-clock time; checked between steps, hard abort 5 minutes later |
+| `RUN_MAX_IDENTICAL_CALLS` | `3` | Same tool with identical arguments: the model is warned at this count, and the run stops if it repeats again |
+
+A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
+
+## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
+
+These calls pause for Approve/Deny on the home page before they run:
+
+| Reason | Calls |
+| --- | --- |
+| destructive | `delete_*`, `abort_*`, `msb_github_merge_pr`, privacy jobs |
+| sql-write | `execute_sql` unless the SQL is one read-only statement (`SELECT`/`WITH`/`EXPLAIN`/`SHOW`, no write keywords, no side-effect functions) |
+| outbound | commits, PRs, branches, export jobs, destination connections/dataflows, Launch callbacks/hosts, Launch library build/transition |
+| credentials | `flow_get_landing_zone_credentials`, `reactor_get_secret`, `reactor_list_secrets` |
+
+- `APPROVAL_TIMEOUT_MS` (default `600000`): how long a call waits before it's denied.
+- `ROLLOUT_MODE` (default `autonomous`): `assisted` also asks before every
+  write; `shadow` dry-runs every write (nothing executes, nothing to
+  approve except credential reads). A request's `rolloutMode` can pick a
+  stricter mode, never a looser one.
+
+## Kill switch (`lib/kill-switch.ts`)
+
+- **Stop all runs** (home page) or `POST /api/admin/kill-switch
+  {"engaged":true,"reason":"…"}` aborts every active run within seconds.
+  Pending approvals are denied and in-flight model calls are cancelled.
+  New runs are refused (`503 KILL_SWITCH`) until released with
+  `{"engaged":false}`. This switch is in process memory, so a restart
+  releases it.
+- `AGENT_DISABLED=true`: durable off switch. It can't be released from the
+  UI.
+- `HARNESS_ADMINS=alice,bob`: only these users (from the auth proxy's
+  `x-harness-user`) may engage or release it. Unset means anyone.
+- `GET /api/admin/kill-switch` lists active runs.
+
+## Guardrails (`lib/llm/guardrails.ts`)
+
+Cheap, deterministic checks (regexes and counters) at the three points
+where the loop meets the outside world:
+
+- **Input:** a request containing a credential (AWS/GitHub/Anthropic/OpenAI/
+  Slack keys, Adobe `p8e-` client secrets, JWTs, private keys,
+  `password=…`) is refused with 400. Personal data follows
+  `INPUT_PII_MODE`. Instruction-override phrasing is logged.
+- **Actions:** each run may make at most `MAX_WRITES_PER_RUN` (default 25)
+  write/destructive calls. Writes whose arguments name an id in
+  `PROTECTED_RESOURCE_IDS` (exact, case-insensitive string match) are
+  blocked. Credentials are redacted from tool results before the model
+  sees them. Results containing instruction-like text get a
+  `_guardrailWarning` telling the model not to follow it.
+- **Output:** credentials are redacted from streamed steps, approval
+  requests, the final answer, errors and persisted runs. Personal data is
+  masked there too when `OUTPUT_PII_MODE=mask`.
+
+| Variable | Default | Values |
+| --- | --- | --- |
+| `INPUT_PII_MODE` | `allow` | `allow`, `mask`, `block` (emails, US SSNs, Luhn-valid card numbers, phone numbers) |
+| `OUTPUT_PII_MODE` | `allow` | `allow`, `mask` |
+| `MAX_WRITES_PER_RUN` | `25` | positive integer |
+| `PROTECTED_RESOURCE_IDS` | none | comma-separated ids |
+
+`PROTECTED_RESOURCE_IDS` only sees ids that appear in the arguments. A
+tool that falls back to a server-side default sandbox isn't caught.
 
 ## Write safety and read caching (`lib/llm/tool-call-cache.ts`)
 

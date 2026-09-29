@@ -33,14 +33,24 @@
  *      RunAgentOptions.approveTool; without an approver they're denied.
  */
 
-import { generateText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
+import { streamText, stepCountIs, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
-import { buildAiTools, getMcpToolCatalog } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
+import { applyActionGuards } from './guardrails';
+import {
+  budgetFinalNote,
+  resolveBudget,
+  RunBudgetTracker,
+  type BudgetStopReason,
+  type BudgetUsage,
+  type RunBudgetLimits,
+} from './run-budget';
+import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -59,6 +69,21 @@ export interface AgentRunResult {
   usage: TokenUsage;
   /** Model registry key that actually produced the result. Differs from the requested one after a same-tier fallback. */
   modelKey: string;
+  /**
+   * Set when a run budget or loop detection cut the run short (run-budget.ts).
+   * The final text is then a wrap-up of partial work, not a finished answer.
+   */
+  stopReason?: BudgetStopReason;
+  /** Tokens, estimated cost, and wall-clock time the successful attempt used. */
+  budgetUsage: BudgetUsage;
+  /**
+   * Quality judgments for a sample of the knowledge searches this run made,
+   * scored off the critical path by the fire-and-forget RAG judge
+   * (lib/llm/rag-judge.ts) and drained once the loop finished. Monitoring
+   * data the agent didn't act on — persisted with the run record. Empty when
+   * nothing was sampled, judging is disabled, or the eval path was used.
+   */
+  ragJudgments: RagJudgmentEntry[];
 }
 
 export interface RunAgentOptions {
@@ -89,6 +114,16 @@ export interface RunAgentOptions {
    */
   onStep?: (step: AgentStepTrace) => void;
   /**
+   * TASK 1 (token streaming): called with each chunk of assistant text as the
+   * model generates it, so the route can stream the answer to the client token
+   * by token instead of only revealing it once the step finishes. The concrete
+   * win is the final written answer rendering as it's produced; intermediate
+   * steps are usually short text plus a tool call. Reasoning/thinking tokens
+   * are NOT forwarded here (they're hidden by default on current models). Text
+   * for a given step is also still delivered in full via onStep.
+   */
+  onTextDelta?: (delta: string) => void;
+  /**
    * TASK 9: Tool policy to apply before handing the tool set to the model.
    * 'read-only' removes all write and destructive tools structurally —
    * the model cannot call them at all, not just rule-based.
@@ -102,6 +137,11 @@ export interface RunAgentOptions {
    */
   dryRun?: boolean;
   /**
+   * Rollout stage (approval-policy.ts): 'assisted' asks before every write,
+   * 'shadow' dry-runs every write. Can only tighten ROLLOUT_MODE.
+   */
+  rolloutMode?: RolloutMode;
+  /**
    * TASK 10: Enable extended thinking (Claude via Anthropic / Bedrock only).
    * Ignored for other providers and non-Claude Bedrock models.
    *
@@ -114,6 +154,8 @@ export interface RunAgentOptions {
    * Per-request value takes precedence over the env var.
    */
   thinkingBudget?: number;
+  /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
+  budget?: Partial<RunBudgetLimits>;
   /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
   abortSignal?: AbortSignal;
   /**
@@ -123,13 +165,20 @@ export interface RunAgentOptions {
    */
   onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
   /**
-   * TASK 9: asks a human to approve one destructive tool call (delete_*,
-   * abort_*, privacy jobs, merge_pr — including ones routed via call_tool)
-   * before it runs. Not consulted in dry-run mode, where destructive tools
-   * don't execute. On a live run without an approver, destructive calls are
-   * denied. The eval path (opts.tools) is never gated.
+   * TASK 9: asks a human to approve one tool call before it runs — every call
+   * approval-policy.ts flags: destructive tools, non-read-only SQL, outbound
+   * tools (commits, exports, destinations, publishing), credential reads, and
+   * every write in assisted mode. Calls routed via call_tool are unwrapped
+   * first. Calls that won't execute (dry-run/shadow) aren't gated. On a live
+   * run without an approver, flagged calls are denied. The eval path
+   * (opts.tools) is never gated.
    */
-  approveTool?: (call: { toolCallId: string; toolName: string; input: unknown }) => Promise<{ approved: boolean; reason?: string }>;
+  approveTool?: (call: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+    reason: ApprovalReason;
+  }) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
@@ -228,6 +277,9 @@ function mergeProviderOptions(...parts: Array<ProviderOptions | undefined>): Pro
   }
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
+
+/** How far past the time budget a run may go (to finish the step in flight and wrap up) before it's aborted. */
+const HARD_TIMEOUT_GRACE_MS = 5 * 60_000;
 
 /** Appended on the final step for history-bound models, which can't drop the tools array. */
 const FINAL_STEP_NOTE =
@@ -372,7 +424,8 @@ async function selectLiveTools(
   userInput: string,
   toolShortlistSize: number,
   toolRetries: number,
-  policy: { mode?: PolicyMode; dryRun?: boolean }
+  policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
+  ragJudgmentSink: RagJudgmentSink
 ): Promise<LiveToolSelection> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -384,7 +437,11 @@ async function selectLiveTools(
 
   // TASK 9: the policy runs over the whole catalog, so a tool reached via
   // call_tool is filtered/dry-run-wrapped exactly like a shortlisted one.
-  const callable = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
+  // Action guardrails (write cap, protected ids, result redaction) wrap the
+  // same objects call_tool executes.
+  const callable = applyActionGuards(
+    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink }), policy)
+  );
 
   const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
   const tools: ToolSet = Object.fromEntries(
@@ -453,6 +510,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
+  const rolloutMode = resolveRolloutMode(opts.rolloutMode);
+  // Collects fire-and-forget RAG judgments for live runs; drained once the
+  // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
+  // sink — there's nothing to drain and no judgments to persist there.
+  let ragJudgmentSink: RagJudgmentSink | undefined;
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -460,25 +522,33 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     tools = opts.tools;
     toolsConsidered = Object.keys(opts.tools);
   } else {
-    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries, {
-      mode: opts.policy,
-      dryRun: opts.dryRun,
-    });
+    ragJudgmentSink = createRagJudgmentSink();
+    const live = await selectLiveTools(
+      userInput,
+      toolShortlistSize,
+      toolRetries,
+      { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
+      ragJudgmentSink
+    );
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
   }
 
-  // TASK 9: gate destructive calls on a human decision (live runs only).
+  // TASK 9: gate risky calls on a human decision (live runs only).
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = opts.tools
     ? undefined
     : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
-        if (dryRun || classifyTool(call.toolName) !== 'destructive') return 'not-applicable' as const;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
+        if (!reason) return 'not-applicable' as const;
         if (!opts.approveTool) {
-          return { type: 'denied' as const, reason: 'Destructive tool calls need a human approver, and none is attached to this run.' };
+          return {
+            type: 'denied' as const,
+            reason: `This call needs a human approver (${APPROVAL_REASON_TEXT[reason]}), and none is attached to this run.`,
+          };
         }
-        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call });
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason });
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 
@@ -488,6 +558,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // TASK 8: step counter for onStepEnd → onStep mapping. Reset per model
   // attempt, since a fallback restarts the run from scratch.
   let stepIndex = 0;
+  const runStartedAt = Date.now();
+  const budgetLimits = resolveBudget(opts.budget);
+  // Per model attempt, like stepIndex (a fallback restarts the run).
+  let budget = new RunBudgetTracker(budgetLimits, modelKey || getDefaultModelKey(), runStartedAt);
+  let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
   let attemptHadSideEffects = false;
@@ -495,6 +570,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const callModel = (resolvedModelKey: string) => {
     stepIndex = 0;
     attemptHadSideEffects = false;
+    budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt);
+    stopReason = undefined;
+    // Step index at which a budget forced the wrap-up step; the loop stops after it.
+    let forcedAt: number | undefined;
 
     // TASK 10: resolve thinking config for this model + request combination
     const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget);
@@ -507,27 +586,53 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       historyBound ? contextEditingProviderOptions(resolvedModelKey) : undefined
     ) as Record<string, Record<string, never>> | undefined;
 
-    return stage(`chat model call (${resolvedModelKey})`, () =>
-      generateText({
+    return stage(`chat model call (${resolvedModelKey})`, async () => {
+      // TASK 1 (token streaming): streamText instead of generateText so the
+      // assistant's text is emitted as it's produced. Everything else — the
+      // multi-step loop (stopWhen), prepareStep context management, the
+      // approval gate, abort, thinking/context-editing providerOptions, and
+      // the onStepEnd trace/side-effect tracking — is unchanged; streamText
+      // takes the same options. We consume fullStream to forward text deltas,
+      // then await the terminal promises for the same result shape the
+      // fallback loop and result construction below already expect.
+      const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
         instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools),
         messages: [{ role: 'user', content: userInput }],
         tools,
-        stopWhen: stepCountIs(maxSteps),
+        stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
         abortSignal: opts.abortSignal,
+        // Hard backstop for the time budget, which is otherwise checked
+        // between steps: one step that hangs (or waits on an approval) past
+        // it still gets cut off, with room left for the wrap-up step.
+        ...(budgetLimits.maxDurationMs !== undefined
+          ? { timeout: { totalMs: budgetLimits.maxDurationMs + HARD_TIMEOUT_GRACE_MS - (Date.now() - runStartedAt) } }
+          : {}),
         // TASK 10 (thinking) + TASK 2 (server-side context editing)
         ...(providerOptions ? { providerOptions } : {}),
         ...(toolApproval ? { toolApproval } : {}),
         prepareStep: ({ steps, messages }) => {
-          const isLastStep = steps.length >= maxSteps - 1;
+          // Run budgets / loop detection (run-budget.ts): a hit limit turns
+          // this step into the wrap-up step, and repeated calls get a warning.
+          const exceeded = budget.exceeded();
+          if (exceeded && forcedAt === undefined) {
+            forcedAt = steps.length;
+            stopReason = exceeded;
+          }
+          const isLastStep = steps.length >= maxSteps - 1 || forcedAt !== undefined;
+          const notes = budget.takeWarnings();
+          if (exceeded) notes.push(budgetFinalNote(exceeded));
+          else if (historyBound && isLastStep) notes.push(FINAL_STEP_NOTE);
+          const withNotes = (base: ModelMessage[]): ModelMessage[] =>
+            notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
 
           // History-bound models: append-only. Old tool results are cleared
           // server-side (providerOptions above), and the last step keeps the
           // tools array — toolChoice 'none' makes the providers drop it — and
           // instead appends an instruction after the latest tool results.
           if (historyBound) {
-            return isLastStep ? { messages: [...messages, { role: 'user' as const, content: FINAL_STEP_NOTE }] } : {};
+            return notes.length ? { messages: withNotes(messages) } : {};
           }
 
           // TASK 2: compress tool results from steps older than the threshold
@@ -540,14 +645,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           const compressedMessages = compressOldToolMessages(messages, steps.length);
 
           // TASK 3: force text-only on the final allowed step
+          const nextMessages = notes.length ? withNotes(compressedMessages ?? messages) : compressedMessages;
           return {
             toolChoice: isLastStep ? 'none' : 'auto',
-            ...(compressedMessages ? { messages: compressedMessages } : {}),
+            ...(nextMessages ? { messages: nextMessages } : {}),
           };
         },
         // TASK 8: fire onStep callback after each step so the route can stream it
         onStepEnd: (step) => {
           const trace = toStepTrace(step, stepIndex++);
+          budget.recordStep(
+            step.usage,
+            step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))
+          );
           // Only calls that actually ran count — a denied call never executed.
           for (const part of step.content) {
             if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
@@ -555,8 +665,30 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           }
           opts.onStep?.(trace);
         },
-      })
-    );
+      });
+
+      // Drain the stream, forwarding assistant text as it arrives. Reasoning
+      // (thinking) deltas are intentionally not forwarded — they're hidden by
+      // default on current models. Errors during streaming surface when the
+      // terminal promises below are awaited, so they still reach the fallback
+      // try/catch as a rejection rather than being swallowed here.
+      if (opts.onTextDelta) {
+        for await (const part of stream.fullStream) {
+          if (part.type === 'text-delta') opts.onTextDelta(part.text);
+        }
+      }
+
+      // Same shape generateText returned, so nothing downstream changes.
+      // Awaiting these also drives the loop to completion when onTextDelta
+      // isn't set (no fullStream consumer) and rejects on a provider failure.
+      const [text, steps, finishReason, usage] = await Promise.all([
+        stream.text,
+        stream.steps,
+        stream.finishReason,
+        stream.usage,
+      ]);
+      return { text, steps, finishReason, usage };
+    });
   };
 
   let resolvedModelKey = modelKey || getDefaultModelKey();
@@ -603,16 +735,24 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   const steps = result.steps.map((step, i) => toStepTrace(step, i));
 
+  // The judge ran concurrently with the loop; await any still in flight now
+  // (off the tool-call critical path) so the verdicts are captured with the
+  // run record. drain() never rejects.
+  const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+
   return {
     finalText: result.text,
     steps,
     toolsConsidered,
     finishReason: result.finishReason,
     modelKey: resolvedModelKey,
+    ...(stopReason ? { stopReason } : {}),
+    budgetUsage: budget.usage(),
     usage: {
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       totalTokens: result.usage.totalTokens,
     },
+    ragJudgments,
   };
 }

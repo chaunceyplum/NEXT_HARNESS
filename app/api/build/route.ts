@@ -7,14 +7,16 @@
  *
  * Event sequence:
  *   {"type":"run_start","runId":"...","toolsConsidered":["..."]}
+ *   {"type":"text_delta","delta":"..."}    // TASK 1: assistant text as it streams
  *   {"type":"step","step":{...}}           // one per agent step, as it finishes
  *   {"type":"step","step":{...}}
  *   ...
- *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...]}
+ *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...],
+ *    "stopReason":"token-budget"?,"budgetUsage":{"tokens":...,"costUsd":...,"durationMs":...}}
  *
- * When a destructive tool call needs a human decision (POST it to
- * /api/build/approve — the run waits until then, or until it times out):
- *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...}}
+ * When a tool call needs a human decision (lib/llm/approval-policy.ts; POST it
+ * to /api/build/approve — the run waits until then, or until it times out):
+ *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...},"reason":"outbound","reasonText":"..."}
  *   {"type":"approval_resolved","toolCallId":"...","approved":true,"reason":"..."}
  *
  * If a provider failure restarts the run on a same-tier fallback model:
@@ -30,8 +32,11 @@
 
 import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
+import { APPROVAL_REASON_TEXT, parseRolloutMode } from '@/lib/llm/approval-policy';
 import { getModelRegistry, getDefaultModelKey } from '@/lib/llm/model-registry';
 import { newRunId, saveExecution } from '@/lib/execution-store';
+import { checkInput, redactOutput } from '@/lib/llm/guardrails';
+import { registerRun, runsBlockedReason } from '@/lib/kill-switch';
 import { ApiError, BuildRequest, BuildStreamEvent, ExecutionRecord } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
@@ -50,21 +55,31 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     };
   }
 
-  const description = b.description.trim();
-  if (description.length < 10) {
+  const rawDescription = b.description.trim();
+  if (rawDescription.length < 10) {
     return {
       ok: false,
-      error: { error: 'Description must be at least 10 characters', code: 'VALIDATION_ERROR', details: { minLength: 10, received: description.length } },
+      error: { error: 'Description must be at least 10 characters', code: 'VALIDATION_ERROR', details: { minLength: 10, received: rawDescription.length } },
       status: 400,
     };
   }
-  if (description.length > 5000) {
+  if (rawDescription.length > 5000) {
     return {
       ok: false,
-      error: { error: 'Description must be less than 5000 characters', code: 'VALIDATION_ERROR', details: { maxLength: 5000, received: description.length } },
+      error: { error: 'Description must be less than 5000 characters', code: 'VALIDATION_ERROR', details: { maxLength: 5000, received: rawDescription.length } },
       status: 400,
     };
   }
+
+  // Input guardrail: refuse credentials, apply INPUT_PII_MODE, flag override phrasing.
+  const input = checkInput(rawDescription);
+  if (!input.ok) {
+    return { ok: false, error: { error: input.reason, code: input.code }, status: 400 };
+  }
+  if (input.injection.length) {
+    console.warn('[BUILD] Request contains instruction-override phrasing:', input.injection);
+  }
+  const description = input.text;
 
   if (b.model !== undefined) {
     const known = getModelRegistry().some((e) => e.key === b.model);
@@ -125,6 +140,28 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     }
   }
 
+  if (b.maxTokens !== undefined && (typeof b.maxTokens !== 'number' || !Number.isInteger(b.maxTokens) || b.maxTokens < 1_000)) {
+    return {
+      ok: false,
+      error: { error: '"maxTokens" must be an integer of at least 1000', code: 'VALIDATION_ERROR', details: { min: 1_000 } },
+      status: 400,
+    };
+  }
+  if (b.maxCostUsd !== undefined && (typeof b.maxCostUsd !== 'number' || !(b.maxCostUsd > 0))) {
+    return {
+      ok: false,
+      error: { error: '"maxCostUsd" must be a positive number', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
+  if (b.rolloutMode !== undefined && !parseRolloutMode(b.rolloutMode)) {
+    return {
+      ok: false,
+      error: { error: '"rolloutMode" must be "autonomous", "assisted", or "shadow"', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
+
   return {
     ok: true,
     req: {
@@ -133,8 +170,11 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
       maxSteps: typeof b.maxSteps === 'number' ? b.maxSteps : undefined,
+      maxTokens: typeof b.maxTokens === 'number' ? b.maxTokens : undefined,
+      maxCostUsd: typeof b.maxCostUsd === 'number' ? b.maxCostUsd : undefined,
       policy: b.policy === 'read-only' ? 'read-only' : b.policy === 'full' ? 'full' : undefined,
       dryRun: typeof b.dryRun === 'boolean' ? b.dryRun : undefined,
+      rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
     },
   };
@@ -148,6 +188,11 @@ export async function POST(request: Request): Promise<Response> {
     body = await request.json();
   } catch {
     return Response.json({ error: 'Invalid JSON in request body', code: 'INVALID_JSON' } as ApiError, { status: 400 });
+  }
+
+  const blocked = runsBlockedReason();
+  if (blocked) {
+    return Response.json({ error: blocked, code: 'KILL_SWITCH' } as ApiError, { status: 503 });
   }
 
   const validation = validateRequest(body);
@@ -166,6 +211,13 @@ export async function POST(request: Request): Promise<Response> {
   // (disconnect) or the stream being cancelled (reader.cancel / Stop button).
   const abort = new AbortController();
   request.signal.addEventListener('abort', () => abort.abort(), { once: true });
+  // The kill switch aborts runs through this same controller.
+  const unregister = registerRun(runId, {
+    abort,
+    startedAt,
+    user: request.headers.get('x-harness-user') || 'anonymous',
+    description: req.description,
+  });
 
   // TASK 8: Create a ReadableStream that pushes NDJSON events
   const stream = new ReadableStream({
@@ -194,27 +246,34 @@ export async function POST(request: Request): Promise<Response> {
         // inside runAgent, so it's sent on `done` instead.
         push({ type: 'run_start', runId, toolsConsidered: [] });
 
-        const agentResult = await runAgent({
+        const rawResult = await runAgent({
           userInput: req.description,
           modelKey: req.model,
           toolRetries: req.toolRetries,
           toolShortlistSize: req.toolShortlistSize,
           maxSteps: req.maxSteps,
+          budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
           policy: req.policy,
           dryRun: req.dryRun,
+          rolloutMode: req.rolloutMode,
           thinkingBudget: req.thinkingBudget,
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
-          onStep: (step) => push({ type: 'step', step }),
+          onStep: (step) => push({ type: 'step', step: redactOutput(step) }),
+          // TASK 1: stream assistant text token-by-token as it's generated
+          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
-          // TASK 9: destructive calls wait here for the user's decision
-          approveTool: async ({ toolCallId, toolName, input }) => {
-            push({ type: 'approval_request', toolCallId, toolName, input });
+          // TASK 9: flagged calls wait here for the user's decision
+          approveTool: async ({ toolCallId, toolName, input, reason }) => {
+            push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
             const decision = await waitForApproval(runId, toolCallId, abort.signal);
             push({ type: 'approval_resolved', toolCallId, ...decision });
             return decision;
           },
         });
+
+        // Output guardrail: nothing leaves the server (stream or run history) unredacted.
+        const agentResult = redactOutput(rawResult);
 
         console.log('[BUILD] Agent finished:', {
           runId,
@@ -231,6 +290,8 @@ export async function POST(request: Request): Promise<Response> {
           runId,
           modelKey: agentResult.modelKey,
           toolsConsidered: agentResult.toolsConsidered,
+          stopReason: agentResult.stopReason,
+          budgetUsage: agentResult.budgetUsage,
         });
 
         close();
@@ -253,12 +314,20 @@ export async function POST(request: Request): Promise<Response> {
             toolsConsidered: agentResult.toolsConsidered,
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
+            stopReason: agentResult.stopReason,
+            budgetUsage: agentResult.budgetUsage,
+            ragJudgments: agentResult.ragJudgments,
           },
         };
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
       } catch (error) {
         const cancelled = abort.signal.aborted;
-        const message = cancelled ? 'Cancelled by client' : error instanceof Error ? error.message : String(error);
+        const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
+        const message = redactOutput(
+          cancelled
+            ? abortReason?.startsWith('Stopped by the kill switch') ? abortReason : 'Cancelled by client'
+            : error instanceof Error ? error.message : String(error),
+        );
         if (cancelled) console.log('[BUILD] Agent run cancelled by client:', runId);
         else console.error('[BUILD] Agent run failed:', error);
 
@@ -277,6 +346,8 @@ export async function POST(request: Request): Promise<Response> {
           error: message,
         };
         saveExecution(failedRecord).catch((err) => console.error('[BUILD] Failed to persist failed run:', err));
+      } finally {
+        unregister();
       }
     },
     cancel() {
