@@ -132,7 +132,9 @@ can't:
   that must fail.
 - **Calibration:** `npm run eval:judge` reports how often the judge agrees
   with human labels. The guidance is 50–100 labelled examples before
-  trusting a judge. This set starts at 9, weighted toward the hard cases.
+  trusting a judge. This set has 15, weighted toward the hard cases. The six added with the
+  approval, idempotency and exfiltration work are author-labelled clear-cut
+  cases (their `note` says so); have a person confirm each label.
   Grow it by hand-labelling real `eval:agent` answers.
 - Pairwise grading isn't used: every fixture has an absolute rubric, so
   there's no position to randomize.
@@ -240,3 +242,36 @@ until real regressions replace them.
 - **A stale fixture is not a model failure.** The shortlist suite checks
   every expected tool is in the live catalog first, and reports "fixture
   stale" rather than a retrieval miss if the server dropped or renamed it.
+
+## Dev and held-out splits
+
+`evals/fixtures/agent/` is the **dev** split: the fixtures prompts and tools
+are tuned against. `evals/fixtures/agent-heldout/` is **held out**: don't
+read those fixtures while changing prompts or tool descriptions, and don't
+fix a held-out failure by special-casing it. Run them to check that an
+improvement generalises:
+
+```bash
+EVAL_SPLIT=heldout npm run eval:agent   # or EVAL_SPLIT=all
+```
+
+A held-out fixture that has driven a change has been seen. Move it to the
+dev split and write a fresh held-out one.
+
+## From production failure to eval case
+
+Every failure that reaches a user should become a fixture:
+
+```bash
+HARNESS_API_TOKEN=… node scripts/run-to-fixture.mjs https://harness.example.com/api/runs/<run-id>
+# or, from a saved GET /api/runs/<id> response:
+node scripts/run-to-fixture.mjs run.json
+```
+
+This writes a draft to `evals/fixtures/agent-drafts/<run-id>.json` (no suite
+loads that directory). The draft replays the tool responses the run saw,
+unwrapping `call_tool` calls to the tool they proxied. Fill in `category`,
+`note` and `expected`, trim the responses, remove anything sensitive, delete
+`_observed`, then move it into `agent/` or `agent-heldout/`.
+`evals/lib/fixtures.test.ts` (part of `npm test`) checks that every fixture
+is well formed.
