@@ -13,6 +13,12 @@ describe('approvals', () => {
     expect(resolveApproval('run1', 'c1', false)).toBe(false);
   });
 
+  it('records who decided', async () => {
+    const pending = waitForApproval('run-who', 'c1');
+    resolveApproval('run-who', 'c1', false, 'bob');
+    await expect(pending).resolves.toEqual({ approved: false, reason: 'Denied by "bob".', decidedBy: 'bob' });
+  });
+
   it('returns false for a call nothing is waiting on', () => {
     expect(resolveApproval('nope', 'nope', true)).toBe(false);
   });
