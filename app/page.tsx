@@ -12,6 +12,8 @@ interface RunState {
   steps: AgentStepDTO[];
   toolsConsidered: string[];
   finalText: string;
+  /** TASK 1: assistant text accumulated from text_delta events while the run is live. */
+  streamingText: string;
   finishReason: string;
   usage: TokenUsage;
   done: boolean;
@@ -126,6 +128,7 @@ export default function Home() {
             steps: [],
             toolsConsidered: event.toolsConsidered,
             finalText: '',
+            streamingText: '',
             finishReason: 'running',
             usage: {},
             done: false,
@@ -133,7 +136,13 @@ export default function Home() {
           });
         } else if (event.type === 'step') {
           setRunState((prev) =>
-            prev ? { ...prev, steps: [...prev.steps, event.step] } : prev
+            // A step just finished — its text is now captured in the trace, so
+            // reset the live buffer for the next step's streaming text.
+            prev ? { ...prev, steps: [...prev.steps, event.step], streamingText: '' } : prev
+          );
+        } else if (event.type === 'text_delta') {
+          setRunState((prev) =>
+            prev ? { ...prev, streamingText: prev.streamingText + event.delta } : prev
           );
         } else if (event.type === 'approval_request') {
           setRunState((prev) =>
@@ -153,8 +162,8 @@ export default function Home() {
           );
         } else if (event.type === 'restart') {
           // A fallback model is re-running from scratch — the steps so far
-          // belong to the abandoned attempt.
-          setRunState((prev) => (prev ? { ...prev, steps: [] } : prev));
+          // and any streamed text belong to the abandoned attempt.
+          setRunState((prev) => (prev ? { ...prev, steps: [], streamingText: '' } : prev));
         } else if (event.type === 'done') {
           setRunState((prev) =>
             prev
@@ -162,6 +171,7 @@ export default function Home() {
                   ...prev,
                   toolsConsidered: event.toolsConsidered,
                   finalText: event.finalText,
+                  streamingText: '',
                   finishReason: event.finishReason,
                   usage: event.usage,
                   done: true,
@@ -373,7 +383,9 @@ export default function Home() {
               steps={runState.steps}
               toolsConsidered={runState.toolsConsidered}
               finishReason={runState.done ? runState.finishReason : 'running'}
-              finalText={runState.done ? runState.finalText : ''}
+              // TASK 1: show the answer as it streams; the 'done' event
+              // replaces it with the authoritative final text.
+              finalText={runState.done ? runState.finalText : runState.streamingText}
               usage={runState.done ? runState.usage : undefined}
             />
           </div>

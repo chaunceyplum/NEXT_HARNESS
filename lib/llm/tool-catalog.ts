@@ -14,7 +14,7 @@
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
-import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult } from './rag-judge';
+import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
 export interface McpToolDefinition {
@@ -229,6 +229,51 @@ export function createGroundingState(): GroundingState {
 }
 
 /**
+ * One knowledge-search's quality judgment, collected out-of-band. The judge
+ * (rag-judge.ts) is monitoring data the agent never acts on, so it no longer
+ * rides on the tool result the model sees — it's scored off the critical path
+ * and lands here instead, to be persisted with the run record.
+ */
+export interface RagJudgmentEntry {
+  toolName: string;
+  query: string;
+  judgment: RagJudgment;
+}
+
+/**
+ * Per-run collector for RAG judgments produced by the fire-and-forget judge.
+ *
+ * A judgeable knowledge search kicks off judgeRagResult() WITHOUT awaiting it
+ * (so the tool call returns to the agent immediately), and tracks the pending
+ * promise here. drain() awaits every outstanding judgment and returns those
+ * that produced a verdict — runAgent calls it once the loop finishes, so the
+ * judgments are captured before the run resolves without ever sitting on a
+ * tool call's critical path. One per buildAiTools() call, i.e. per agent run,
+ * mirroring GroundingState.
+ */
+export interface RagJudgmentSink {
+  /** Track a fire-and-forget judgment. Never rejects — a failed judge just contributes nothing. */
+  track(promise: Promise<RagJudgmentEntry | undefined>): void;
+  /** Await all tracked judgments and return the ones that produced a verdict. */
+  drain(): Promise<RagJudgmentEntry[]>;
+}
+
+export function createRagJudgmentSink(): RagJudgmentSink {
+  const pending: Promise<RagJudgmentEntry | undefined>[] = [];
+  return {
+    track(promise) {
+      // Swallow rejections here so a judge failure can never surface as an
+      // unhandled rejection; drain() filters the undefined out.
+      pending.push(promise.catch(() => undefined));
+    },
+    async drain() {
+      const settled = await Promise.all(pending);
+      return settled.filter((e): e is RagJudgmentEntry => e !== undefined);
+    },
+  };
+}
+
+/**
  * Whether a validation error is worth a knowledge-base lookup. Most aren't:
  * the error itself usually names the bad field, and the model fixes it on
  * the next call. Look up only when the model is stuck — the same tool has
@@ -322,17 +367,31 @@ export function capRagResult(result: unknown): unknown {
  * truncated string) can't carry the judgment metadata too — the truncation
  * note matters more there than the judgment would.
  */
-async function withRagJudgment(toolName: string, args: Record<string, unknown>, result: unknown): Promise<unknown> {
-  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return result;
-  const query = typeof args.query === 'string' ? args.query : undefined;
-  if (!query || !shouldJudgeLiveResult(result)) return capRagResult(result);
-
-  const judgment = await judgeRagResult(query, result);
+function withRagJudgment(
+  toolName: string,
+  args: Record<string, unknown>,
+  result: unknown,
+  sink?: RagJudgmentSink
+): unknown {
   const capped = capRagResult(result);
-  if (!judgment) return capped;
-  if (capped && typeof capped === 'object' && !Array.isArray(capped)) {
-    return { ...(capped as Record<string, unknown>), _ragJudgment: judgment };
-  }
+  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return capped;
+  const query = typeof args.query === 'string' ? args.query : undefined;
+  if (!query || !shouldJudgeLiveResult(result)) return capped;
+
+  // Fire-and-forget: kick off the judge on the UNCAPPED result (it has its
+  // own size cap) WITHOUT awaiting, so the tool call returns to the agent
+  // immediately instead of waiting a whole extra model round trip. It's
+  // monitoring data the agent doesn't act on, so it no longer rides on the
+  // result the model sees.
+  //
+  // judgeRagResult never rejects (it swallows model/credential failures and
+  // resolves undefined — see rag-judge.ts), so this promise is safe to leave
+  // untracked when no sink is attached. A sink, when present, collects the
+  // verdict so runAgent can persist it with the run record.
+  const judged = judgeRagResult(query, result).then((judgment) =>
+    judgment ? { toolName, query, judgment } : undefined
+  );
+  sink?.track(judged);
   return capped;
 }
 
@@ -352,6 +411,12 @@ export interface RetryAttemptRecord {
 export interface BuildAiToolsOptions {
   /** Extra attempts after a transient (5xx/timeout/429) failure, with back-off. 0 disables retrying. */
   maxRetries?: number;
+  /**
+   * Per-run collector for fire-and-forget RAG judgments. When provided,
+   * judgeable knowledge searches are scored off the critical path and the
+   * verdicts land here (see RagJudgmentSink). Omit to skip live judging.
+   */
+  ragJudgmentSink?: RagJudgmentSink;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
@@ -361,6 +426,8 @@ export interface ExecuteMcpToolWithRetryOptions {
   availableNames: Set<string>;
   /** Per-run lookup state (see GroundingState). A fresh one is used if omitted. */
   grounding?: GroundingState;
+  /** Per-run RAG judgment collector (see RagJudgmentSink). Omit to skip live judging. */
+  ragJudgmentSink?: RagJudgmentSink;
 }
 
 /**
@@ -401,7 +468,7 @@ export async function executeMcpToolWithRetry(
 
   if (isRagTool || maxRetries <= 0) {
     const result = await callTool(toolName, args);
-    return isRagTool ? withRagJudgment(toolName, args, result) : result;
+    return isRagTool ? withRagJudgment(toolName, args, result, opts.ragJudgmentSink) : result;
   }
 
   const attempts: RetryAttemptRecord[] = [];
@@ -533,7 +600,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
         const result = await executeMcpToolWithRetry(
           def.name,
           (input as Record<string, unknown>) ?? {},
-          { maxRetries, availableNames, grounding }
+          { maxRetries, availableNames, grounding, ragJudgmentSink: opts.ragJudgmentSink }
         );
         return capToolResult(def.name, result);
       },

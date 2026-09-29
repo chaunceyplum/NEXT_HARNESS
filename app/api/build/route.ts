@@ -7,6 +7,7 @@
  *
  * Event sequence:
  *   {"type":"run_start","runId":"...","toolsConsidered":["..."]}
+ *   {"type":"text_delta","delta":"..."}    // TASK 1: assistant text as it streams
  *   {"type":"step","step":{...}}           // one per agent step, as it finishes
  *   {"type":"step","step":{...}}
  *   ...
@@ -206,6 +207,8 @@ export async function POST(request: Request): Promise<Response> {
           abortSignal: abort.signal,
           // TASK 8: stream each step as it completes
           onStep: (step) => push({ type: 'step', step }),
+          // TASK 1: stream assistant text token-by-token as it's generated
+          onTextDelta: (delta) => push({ type: 'text_delta', delta }),
           onRestart: ({ fromModelKey, toModelKey }) => push({ type: 'restart', fromModelKey, toModelKey }),
           // TASK 9: destructive calls wait here for the user's decision
           approveTool: async ({ toolCallId, toolName, input }) => {
@@ -253,6 +256,7 @@ export async function POST(request: Request): Promise<Response> {
             toolsConsidered: agentResult.toolsConsidered,
             finishReason: agentResult.finishReason,
             usage: agentResult.usage,
+            ragJudgments: agentResult.ragJudgments,
           },
         };
         saveExecution(completedRecord).catch((err) => console.error('[BUILD] Failed to persist completed run:', err));
