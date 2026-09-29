@@ -124,9 +124,11 @@ export function resolvePolicy(opts: { mode?: PolicyMode; dryRun?: boolean } = {}
 
 export function applyToolPolicy(
   tools: ToolSet,
-  opts: { mode?: PolicyMode; dryRun?: boolean } = {}
+  opts: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean } = {}
 ): ToolSet {
   const { mode, dryRun } = resolvePolicy(opts);
+  // Shadow rollout (approval-policy.ts): writes are intercepted too, not just destructive calls.
+  const dryRunWrites = opts.dryRunWrites === true;
 
   const result: ToolSet = {};
 
@@ -138,8 +140,8 @@ export function applyToolPolicy(
       continue;
     }
 
-    // Dry-run mode: wrap destructive tools to describe instead of execute
-    if (dryRun && level === 'destructive') {
+    // Dry-run mode: wrap destructive tools (and, in shadow mode, writes) to describe instead of execute
+    if ((dryRun && level === 'destructive') || (dryRunWrites && level !== 'read')) {
       const originalDesc = (def as { description?: string }).description ?? name;
       result[name] = tool({
         description: `[DRY RUN — will NOT execute] ${originalDesc}`,
@@ -154,7 +156,9 @@ export function applyToolPolicy(
           wouldExecuteWith: input,
           message:
             `DRY RUN: ${name} was intercepted and NOT sent to the MCP server. ` +
-            `Remove TOOL_DRY_RUN=true from your environment to execute real destructive operations.`,
+            (dryRunWrites
+              ? 'This deployment is in shadow rollout mode (ROLLOUT_MODE=shadow): writes are logged, never executed.'
+              : `Remove TOOL_DRY_RUN=true from your environment to execute real destructive operations.`),
         }),
       });
       continue;
@@ -171,12 +175,15 @@ export function applyToolPolicy(
     execute: async () => ({
       mode,
       dryRun,
+      shadow: dryRunWrites,
       message:
         mode === 'read-only'
           ? 'This run is in READ-ONLY mode. Write and destructive tools have been removed. Only read/search/query tools are available.'
-          : dryRun
-            ? 'Destructive tools are in DRY-RUN mode — they will describe what they would do but not execute.'
-            : 'Full access. All tools are available.',
+          : dryRunWrites
+            ? 'SHADOW mode — write and destructive tools describe what they would do but never execute.'
+            : dryRun
+              ? 'Destructive tools are in DRY-RUN mode — they will describe what they would do but not execute.'
+              : 'Full access. All tools are available.',
     }),
   });
 

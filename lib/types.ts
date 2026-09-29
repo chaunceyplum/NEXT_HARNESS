@@ -68,6 +68,11 @@ export interface BuildRequest {
    */
   dryRun?: boolean;
   /**
+   * Rollout stage: 'assisted' asks before every write, 'shadow' dry-runs
+   * every write. Can only tighten the ROLLOUT_MODE env var.
+   */
+  rolloutMode?: 'autonomous' | 'assisted' | 'shadow';
+  /**
    * TASK 10: Extended thinking (Claude via Anthropic/Bedrock only), 1 024–64 000.
    * On Haiku 4.5 and older it's the thinking token budget (8 000–16 000 is a
    * good start); newer models only take adaptive thinking, so there any value
@@ -97,7 +102,16 @@ export type BuildStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
   | { type: 'step'; step: AgentStepDTO }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
-  | { type: 'approval_request'; toolCallId: string; toolName: string; input: unknown }
+  | {
+      type: 'approval_request';
+      toolCallId: string;
+      toolName: string;
+      input: unknown;
+      /** Why this call needs a person (lib/llm/approval-policy.ts), e.g. 'outbound'. */
+      reason: string;
+      /** Human-readable form of `reason`. */
+      reasonText: string;
+    }
   | { type: 'approval_resolved'; toolCallId: string; approved: boolean; reason: string }
   | {
       type: 'done';

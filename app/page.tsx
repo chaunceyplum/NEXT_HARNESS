@@ -16,7 +16,7 @@ interface RunState {
   usage: TokenUsage;
   done: boolean;
   error?: string;
-  /** Destructive tool calls the run is paused on, waiting for Approve/Deny. */
+  /** Tool calls the run is paused on, waiting for Approve/Deny. */
   pendingApprovals: PendingApproval[];
 }
 
@@ -24,6 +24,8 @@ interface PendingApproval {
   toolCallId: string;
   toolName: string;
   input: unknown;
+  /** Why the call needs a person, e.g. "sends data or code outside the platform". */
+  reasonText: string;
   /** Set while the decision POST is in flight. */
   submitting?: boolean;
 }
@@ -142,7 +144,7 @@ export default function Home() {
                   ...prev,
                   pendingApprovals: [
                     ...prev.pendingApprovals,
-                    { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input },
+                    { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, reasonText: event.reasonText },
                   ],
                 }
               : prev
@@ -342,7 +344,7 @@ export default function Home() {
             </p>
             {runState.pendingApprovals.map((p) => (
               <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
-                <p className="text-amber-900 font-semibold">Approval needed: destructive action</p>
+                <p className="text-amber-900 font-semibold">Approval needed: {p.reasonText}</p>
                 <p className="text-amber-800 text-sm mt-1">
                   The agent wants to run <code className="bg-white px-1.5 py-0.5 rounded">{p.toolName}</code> with:
                 </p>

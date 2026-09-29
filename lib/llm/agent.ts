@@ -41,6 +41,7 @@ import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
+import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -102,6 +103,11 @@ export interface RunAgentOptions {
    */
   dryRun?: boolean;
   /**
+   * Rollout stage (approval-policy.ts): 'assisted' asks before every write,
+   * 'shadow' dry-runs every write. Can only tighten ROLLOUT_MODE.
+   */
+  rolloutMode?: RolloutMode;
+  /**
    * TASK 10: Enable extended thinking (Claude via Anthropic / Bedrock only).
    * Ignored for other providers and non-Claude Bedrock models.
    *
@@ -123,13 +129,20 @@ export interface RunAgentOptions {
    */
   onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
   /**
-   * TASK 9: asks a human to approve one destructive tool call (delete_*,
-   * abort_*, privacy jobs, merge_pr — including ones routed via call_tool)
-   * before it runs. Not consulted in dry-run mode, where destructive tools
-   * don't execute. On a live run without an approver, destructive calls are
-   * denied. The eval path (opts.tools) is never gated.
+   * TASK 9: asks a human to approve one tool call before it runs — every call
+   * approval-policy.ts flags: destructive tools, non-read-only SQL, outbound
+   * tools (commits, exports, destinations, publishing), credential reads, and
+   * every write in assisted mode. Calls routed via call_tool are unwrapped
+   * first. Calls that won't execute (dry-run/shadow) aren't gated. On a live
+   * run without an approver, flagged calls are denied. The eval path
+   * (opts.tools) is never gated.
    */
-  approveTool?: (call: { toolCallId: string; toolName: string; input: unknown }) => Promise<{ approved: boolean; reason?: string }>;
+  approveTool?: (call: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+    reason: ApprovalReason;
+  }) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
@@ -372,7 +385,7 @@ async function selectLiveTools(
   userInput: string,
   toolShortlistSize: number,
   toolRetries: number,
-  policy: { mode?: PolicyMode; dryRun?: boolean }
+  policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean }
 ): Promise<LiveToolSelection> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -453,6 +466,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
+  const rolloutMode = resolveRolloutMode(opts.rolloutMode);
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -463,22 +477,27 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries, {
       mode: opts.policy,
       dryRun: opts.dryRun,
+      dryRunWrites: rolloutMode === 'shadow',
     });
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
   }
 
-  // TASK 9: gate destructive calls on a human decision (live runs only).
+  // TASK 9: gate risky calls on a human decision (live runs only).
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = opts.tools
     ? undefined
     : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
-        if (dryRun || classifyTool(call.toolName) !== 'destructive') return 'not-applicable' as const;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
+        if (!reason) return 'not-applicable' as const;
         if (!opts.approveTool) {
-          return { type: 'denied' as const, reason: 'Destructive tool calls need a human approver, and none is attached to this run.' };
+          return {
+            type: 'denied' as const,
+            reason: `This call needs a human approver (${APPROVAL_REASON_TEXT[reason]}), and none is attached to this run.`,
+          };
         }
-        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call });
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason });
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 
