@@ -1,9 +1,22 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ApiError, BuildRequest, BuildResponse, ModelOption } from '@/lib/types';
+import { AgentStepDTO, BuildStreamEvent, ModelOption, TokenUsage } from '@/lib/types';
 import AgentTrace from '@/components/AgentTrace';
+
+// ── Streaming state ───────────────────────────────────────────────────────────
+
+interface RunState {
+  runId: string;
+  steps: AgentStepDTO[];
+  toolsConsidered: string[];
+  finalText: string;
+  finishReason: string;
+  usage: TokenUsage;
+  done: boolean;
+  error?: string;
+}
 
 export default function Home() {
   const [description, setDescription] = useState('');
@@ -13,7 +26,8 @@ export default function Home() {
   const [maxSteps, setMaxSteps] = useState(20);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<BuildResponse | null>(null);
+  const [runState, setRunState] = useState<RunState | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     fetch('/api/models')
@@ -25,39 +39,98 @@ export default function Home() {
       .catch((err) => console.error('Failed to load models:', err));
   }, []);
 
+  function handleStop() {
+    abortRef.current?.abort();
+  }
+
   async function handleBuild(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setResult(null);
+    setRunState(null);
     setLoading(true);
 
-    try {
-      const payload: BuildRequest = {
-        description: description.trim(),
-        model: selectedModel || undefined,
-        toolShortlistSize,
-        maxSteps,
-      };
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
+    try {
       const response = await fetch('/api/build', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          description: description.trim(),
+          model: selectedModel || undefined,
+          toolShortlistSize,
+          maxSteps,
+        }),
+        signal: ctrl.signal,
       });
 
-      if (!response.ok) {
-        const errorData: ApiError = await response.json();
-        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        let msg = `HTTP ${response.status}`;
+        try { msg = JSON.parse(text).error ?? msg; } catch { /* plain text error */ }
+        throw new Error(msg);
       }
 
-      const data: BuildResponse = await response.json();
-      setResult(data);
+      // Read the NDJSON stream line by line
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const processLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let event: BuildStreamEvent;
+        try { event = JSON.parse(trimmed); } catch { return; }
+
+        if (event.type === 'run_start') {
+          setRunState({
+            runId: event.runId,
+            steps: [],
+            toolsConsidered: event.toolsConsidered,
+            finalText: '',
+            finishReason: 'running',
+            usage: {},
+            done: false,
+          });
+        } else if (event.type === 'step') {
+          setRunState((prev) =>
+            prev ? { ...prev, steps: [...prev.steps, event.step] } : prev
+          );
+        } else if (event.type === 'done') {
+          setRunState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  finalText: event.finalText,
+                  finishReason: event.finishReason,
+                  usage: event.usage,
+                  done: true,
+                }
+              : prev
+          );
+        } else if (event.type === 'error') {
+          setError(event.error);
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) processLine(line);
+      }
+      // Flush remaining buffer
+      if (buffer.trim()) processLine(buffer);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to run agent';
-      setError(errorMessage);
-      console.error('Build error:', err);
+      if ((err as Error).name !== 'AbortError') {
+        setError(err instanceof Error ? err.message : 'Failed to run agent');
+      }
     } finally {
       setLoading(false);
+      abortRef.current = null;
     }
   }
 
@@ -76,16 +149,10 @@ export default function Home() {
             </p>
           </div>
           <div className="flex flex-col items-center sm:items-end gap-1">
-            <Link
-              href="/results"
-              className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
-            >
+            <Link href="/results" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               View past runs →
             </Link>
-            <Link
-              href="/evals"
-              className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap"
-            >
+            <Link href="/evals" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
               View evals →
             </Link>
           </div>
@@ -121,9 +188,7 @@ export default function Home() {
                 className="w-full p-3 border-2 border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none"
               >
                 {models.map((m) => (
-                  <option key={m.key} value={m.key}>
-                    {m.label}
-                  </option>
+                  <option key={m.key} value={m.key}>{m.label}</option>
                 ))}
               </select>
             </div>
@@ -134,10 +199,7 @@ export default function Home() {
               </label>
               <input
                 id="toolShortlistSize"
-                type="range"
-                min={4}
-                max={80}
-                step={1}
+                type="range" min={4} max={80} step={1}
                 value={toolShortlistSize}
                 onChange={(e) => setToolShortlistSize(Number(e.target.value))}
                 disabled={loading}
@@ -145,8 +207,7 @@ export default function Home() {
               />
               <p className="text-xs text-gray-500 mt-1">
                 How many tools the agent is shown, on top of the always-on set. Raise this if a request needs a
-                less obvious tool (e.g. a lookup/list tool) the agent isn&apos;t reaching for — the tradeoff is a
-                larger prompt per tool-call turn.
+                less obvious tool the agent isn&apos;t reaching for.
               </p>
             </div>
 
@@ -156,19 +217,15 @@ export default function Home() {
               </label>
               <input
                 id="maxSteps"
-                type="range"
-                min={1}
-                max={50}
-                step={1}
+                type="range" min={1} max={50} step={1}
                 value={maxSteps}
                 onChange={(e) => setMaxSteps(Number(e.target.value))}
                 disabled={loading}
                 className="w-full"
               />
               <p className="text-xs text-gray-500 mt-1">
-                Tool-call round trips before the agent is forced to stop. Raise this for requests that chain many
-                dependent steps (e.g. find a property, then its rules, then add a component) — if a run ends with
-                &quot;finished: tool-calls&quot; instead of &quot;stop&quot;, it hit this limit mid-task.
+                Tool-call round trips before the agent is forced to stop. If a run ends with
+                &quot;finished: tool-calls&quot; instead of &quot;stop&quot;, raise this.
               </p>
             </div>
 
@@ -179,7 +236,7 @@ export default function Home() {
               </div>
             )}
 
-            <div className="flex gap-4">
+            <div className="flex gap-3">
               <button
                 type="submit"
                 disabled={loading || !description.trim()}
@@ -187,32 +244,49 @@ export default function Home() {
               >
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
-                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                    Running agent...
+                    <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Running…
                   </span>
                 ) : (
                   'Run'
                 )}
               </button>
+              {loading && (
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="px-6 py-3 bg-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Stop
+                </button>
+              )}
             </div>
           </form>
         </div>
 
-        {/* Agent trace */}
-        {result && (
+        {/* Live agent trace — updates as steps stream in */}
+        {runState && (
           <div className="mb-6">
             <p className="text-xs text-gray-500 mb-2">
-              Run ID: <code className="bg-white px-2 py-0.5 rounded">{result.runId}</code> ·{' '}
-              <Link href={`/results/${result.runId}`} className="text-blue-600 hover:text-blue-700">
-                view in history
-              </Link>
+              Run ID: <code className="bg-white px-2 py-0.5 rounded">{runState.runId}</code>
+              {runState.done && (
+                <>
+                  {' · '}
+                  <Link href={`/results/${runState.runId}`} className="text-blue-600 hover:text-blue-700">
+                    view in history
+                  </Link>
+                </>
+              )}
+              {loading && (
+                <span className="ml-2 inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin align-middle" />
+              )}
             </p>
             <AgentTrace
-              steps={result.steps}
-              toolsConsidered={result.toolsConsidered}
-              finishReason={result.finishReason}
-              finalText={result.finalText}
-              usage={result.usage}
+              steps={runState.steps}
+              toolsConsidered={runState.toolsConsidered}
+              finishReason={runState.done ? runState.finishReason : 'running'}
+              finalText={runState.done ? runState.finalText : ''}
+              usage={runState.done ? runState.usage : undefined}
             />
           </div>
         )}
