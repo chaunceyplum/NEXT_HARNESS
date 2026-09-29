@@ -57,13 +57,14 @@ export interface BuildRequest {
   maxSteps?: number;
   /**
    * TASK 9: Tool policy. 'read-only' removes all write and destructive tools
-   * so the model structurally cannot call them. Defaults to BUILD_POLICY env
-   * var, or 'full' if unset.
+   * so the model structurally cannot call them. Can only tighten the
+   * BUILD_POLICY env var — 'full' does not override BUILD_POLICY=read-only.
    */
   policy?: 'full' | 'read-only';
   /**
    * TASK 9: When true, destructive tools describe what they would do instead
-   * of executing. Defaults to TOOL_DRY_RUN env var.
+   * of executing. Can only tighten the TOOL_DRY_RUN env var — false does not
+   * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
   /**

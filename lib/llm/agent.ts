@@ -3,8 +3,9 @@
  *
  * Runtime optimisations layered on top of the basic generateText loop:
  *
- *   1. Prompt caching (TASK 1): the system prompt is sent as a messages-array
- *      system message with providerOptions.anthropic.cacheControl so Anthropic
+ *   1. Prompt caching (TASK 1): the system prompt is sent as a SystemModelMessage
+ *      via `instructions` (AI SDK v7 rejects system messages inside `messages`)
+ *      with providerOptions.anthropic.cacheControl so Anthropic
  *      and Bedrock cache it after the first step. Tool definitions are similarly
  *      cached via toolOrder stability (shortlist never shuffles). Cache-write on
  *      the first step, much-cheaper cache-read on every subsequent step.
@@ -19,9 +20,11 @@
  *      allowed step so the model always writes a coherent closing answer rather
  *      than being cut off mid-tool-call when stepCountIs fires.
  *
- *   6. find_tools mid-run expansion (TASK 6): a synthetic `find_tools` tool is
- *      always-on. When the model calls it, the returned names are added to the
- *      active set for the remaining steps via prepareStep's activeTools.
+ *   6. find_tools mid-run expansion (TASK 6): every catalog tool is built and
+ *      passed to generateText, but prepareStep's activeTools narrows what the
+ *      model sees to the shortlist plus the always-on synthetic `find_tools`.
+ *      When the model calls find_tools, the returned names join the active set
+ *      for the remaining steps.
  */
 
 import { generateText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
@@ -31,7 +34,7 @@ import { buildAiTools, getMcpToolCatalog, type McpToolDefinition } from './tool-
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
-import { applyToolPolicy } from './tool-policy';
+import { applyToolPolicy, type PolicyMode } from './tool-policy';
 
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace };
@@ -83,12 +86,13 @@ export interface RunAgentOptions {
    * TASK 9: Tool policy to apply before handing the tool set to the model.
    * 'read-only' removes all write and destructive tools structurally —
    * the model cannot call them at all, not just rule-based.
-   * Defaults to the BUILD_POLICY env var, or 'full' if unset.
+   * Can only tighten BUILD_POLICY: BUILD_POLICY=read-only wins over 'full' here.
    */
-  policy?: import('./tool-policy').PolicyMode;
+  policy?: PolicyMode;
   /**
    * TASK 9: When true, wraps destructive tools to return a dry-run description
-   * instead of executing. Defaults to TOOL_DRY_RUN env var.
+   * instead of executing. Can only tighten TOOL_DRY_RUN: false here does not
+   * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
   /**
@@ -117,8 +121,8 @@ export interface RunAgentOptions {
  */
 const CACHE_CONTROL = { type: 'ephemeral' } as const;
 
-/** Build the system message as a ModelMessage with cache control attached. */
-function buildSystemMessage(): ModelMessage {
+/** Build the system prompt as a SystemModelMessage with cache control attached, for `instructions`. */
+function buildSystemMessage(): ModelMessage & { role: 'system' } {
   return {
     role: 'system',
     content: systemPrompt(),
@@ -312,16 +316,17 @@ function buildFindToolsTool(catalog: McpToolDefinition[]) {
 // ── Tool selection ────────────────────────────────────────────────────────────
 
 interface LiveToolSelection {
+  /** Every catalog tool that survived the policy, plus find_tools and policy_info. */
   tools: ToolSet;
+  /** The initial active set: always-on tools plus the semantic shortlist. */
   toolsConsidered: string[];
-  allCatalogNames: Set<string>;
-  catalog: McpToolDefinition[];
 }
 
 async function selectLiveTools(
   userInput: string,
   toolShortlistSize: number,
-  toolRetries: number
+  toolRetries: number,
+  policy: { mode?: PolicyMode; dryRun?: boolean }
 ): Promise<LiveToolSelection> {
   const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
@@ -331,21 +336,22 @@ async function selectLiveTools(
     shortlistTools(userInput, { k: toolShortlistSize, exclude: alwaysOn })
   );
 
-  const selectedNames = new Set<string>([...alwaysOn, ...shortlisted]);
-  const selectedDefs = [...selectedNames]
-    .map((name) => catalogByName.get(name))
-    .filter((d): d is McpToolDefinition => Boolean(d));
+  // TASK 6: build the whole catalog, not just the shortlist — activeTools can
+  // only select from tools passed to generateText, so a tool find_tools
+  // discovers must already exist here to be activated later. Only the active
+  // subset is sent to the model on each step.
+  //
+  // TASK 9: the policy runs over the whole catalog, so a tool activated
+  // mid-run via find_tools is filtered/dry-run-wrapped like any other.
+  const tools = applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries }), policy);
 
-  const tools = buildAiTools(selectedDefs, { maxRetries: toolRetries });
-
-  // TASK 6: add find_tools to the always-on set
-  tools['find_tools'] = buildFindToolsTool(catalog);
+  // Index only tools that survived the policy, so find_tools never suggests
+  // one read-only mode removed.
+  tools['find_tools'] = buildFindToolsTool(catalog.filter((t) => t.name in tools));
 
   return {
     tools,
-    toolsConsidered: [...selectedNames],
-    allCatalogNames: new Set(catalog.map((t) => t.name)),
-    catalog,
+    toolsConsidered: [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in tools),
   };
 }
 
@@ -363,28 +369,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
-  let allCatalogNames: Set<string>;
+  // TASK 6: names the model can see on each step; find_tools results are
+  // added mid-run. Undefined on the eval path (opts.tools), which has no
+  // find_tools and exposes its whole scripted set every step.
+  let activeToolNames: Set<string> | undefined;
 
   if (opts.tools) {
+    // Evals pass opts.tools and bypass the tool policy so scripted tool
+    // fixtures aren't accidentally filtered.
     tools = opts.tools;
     toolsConsidered = Object.keys(opts.tools);
-    allCatalogNames = new Set(toolsConsidered);
   } else {
-    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries);
+    const live = await selectLiveTools(userInput, toolShortlistSize, toolRetries, {
+      mode: opts.policy,
+      dryRun: opts.dryRun,
+    });
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
-    allCatalogNames = live.allCatalogNames;
+    activeToolNames = new Set([...toolsConsidered, 'find_tools', 'policy_info']);
   }
-
-  // TASK 9: apply tool policy (read-only mode, dry-run) before handing
-  // the tool set to the model. Evals pass opts.tools and bypass this so
-  // scripted tool fixtures aren't accidentally filtered.
-  if (!opts.tools) {
-    tools = applyToolPolicy(tools, { mode: opts.policy, dryRun: opts.dryRun });
-  }
-
-  // TASK 6: tracks tool names added mid-run by find_tools calls
-  const expandedToolNames = new Set<string>(toolsConsidered);
 
   const isPinned = Boolean(modelKey);
   const registry = getModelRegistry();
@@ -409,10 +412,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     return stage(`chat model call (${resolvedModelKey})`, () =>
       generateText({
         model: resolveModel(resolvedModelKey),
-        messages: [
-          systemMessage,
-          { role: 'user', content: userInput },
-        ],
+        instructions: systemMessage,
+        messages: [{ role: 'user', content: userInput }],
         tools,
         stopWhen: stepCountIs(maxSteps),
         // TASK 10: merge thinking providerOptions when budget is set
@@ -424,9 +425,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
               if (part.type === 'tool-result' && part.toolName === 'find_tools') {
                 const resultVal = (part as unknown as { output?: unknown; result?: unknown }).output
                   ?? (part as unknown as { result?: unknown }).result;
-                if (resultVal && typeof resultVal === 'object' && Array.isArray((resultVal as Record<string, unknown>).tools)) {
+                if (activeToolNames && resultVal && typeof resultVal === 'object' && Array.isArray((resultVal as Record<string, unknown>).tools)) {
                   for (const name of (resultVal as { tools: string[] }).tools) {
-                    if (allCatalogNames.has(name)) expandedToolNames.add(name);
+                    if (name in tools) activeToolNames.add(name);
                   }
                 }
               }
@@ -446,9 +447,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           const isLastStep = steps.length >= maxSteps - 2;
           return {
             toolChoice: isLastStep ? 'none' : 'auto',
-            activeTools: expandedToolNames.size > 0
-              ? ([...expandedToolNames, 'find_tools'] as Array<keyof typeof tools>)
-              : undefined,
+            activeTools: activeToolNames ? [...activeToolNames] : undefined,
             ...(compressedMessages ? { messages: compressedMessages } : {}),
           };
         },
