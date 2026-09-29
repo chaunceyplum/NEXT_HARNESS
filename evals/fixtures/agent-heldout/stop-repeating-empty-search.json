@@ -1,0 +1,18 @@
+{
+  "id": "stop-repeating-empty-search",
+  "note": "HELD OUT: do not tune prompts against this fixture (see evals/README.md). The segment doesn't exist; repeated identical lookups return the same empty list. The agent should stop quickly and say so.",
+  "category": "recovery",
+  "request": "What's the PQL for the 'Platinum Lapsed' segment?",
+  "tools": [
+    { "name": "adobe_list_segments", "description": "List AEP segment definitions in the configured sandbox.", "responses": [{ "result": { "segments": [{ "id": "seg-1", "name": "Gold VIP" }, { "id": "seg-2", "name": "Lapsed 90d" }] } }] },
+    { "name": "adobe_get_segment", "description": "Get one AEP segment definition by id." }
+  ],
+  "expected": {
+    "maxCallsPerTool": { "adobe_list_segments": 2 },
+    "finishReasons": ["stop"],
+    "criteria": [
+      "The answer says no segment named 'Platinum Lapsed' was found, and does not invent a PQL expression.",
+      "The answer mentions a close match or asks the user to confirm the name."
+    ]
+  }
+}
