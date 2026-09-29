@@ -14,9 +14,13 @@ vi.mock('@/lib/mcp-client', () => ({
 }));
 
 const { executeMcpToolWithRetry, retryDelayMs } = await import('./tool-catalog');
+const { invalidateReadCache } = await import('./tool-call-cache');
 
 beforeEach(() => {
   calls.length = 0;
+  // The read cache is process-wide; clear it so identical reads across these
+  // tests aren't served from a prior test's cached result.
+  invalidateReadCache();
 });
 
 describe('retryDelayMs', () => {

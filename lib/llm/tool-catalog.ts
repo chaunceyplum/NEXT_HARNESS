@@ -12,6 +12,14 @@
  */
 
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
+import { classifyTool } from './tool-policy';
+import {
+  cachedRead,
+  duplicateWriteResult,
+  invalidateReadCache,
+  isRejectedBeforeExecution,
+  WriteDeduper,
+} from './tool-call-cache';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from './rag-judge';
@@ -447,10 +455,17 @@ export interface ExecuteMcpToolWithRetryOptions {
   availableNames: Set<string>;
   /** Per-run lookup state (see GroundingState). A fresh one is used if omitted. */
   grounding?: GroundingState;
+  /** Per-run record of successful writes, so an identical write isn't sent twice (tool-call-cache.ts). */
+  deduper?: WriteDeduper;
   /** The run was stopped: abort the in-flight request and skip any remaining retries. */
   abortSignal?: AbortSignal;
   /** Per-run RAG judgment collector (see RagJudgmentSink). Omit to skip live judging. */
   ragJudgmentSink?: RagJudgmentSink;
+}
+
+/** Reads whose results must never be shared between callers. */
+function isCacheableRead(toolName: string): boolean {
+  return !/credential|secret/i.test(toolName);
 }
 
 /**
@@ -473,7 +488,13 @@ export interface ExecuteMcpToolWithRetryOptions {
  *
  *   3. Transient errors (5xx, timeouts, network, 429 rate limits): retry
  *      with exponential back-off. No lookup — documentation can't fix an
- *      outage or a rate limit.
+ *      outage or a rate limit. For a write or destructive tool, only errors
+ *      that show the request was refused before it ran (429, 503, refused
+ *      connection) are retried; after a timeout or other 5xx the change may
+ *      already have been applied, so the model is told to check instead.
+ *
+ * Writes are also de-duplicated within a run, and reads are served from a
+ * short-lived cache that any write clears (lib/llm/tool-call-cache.ts).
  *
  * Retry history (including any lookup findings) rides along on the eventual
  * result/error so it's visible in the trace, not just to the model.
@@ -488,10 +509,34 @@ export async function executeMcpToolWithRetry(
   const { maxRetries, availableNames, abortSignal } = opts;
   const grounding = opts.grounding ?? createGroundingState();
   const isRagTool = RAG_TOOLS.has(toolName);
+  const isWrite = classifyTool(toolName) !== 'read';
 
-  if (isRagTool || maxRetries <= 0) {
-    const result = await callTool(toolName, args, abortSignal);
-    return isRagTool ? withRagJudgment(toolName, args, result, opts.ragJudgmentSink) : result;
+  if (isWrite && opts.deduper) {
+    const earlier = opts.deduper.get(toolName, args);
+    if (earlier.hit) return duplicateWriteResult(toolName, earlier.result);
+  }
+  const invoke = (): Promise<unknown> =>
+    isWrite || !isCacheableRead(toolName)
+      ? callTool(toolName, args, abortSignal)
+      : cachedRead(toolName, args, () => callTool(toolName, args, abortSignal));
+  const succeeded = (result: unknown): unknown => {
+    if (isWrite) {
+      invalidateReadCache();
+      opts.deduper?.record(toolName, args, result);
+    }
+    return result;
+  };
+
+  if (isRagTool) {
+    return withRagJudgment(toolName, args, await callTool(toolName, args, abortSignal), opts.ragJudgmentSink);
+  }
+  if (maxRetries <= 0) {
+    try {
+      return succeeded(await invoke());
+    } catch (err) {
+      if (isWrite) invalidateReadCache(); // it may have partly landed
+      throw err;
+    }
   }
 
   const attempts: RetryAttemptRecord[] = [];
@@ -499,7 +544,7 @@ export async function executeMcpToolWithRetry(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const result = await callTool(toolName, args, abortSignal);
+      const result = succeeded(await invoke());
       if (attempts.length === 0) return result;
       // Succeeded after retrying — attach retry history without
       // disturbing the shape callers rely on for reading fields directly
@@ -554,8 +599,17 @@ export async function executeMcpToolWithRetry(
         );
       }
 
-      // Tier 3: transient error — back off and retry.
+      // Tier 3: transient error — back off and retry. A write is retried
+      // only if the server certainly didn't act on it.
       attempts.push({ attempt: attempt + 1, error: message });
+      if (isWrite && !isRejectedBeforeExecution(message)) {
+        invalidateReadCache();
+        throw new Error(
+          `${toolName} failed with an error that doesn't show whether the change was applied: ${message}\n` +
+            'It was NOT retried automatically, to avoid applying it twice. Check the current state with a read/list tool before calling it again.\n' +
+            `Retry history: ${JSON.stringify(attempts)}`
+        );
+      }
       if (attempt < maxRetries) {
         await sleep(retryDelayMs(attempt + 1, message), abortSignal);
       }
@@ -613,6 +667,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
   const availableNames = new Set(defs.map((d) => d.name));
   // One per buildAiTools() call, i.e. per agent run — shared by every tool in it.
   const grounding = createGroundingState();
+  const deduper = new WriteDeduper();
   const tools: ToolSet = {};
 
   for (const def of defs) {
@@ -625,7 +680,7 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
         const result = await executeMcpToolWithRetry(
           def.name,
           (input as Record<string, unknown>) ?? {},
-          { maxRetries, availableNames, grounding, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
+          { maxRetries, availableNames, grounding, deduper, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
         );
         return capToolResult(def.name, result);
       },
