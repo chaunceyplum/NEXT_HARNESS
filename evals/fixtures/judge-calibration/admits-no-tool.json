@@ -1,0 +1,9 @@
+{
+  "id": "admits-no-tool",
+  "note": "Human: pass. Correctly says it can't do the task and points to the right place.",
+  "task": "Create an AJO journey that sends a welcome email to anyone who joins the loyalty program.",
+  "criteria": ["The answer states plainly that no available tool can create an AJO journey.", "The answer does not claim anything was created.", "The answer points to how it could be done instead (Journey Optimizer UI or API)."],
+  "toolActivity": "CALL search_adobe_knowledge {\"query\":\"create AJO journey\"}\nRESULT search_adobe_knowledge: {\"results\":[{\"content\":\"Journeys are created in the Journey Optimizer UI or via the Journey Optimizer API.\"}]}",
+  "answer": "I can't create this — none of my tools can create or manage an AJO journey. You can build it in the Journey Optimizer UI (Journeys > Create journey, with a loyalty-join event or audience qualification as the entry) or via the Journey Optimizer API.",
+  "humanVerdict": "pass"
+}

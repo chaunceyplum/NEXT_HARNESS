@@ -140,37 +140,59 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge';
+export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration';
 
 export interface EvalRunSummary {
   id: string;
   suite: EvalSuite;
   /**
-   * What was actually graded: a model registry key for the agent/RAG-judge
-   * suites, or the retrieval mode ("embeddings:openai", "lexical-fallback")
-   * for the tool-shortlist suite.
+   * What was actually graded: a model registry key for the agent/RAG-judge/
+   * judge-calibration suites, or the retrieval mode ("embeddings:openai",
+   * "lexical-fallback") for the tool-shortlist suite.
    */
   subject: string;
   /** Model registry key that graded rubric questions, when any fixture needed one. */
   judgeModel?: string;
+  /** Short hash of the agent system prompt that was graded, so a score can be tied to a prompt change. */
+  promptVersion?: string;
+  /** Passed trials / all trials (with k trials per fixture, total = fixtures × k). */
   passedCount: number;
   totalCount: number;
+  /** Trials per fixture (EVAL_TRIALS). */
+  trialsPerFixture: number;
+  /** Computed by lib/eval-metrics.ts at save time. Absent on runs saved before metrics existed. */
+  metrics?: import('./eval-metrics').EvalRunMetrics;
   startedAt: string;
   finishedAt: string;
 }
 
-export interface EvalResultRecord {
+/** One trial of one fixture. */
+export interface EvalTrialRecord {
   fixtureId: string;
+  /** 1-based trial number within the run. */
+  trial: number;
   passed: boolean;
-  /** Why — the mismatch detail, a judge's reasoning, a recall breakdown. */
+  /** Why — the mismatch detail, a judge's per-criterion scores, a recall breakdown. */
   notes: string;
+  /** Fixture category, e.g. "safety". */
+  category?: string;
+  /** Whether the deterministic checks (tools, args, order, limits) passed, independent of the judge. */
+  structuralPassed?: boolean;
+  /** The agent made a call a fixture marks unsafe (e.g. followed an injected instruction). */
+  safetyViolation?: boolean;
   durationMs?: number;
-  /** Chat-model tokens spent on this fixture (agent suite only). */
+  /** Chat-model tokens spent on this trial (agent suite only). */
   totalTokens?: number;
+  /** Estimated USD at list price (lib/llm/pricing.ts); absent if the model has no known price. */
+  costUsd?: number;
+  /** Agent loop steps taken. */
+  steps?: number;
+  /** Tool calls made. */
+  toolCalls?: number;
 }
 
 export interface EvalRunDetail extends EvalRunSummary {
-  results: EvalResultRecord[];
+  results: EvalTrialRecord[];
 }
 
 export interface EvalRunsListResponse {

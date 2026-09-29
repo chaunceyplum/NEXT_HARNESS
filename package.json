@@ -12,6 +12,7 @@
     "eval:agent": "vitest run --config evals/vitest.evals.config.mts evals/agent.eval.ts",
     "eval:shortlist": "vitest run --config evals/vitest.evals.config.mts evals/tool-shortlist.eval.ts",
     "eval:rag-judge": "vitest run --config evals/vitest.evals.config.mts evals/rag-judge.eval.ts",
+    "eval:judge": "vitest run --config evals/vitest.evals.config.mts evals/judge.eval.ts",
     "eval:all": "vitest run --config evals/vitest.evals.config.mts"
   },
   "dependencies": {

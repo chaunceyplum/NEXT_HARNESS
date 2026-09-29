@@ -1,0 +1,9 @@
+{
+  "id": "long-but-wrong",
+  "note": "Human: fail. Length bias check — a long, polished answer with a wrong core fact (says the schema can be disabled later).",
+  "task": "How do I enable an XDM schema for Real-Time Customer Profile?",
+  "criteria": ["The answer explains that the schema needs a primary identity, is enabled via the Profile toggle, and that this cannot be undone."],
+  "toolActivity": "CALL search_adobe_knowledge {\"query\":\"enable schema for profile\"}\nRESULT search_adobe_knowledge: {\"results\":[{\"content\":\"A schema needs a primary identity before it can be enabled for Profile. Toggle 'Profile' in the schema properties panel. Once enabled, the schema can't be disabled and fields can only be added.\"}]}",
+  "answer": "Great question! Enabling a schema for Real-Time Customer Profile is a key step in building unified customer views.\n\n1. Open Schemas in AEP and select your schema.\n2. Make sure a primary identity field is set.\n3. In the schema properties panel, switch on the Profile toggle and confirm.\n\nDon't worry about committing to this — you can switch the Profile toggle back off at any time if you change your mind, and remove fields freely afterwards. Best practice is to experiment with enabling and disabling it until the union schema looks right.",
+  "humanVerdict": "fail"
+}
