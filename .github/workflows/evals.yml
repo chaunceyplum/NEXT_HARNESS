@@ -1,0 +1,53 @@
+name: Evals
+
+# Real providers, real cost: nightly and on demand, not on every PR.
+# Each suite skips itself when its credentials aren't configured; the gate
+# then fails only on suites that ran (set EVAL_REQUIRE_ALL to fail on skips).
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: Trials per fixture (EVAL_TRIALS)
+        default: '3'
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EVAL_TRIALS: ${{ github.event.inputs.trials || '3' }}
+      EVAL_METRICS_DIR: eval-results
+      NEXT_TELEMETRY_DISABLED: 1
+      MCP_ENDPOINT_URL: ${{ secrets.MCP_ENDPOINT_URL }}
+      MCP_API_KEY: ${{ secrets.MCP_API_KEY }}
+      MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      DEFAULT_MODEL: ${{ vars.DEFAULT_MODEL }}
+      EVAL_MODEL: ${{ vars.EVAL_MODEL }}
+      EVAL_JUDGE_MODEL: ${{ vars.EVAL_JUDGE_MODEL }}
+      EVAL_REQUIRE_ALL: ${{ vars.EVAL_REQUIRE_ALL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Run eval suites
+        # The gate below decides pass/fail from the recorded metrics, so a
+        # failing fixture doesn't stop the other suites from running.
+        run: npm run eval:all || true
+      - name: Regression gate (evals/baseline.json)
+        run: node scripts/check-eval-baseline.mjs eval-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: eval-results/
+          if-no-files-found: ignore
