@@ -363,6 +363,22 @@ If planning fails, the run continues without a plan.
 | `PLAN_FIRST` | `false` | Plan every run unless the request says otherwise |
 | `PLAN_APPROVAL` | `false` | Require plan approval for every planned run |
 
+## Production metrics, feedback and the online judge
+
+- **/metrics** (`GET /api/metrics?days=7`): success rate, p50/p95 latency,
+  steps, cost per success, escalation rate (runs with a denied tool call),
+  how runs ended, a per-model breakdown, and a review queue.
+- **Feedback**: 👍/👎 + comment on each run page (`POST /api/runs/:id/feedback`).
+  A 👎 counts the run as unsuccessful.
+- **Online judge** (`lib/online-judge.ts`): grades a sample of completed
+  runs off the request path, with the same rubric judge as the evals.
+  - `ONLINE_JUDGE_SAMPLE_RATE` (default `0.1`; `0` disables)
+  - `ONLINE_JUDGE_MODEL` (default: the eval judge, which is the strongest
+    tier of the default provider; `EVAL_JUDGE_MODEL` also applies)
+
+Signals are stored in `harness_run_quality`. See `OPERATIONS.md` for the
+weekly review that uses them.
+
 ## Audit log (`lib/audit-log.ts`)
 
 Every consequential action is recorded in `harness_audit_log` (the MCP
