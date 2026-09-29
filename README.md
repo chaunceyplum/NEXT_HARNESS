@@ -49,6 +49,42 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Docker
+
+The app and the eval suite both run under Docker Compose. Configuration
+comes from the same `.env.local` that `npm run dev` reads (copy
+`.env.local.example`). It's injected when a container starts and never
+copied into an image; `.dockerignore` keeps every `.env*` file out of the
+build.
+
+```bash
+docker compose up -d --build                     # the app on http://localhost:3000
+docker compose logs -f app
+docker compose ps                                # shows "healthy" once /api/models answers
+
+docker compose run --rm --build evals            # npm run eval:all
+docker compose run --rm evals eval:judge         # one suite
+docker compose run --rm -e EVAL_TRIALS=5 evals   # per-run overrides
+
+docker compose down
+```
+
+- **Images.** `Dockerfile` is multi-stage. `runner` is the app, built with
+  Next's `output: "standalone"` (a minimal `server.js` and only the traced
+  `node_modules`), running as a non-root user and healthchecked on
+  `GET /api/models`, which makes no MCP or model calls. `evals` is the full
+  source plus dev dependencies for vitest. It only runs on demand (compose
+  profile `evals`), never with `up`.
+- **Port.** Set `HARNESS_PORT=8080` to publish on a different host port.
+- **Config changes** need a restart, not a rebuild:
+  `docker compose up -d --force-recreate app`. Code changes need
+  `--build`.
+- **Bedrock with an EC2 instance role instead of keys:** containers reach
+  the instance metadata service only if its IMDSv2 hop limit is at least 2
+  (`aws ec2 modify-instance-metadata-options --instance-id <id>
+  --http-put-response-hop-limit 2`). The Claude API
+  (`ANTHROPIC_API_KEY` + `DEFAULT_MODEL=anthropic:…`) needs nothing extra.
+
 ## Testing
 
 ```bash

@@ -1,0 +1,33 @@
+# docker compose up -d --build                         # the app on http://localhost:3000
+# docker compose run --rm --build evals                # every eval suite (npm run eval:all)
+# docker compose run --rm evals eval:judge             # one suite
+# docker compose run --rm -e EVAL_TRIALS=5 evals       # per-run overrides
+#
+# Configuration comes from .env.local (copy .env.local.example), the same
+# file `npm run dev` reads. It's injected at runtime and never copied into
+# an image (see .dockerignore).
+
+services:
+  app:
+    build:
+      context: .
+      target: runner
+    image: next-harness:latest
+    env_file:
+      - path: .env.local
+        required: true
+    ports:
+      - "${HARNESS_PORT:-3000}:3000"
+    restart: unless-stopped
+    # Healthcheck is defined in the Dockerfile (GET /api/models).
+
+  evals:
+    build:
+      context: .
+      target: evals
+    image: next-harness-evals:latest
+    env_file:
+      - path: .env.local
+        required: true
+    # Only runs on demand (`docker compose run evals`), never with `up`.
+    profiles: ["evals"]
