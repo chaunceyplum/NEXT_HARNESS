@@ -42,6 +42,12 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
     void recordAudit(batch);
   };
 
+  // The model the run is actually on: a routed "auto" request resolves in
+  // onRoute and a model-health fallback moves it in onRestart. A failed run
+  // is saved under this, not the requested key, so failures are attributed
+  // to the model that produced them (NEXT_HARNESS_LLM_OPS groups by it).
+  let activeModelKey = req.model || getDefaultModelKey();
+
   const abort = new AbortController();
   const unregister = registerRun(runId, {
     abort,
@@ -72,7 +78,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         id: runId,
         createdAt,
         description: req.description,
-        model: req.model || getDefaultModelKey(),
+        model: activeModelKey,
         allowFullBuild: false,
         status: 'running',
         durationMs: Date.now() - startedAt,
@@ -134,6 +140,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         // TASK 1: stream assistant text token-by-token, through the output guardrail
         onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
         onRestart: ({ fromModelKey, toModelKey }) => {
+          activeModelKey = toModelKey;
           steps.length = 0;
           push({ type: 'restart', fromModelKey, toModelKey });
         },
@@ -153,7 +160,10 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
               },
             }
           : {}),
-        onRoute: (route) => push({ type: 'route', route }),
+        onRoute: (route) => {
+          activeModelKey = route.modelKey;
+          push({ type: 'route', route });
+        },
         // TASK 9: flagged calls wait here for the user's decision
         approveTool: async ({ toolCallId, toolName, input, reason }) => {
           push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
@@ -258,7 +268,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         id: runId,
         createdAt,
         description: req.description,
-        model: req.model || getDefaultModelKey(),
+        model: activeModelKey,
         allowFullBuild: false,
         status: 'failed',
         durationMs: Date.now() - startedAt,
