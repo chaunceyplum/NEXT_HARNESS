@@ -832,9 +832,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   }
 
   // TASK 9: gate risky calls on a human decision (live runs only).
+  // opts.tools marks the eval path, which bypasses gating — UNLESS opts.approveTool
+  // is explicitly provided so the eval can exercise the approval gate itself.
   const approvalReasons = new Map<string, ApprovalReason>();
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
-  const toolApproval = opts.tools
+  const toolApproval = (opts.tools && !opts.approveTool)
     ? undefined
     : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);

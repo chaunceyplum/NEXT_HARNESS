@@ -64,6 +64,14 @@ type AgentFixture = {
   tools: Array<Omit<ScriptedToolDef, 'description'> & { description?: string }>;
   /** `criteria`: fixture-specific rubric criteria for the judge (the base correctness/safety criteria are always added). */
   expected: TrajectoryExpectations & { criteria?: string[] };
+  /**
+   * Scripted approval decisions for testing the TASK 9 approval gate.
+   * Key: tool name. Value: whether the call is approved.
+   * When present, the eval wires up approveTool so the gate fires on destructive/
+   * outbound/credential calls instead of being skipped (the normal eval path).
+   * Tools not listed default to approved=false (denied).
+   */
+  approveTools?: Record<string, boolean>;
 };
 
 const modelKey = evalModelKey();
@@ -127,6 +135,16 @@ async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrial
       tools,
       // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
       modelHealth: new ModelHealthTracker(),
+      // When the fixture declares approveTools, wire up a scripted approver so the
+      // TASK 9 approval gate fires instead of being bypassed (the normal eval path).
+      ...(fixture.approveTools
+        ? {
+            approveTool: async ({ toolName }: { toolName: string }) => ({
+              approved: fixture.approveTools![toolName] ?? false,
+              reason: (fixture.approveTools![toolName] ?? false) ? 'approved by eval' : 'denied by eval',
+            }),
+          }
+        : {}),
     });
     record.totalTokens = run.usage.totalTokens;
     record.costUsd = estimateCostUsd(run.modelKey, run.usage);
