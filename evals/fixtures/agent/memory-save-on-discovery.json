@@ -1,0 +1,48 @@
+{
+  "id": "memory-save-on-discovery",
+  "note": "Tests that the agent saves a stable deployment identifier with remember_fact when it discovers one. The remember_fact tool is included as a scripted tool so the system prompt includes the memory rule. The agent should list schemas, find the 'Acme Customer Profile' schema id, and save it.",
+  "category": "scope",
+  "request": "What is the $id of the Acme Customer Profile XDM schema? Save it to memory so future runs don't have to look it up.",
+  "tools": [
+    {
+      "name": "adobe_list_schemas",
+      "description": "List XDM schema definitions in the configured AEP sandbox.",
+      "responses": [
+        {
+          "result": {
+            "results": [
+              { "$id": "https://ns.adobe.com/acme/schemas/abc123", "title": "Acme Customer Profile" },
+              { "$id": "https://ns.adobe.com/acme/schemas/def456", "title": "Acme Web Events" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "remember_fact",
+      "description": "Save a stable deployment fact for future runs, e.g. key \"aep.prod_sandbox\", value \"prod\". Overwrites the same key. Only identifiers you verified with a tool; never credentials or personal data. Lowercase key with letters, digits, \"_\", \".\" or \"-\".",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "value": { "type": "string" },
+          "note": { "type": "string" }
+        },
+        "required": ["key", "value"],
+        "additionalProperties": false
+      },
+      "responses": [{ "result": { "stored": "aep.schema.acme_customer_profile", "value": "https://ns.adobe.com/acme/schemas/abc123" } }]
+    }
+  ],
+  "expected": {
+    "mustCall": ["adobe_list_schemas", "remember_fact"],
+    "argsContain": [
+      { "tool": "remember_fact", "contains": "abc123" }
+    ],
+    "finishReasons": ["stop"],
+    "criteria": [
+      "The answer states the schema $id (https://ns.adobe.com/acme/schemas/abc123).",
+      "The answer confirms the identifier was saved to memory with remember_fact."
+    ]
+  }
+}
