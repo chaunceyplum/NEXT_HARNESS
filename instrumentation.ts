@@ -9,10 +9,16 @@
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
   const { markInterruptedRuns } = await import('./lib/execution-store');
   markInterruptedRuns()
     .then((n) => {
       if (n > 0) console.warn(`[startup] Marked ${n} run(s) left running by a previous process as interrupted.`);
     })
     .catch((err) => console.error('[startup] Could not mark interrupted runs:', err instanceof Error ? err.message : err));
+
+  // Pre-build the tool embedding index so the first agent run doesn't pay
+  // the catalog fetch + embedding batch cost on its critical path.
+  const { warmUpToolIndex } = await import('./lib/llm/tool-retrieval');
+  warmUpToolIndex();
 }

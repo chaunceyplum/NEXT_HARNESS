@@ -57,6 +57,16 @@ export function invalidateToolIndexCache(): void {
   indexPromise = null;
 }
 
+/**
+ * Start building the tool embedding index now so the first agent run
+ * doesn't pay the catalog fetch + embedding batch cost on the critical path.
+ * Safe to call at server startup — failures are swallowed (the index will
+ * be built on demand when the first run actually needs it).
+ */
+export function warmUpToolIndex(): void {
+  getToolIndex().catch(() => {/* swallow — demand path retries */});
+}
+
 export interface ShortlistOptions {
   k?: number;
   /** Tool names to never include (e.g. ones already added as always-on/gated). */
