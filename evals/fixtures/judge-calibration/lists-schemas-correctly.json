@@ -1,0 +1,9 @@
+{
+  "id": "lists-schemas-correctly",
+  "note": "Human: pass. Baseline common case — correct, grounded list with no extras.",
+  "task": "List all XDM schemas in the sandbox.",
+  "criteria": ["The answer lists all three schemas by title: 'Acme Customer Profile', 'Acme Web Events', and 'Acme Orders'."],
+  "toolActivity": "CALL adobe_list_schemas {}\nRESULT adobe_list_schemas: {\"results\":[{\"title\":\"Acme Customer Profile\"},{\"title\":\"Acme Web Events\"},{\"title\":\"Acme Orders\"}]}",
+  "answer": "Your sandbox has three XDM schemas:\n1. Acme Customer Profile\n2. Acme Web Events\n3. Acme Orders",
+  "humanVerdict": "pass"
+}

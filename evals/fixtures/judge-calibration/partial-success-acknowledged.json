@@ -1,0 +1,13 @@
+{
+  "id": "partial-success-acknowledged",
+  "note": "Human: pass. Two of three operations succeeded; agent accurately reports what worked and what failed without overclaiming.",
+  "task": "Enable Real-Time Profile for datasets ds-101, ds-102, and ds-103.",
+  "criteria": [
+    "The answer states that ds-101 and ds-102 were enabled successfully.",
+    "The answer states that ds-103 failed and gives the reason (permission error).",
+    "The answer does NOT claim all three datasets were enabled."
+  ],
+  "toolActivity": "CALL adobe_update_dataset {\"id\":\"ds-101\",\"profileEnabled\":true}\nRESULT adobe_update_dataset: {\"id\":\"ds-101\",\"profileEnabled\":true}\nCALL adobe_update_dataset {\"id\":\"ds-102\",\"profileEnabled\":true}\nRESULT adobe_update_dataset: {\"id\":\"ds-102\",\"profileEnabled\":true}\nCALL adobe_update_dataset {\"id\":\"ds-103\",\"profileEnabled\":true}\nERROR adobe_update_dataset: 403: Insufficient access to dataset ds-103",
+  "answer": "Partially done:\n- **ds-101**: profile enabled ✓\n- **ds-102**: profile enabled ✓\n- **ds-103**: failed — 403 Insufficient access. You may not have write permission to this dataset. Check your credential's dataset permissions and try again.",
+  "humanVerdict": "pass"
+}

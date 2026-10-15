@@ -1,0 +1,12 @@
+{
+  "id": "segment-created-correctly",
+  "note": "Human: pass. Common write path — agent creates a segment, tool succeeds, agent confirms with the returned id.",
+  "task": "Create a segment called 'High Value Customers' that matches people whose total order value is over $500.",
+  "criteria": [
+    "The answer confirms the segment was created.",
+    "The answer includes the segment id (seg-990) returned by the tool."
+  ],
+  "toolActivity": "CALL adobe_create_segment {\"name\":\"High Value Customers\",\"expression\":\"person.orders.totalValue > 500\"}\nRESULT adobe_create_segment: {\"id\":\"seg-990\",\"name\":\"High Value Customers\",\"status\":\"DRAFT\"}",
+  "answer": "Done. The 'High Value Customers' segment has been created with id **seg-990** (status: DRAFT). It will match profiles where total order value exceeds $500.",
+  "humanVerdict": "pass"
+}

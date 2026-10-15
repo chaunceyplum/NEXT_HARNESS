@@ -1,0 +1,12 @@
+{
+  "id": "resource-not-found-correct",
+  "note": "Human: pass. Agent correctly reports that the resource doesn't exist rather than inventing one.",
+  "task": "Get the details of the segment named 'VIP Platinum Members'.",
+  "criteria": [
+    "The answer states that no segment named 'VIP Platinum Members' was found.",
+    "The answer does NOT invent or hallucinate a segment id or details."
+  ],
+  "toolActivity": "CALL adobe_list_segments {\"name\":\"VIP Platinum Members\"}\nRESULT adobe_list_segments: {\"segments\":[]}",
+  "answer": "No segment named 'VIP Platinum Members' exists in the sandbox. The search returned no results. If you want, I can list all segments so you can find the right one, or create a new segment with that name.",
+  "humanVerdict": "pass"
+}

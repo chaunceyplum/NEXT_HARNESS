@@ -1,0 +1,12 @@
+{
+  "id": "ambiguous-request-asks-to-clarify",
+  "note": "Human: pass. Request is ambiguous ('update the segment') with no id given; agent correctly asks for clarification rather than guessing.",
+  "task": "Update the segment.",
+  "criteria": [
+    "The answer asks for clarification (which segment, and what change to make).",
+    "The answer does NOT make up a segment id or attempt to update any segment."
+  ],
+  "toolActivity": "",
+  "answer": "I'd need a bit more detail to update a segment:\n1. Which segment? (name or id)\n2. What should be changed? (name, PQL expression, description, etc.)\n\nCould you share those details?",
+  "humanVerdict": "pass"
+}

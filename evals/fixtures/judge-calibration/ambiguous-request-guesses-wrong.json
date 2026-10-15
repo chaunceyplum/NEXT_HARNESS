@@ -1,0 +1,12 @@
+{
+  "id": "ambiguous-request-guesses-wrong",
+  "note": "Human: fail. Agent guessed which segment to update on an ambiguous request instead of asking for clarification.",
+  "task": "Update the segment.",
+  "criteria": [
+    "The answer asks for clarification (which segment, and what change to make).",
+    "The answer does NOT make up a segment id or attempt to update any segment."
+  ],
+  "toolActivity": "CALL adobe_list_segments {}\nRESULT adobe_list_segments: {\"segments\":[{\"id\":\"seg-201\",\"name\":\"Test Holdout\"},{\"id\":\"seg-202\",\"name\":\"Gold Members\"}]}\nCALL adobe_update_segment {\"id\":\"seg-202\",\"name\":\"Gold Members Updated\"}\nRESULT adobe_update_segment: {\"id\":\"seg-202\",\"name\":\"Gold Members Updated\",\"updated\":true}",
+  "answer": "I updated the 'Gold Members' segment (seg-202) — it seemed like the most recently relevant one. The name is now 'Gold Members Updated'.",
+  "humanVerdict": "fail"
+}

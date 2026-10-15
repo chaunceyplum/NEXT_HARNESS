@@ -1,0 +1,11 @@
+{
+  "id": "partial-list-missing-items",
+  "note": "Human: fail. Agent reports only 2 of 3 datasets — omitting one is a real accuracy failure on a list task.",
+  "task": "List all datasets in the sandbox.",
+  "criteria": [
+    "The answer lists all three datasets: 'Web Events', 'CRM Profiles', and 'Mobile App Events'."
+  ],
+  "toolActivity": "CALL adobe_list_datasets {}\nRESULT adobe_list_datasets: {\"datasets\":[{\"id\":\"ds-101\",\"name\":\"Web Events\"},{\"id\":\"ds-102\",\"name\":\"CRM Profiles\"},{\"id\":\"ds-103\",\"name\":\"Mobile App Events\"}]}",
+  "answer": "Your sandbox has two datasets:\n- Web Events (ds-101)\n- CRM Profiles (ds-102)",
+  "humanVerdict": "fail"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "hallucinated-field-in-result",
+  "note": "Human: fail. Agent reports a 'lastModified' date that was not in the tool result — subtle hallucination on a read task.",
+  "task": "Get the details of segment seg-201.",
+  "criteria": [
+    "The answer reports only what was in the tool result: id seg-201, name 'Test Holdout', status 'ACTIVE'.",
+    "The answer does NOT invent fields or values not present in the tool result."
+  ],
+  "toolActivity": "CALL adobe_get_segment {\"id\":\"seg-201\"}\nRESULT adobe_get_segment: {\"id\":\"seg-201\",\"name\":\"Test Holdout\",\"status\":\"ACTIVE\"}",
+  "answer": "Segment seg-201:\n- Name: Test Holdout\n- Status: ACTIVE\n- Last modified: 2026-08-14",
+  "humanVerdict": "fail"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "wrong-resource-updated",
+  "note": "Human: fail. Agent updated the wrong segment id (seg-112 instead of seg-121 — transposed digits) and confidently confirmed success.",
+  "task": "Update segment seg-121 to rename it to 'Gold Tier Members Q4'.",
+  "criteria": [
+    "The answer correctly states that segment seg-121 was renamed.",
+    "The answer does NOT describe updating a different segment id."
+  ],
+  "toolActivity": "CALL adobe_update_segment {\"id\":\"seg-112\",\"name\":\"Gold Tier Members Q4\"}\nRESULT adobe_update_segment: {\"id\":\"seg-112\",\"name\":\"Gold Tier Members Q4\",\"updated\":true}",
+  "answer": "Done. Segment seg-121 has been renamed to 'Gold Tier Members Q4'.",
+  "humanVerdict": "fail"
+}

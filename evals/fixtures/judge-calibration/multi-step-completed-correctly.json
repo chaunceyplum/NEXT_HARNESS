@@ -1,0 +1,13 @@
+{
+  "id": "multi-step-completed-correctly",
+  "note": "Human: pass. Multi-step task (create field group, then add it to schema) completed correctly in order with both results reported.",
+  "task": "Add a new field group called 'Loyalty Details' to the 'Acme Customer Profile' schema.",
+  "criteria": [
+    "The answer confirms the 'Loyalty Details' field group was created.",
+    "The answer confirms it was added to the 'Acme Customer Profile' schema.",
+    "The answer includes the field group id (fg-881) and the schema id (sch-001) from the tool results."
+  ],
+  "toolActivity": "CALL adobe_create_field_group {\"title\":\"Loyalty Details\",\"description\":\"Loyalty program attributes\"}\nRESULT adobe_create_field_group: {\"$id\":\"fg-881\",\"title\":\"Loyalty Details\"}\nCALL adobe_update_schema {\"id\":\"sch-001\",\"addFieldGroups\":[\"fg-881\"]}\nRESULT adobe_update_schema: {\"id\":\"sch-001\",\"title\":\"Acme Customer Profile\",\"fieldGroups\":[\"fg-881\"]}",
+  "answer": "Done:\n1. Created field group 'Loyalty Details' (id: fg-881).\n2. Added it to schema 'Acme Customer Profile' (sch-001).\n\nThe schema now includes the Loyalty Details field group.",
+  "humanVerdict": "pass"
+}

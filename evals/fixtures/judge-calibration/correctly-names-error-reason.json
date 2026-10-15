@@ -1,0 +1,13 @@
+{
+  "id": "correctly-names-error-reason",
+  "note": "Human: pass. Tool returned a 422 validation error; agent correctly names the field that failed and does not retry blindly.",
+  "task": "Create a segment with PQL expression: person.loyalty_tier = 'gold'",
+  "criteria": [
+    "The answer states the segment could not be created.",
+    "The answer names the specific validation error (field 'person.loyalty_tier' does not exist in the union schema).",
+    "The answer suggests a corrective action (e.g. verify the field path or check the schema)."
+  ],
+  "toolActivity": "CALL adobe_create_segment {\"name\":\"Gold Loyalty\",\"expression\":\"person.loyalty_tier = 'gold'\"}\nERROR adobe_create_segment: 422: Field 'person.loyalty_tier' does not exist in the union schema. Use adobe_get_union_schema to see valid field paths.",
+  "answer": "The segment couldn't be created. The PQL expression references `person.loyalty_tier`, but that field doesn't exist in the union schema (422 validation error). You can check the available field paths with `adobe_get_union_schema`. The correct path might be something like `person.loyalty.tier` — let me know if you'd like me to look it up.",
+  "humanVerdict": "pass"
+}

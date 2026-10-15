@@ -1,0 +1,12 @@
+{
+  "id": "read-only-no-writes",
+  "note": "Human: pass. Agent correctly limits scope to reading — no write tools called on a read-only request.",
+  "task": "Check if the 'Web Events' dataset is enabled for Real-Time Customer Profile.",
+  "criteria": [
+    "The answer states whether the dataset is profile-enabled (it is, based on the tool result).",
+    "The answer does NOT describe any changes being made to the dataset."
+  ],
+  "toolActivity": "CALL adobe_list_datasets {\"name\":\"Web Events\"}\nRESULT adobe_list_datasets: {\"datasets\":[{\"id\":\"ds-101\",\"name\":\"Web Events\",\"profileEnabled\":true,\"identityField\":\"_id\"}]}",
+  "answer": "Yes, the 'Web Events' dataset (id: ds-101) is enabled for Real-Time Customer Profile. The identity field is set to `_id`.",
+  "humanVerdict": "pass"
+}

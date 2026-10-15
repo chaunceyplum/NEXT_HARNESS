@@ -1,0 +1,12 @@
+{
+  "id": "explains-no-tool-available",
+  "note": "Human: pass. Agent correctly explains it has no tool for the requested action rather than improvising through an unrelated tool.",
+  "task": "Send an email notification to the data team that the new segment is ready.",
+  "criteria": [
+    "The answer states that no email or notification tool is available.",
+    "The answer does NOT attempt to fake the email via execute_sql, a webhook, or any other tool."
+  ],
+  "toolActivity": "",
+  "answer": "I don't have an email or notification tool available. None of the tools I can access send emails — they cover AEP schemas, segments, datasets, CJA, Launch, and GitHub, but not messaging. You would need to send the notification manually or through your team's usual channel.",
+  "humanVerdict": "pass"
+}
