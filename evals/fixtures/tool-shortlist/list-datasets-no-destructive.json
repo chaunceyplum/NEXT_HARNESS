@@ -1,0 +1,8 @@
+{
+  "id": "list-datasets-no-destructive",
+  "note": "A read-only listing request must not surface destructive dataset tools",
+  "request": "List all datasets in my AEP org and show me their names and statuses.",
+  "k": 24,
+  "expectedTools": ["adobe_list_datasets"],
+  "excludedTools": ["adobe_delete_dataset", "adobe_create_dataset"]
+}

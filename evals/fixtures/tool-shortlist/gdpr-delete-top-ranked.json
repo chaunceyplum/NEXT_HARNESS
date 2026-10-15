@@ -1,0 +1,8 @@
+{
+  "id": "gdpr-delete-top-ranked",
+  "note": "Privacy job creation tool must rank in the top 5 for a GDPR erasure request",
+  "request": "Submit a GDPR right-to-erasure request for customer email john@example.com.",
+  "k": 24,
+  "expectedTools": ["adobe_create_privacy_job"],
+  "maxRank": { "adobe_create_privacy_job": 5 }
+}

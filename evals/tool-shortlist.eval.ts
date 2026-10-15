@@ -39,6 +39,10 @@ type ShortlistFixture = {
   expectedTools: string[];
   /** Fraction of expectedTools that must appear. Defaults to 1 (all of them). */
   minRecall?: number;
+  /** Per-tool rank caps: each named tool must appear at or above this 1-based position. */
+  maxRank?: Record<string, number>;
+  /** Tools that must NOT appear in the shortlist (negative tests). */
+  excludedTools?: string[];
 };
 
 const DEFAULT_K = 24;
@@ -75,21 +79,32 @@ describe.skipIf(!configured)('Tool shortlist eval (shortlistTools)', () => {
     let passed = false;
 
     // A fixture naming a tool the server no longer exposes is stale, not a retrieval miss.
-    const stale = fixture.expectedTools.filter((name) => !catalogNames.has(name));
+    const staleExpected = fixture.expectedTools.filter((name) => !catalogNames.has(name));
+    // excludedTools that aren't in the catalog can never appear — skip them silently.
+    const liveExcluded = (fixture.excludedTools ?? []).filter((name) => catalogNames.has(name));
+    const staleExcluded = (fixture.excludedTools ?? []).filter((name) => !catalogNames.has(name));
+    // maxRank tools not in the catalog are treated as stale too.
+    const staleRank = Object.keys(fixture.maxRank ?? {}).filter((name) => !catalogNames.has(name));
+    const stale = [...staleExpected, ...staleExcluded, ...staleRank];
     if (stale.length) {
       notes.push(`fixture stale: not in live catalog: ${stale.join(', ')}`);
     } else {
       const alwaysOn = ALWAYS_ON_TOOLS.filter((name) => catalogNames.has(name));
       const k = fixture.k ?? DEFAULT_K;
       const shortlist = await shortlistTools(fixture.request, { k, exclude: alwaysOn });
-      const grade = gradeShortlist(shortlist, fixture.expectedTools);
+      const grade = gradeShortlist(shortlist, fixture.expectedTools, {
+        maxRank: fixture.maxRank,
+        excludedTools: liveExcluded,
+      });
       const minRecall = fixture.minRecall ?? 1;
-      passed = grade.recall >= minRecall;
+      passed = grade.recall >= minRecall && grade.rankViolations.length === 0 && grade.exclusionViolations.length === 0;
 
       const ranks = Object.entries(grade.ranks).map(([name, rank]) => `${name}@${rank}`);
       notes.push(`recall ${Math.round(grade.recall * 100)}% (need ${Math.round(minRecall * 100)}%) in top ${k}`);
       if (ranks.length) notes.push(`found ${ranks.join(', ')}`);
       if (grade.missing.length) notes.push(`missing ${grade.missing.join(', ')}; top 5 were ${shortlist.slice(0, 5).join(', ')}`);
+      if (grade.rankViolations.length) notes.push(`rank violations: ${grade.rankViolations.join('; ')}`);
+      if (grade.exclusionViolations.length) notes.push(`exclusion violations: ${grade.exclusionViolations.join('; ')}`);
     }
 
     results.push({

@@ -61,7 +61,45 @@ describe('gradeShortlist', () => {
       recall: 0.5,
       missing: ['flow_enable'],
       ranks: { flow_disable: 2 },
+      rankViolations: [],
+      exclusionViolations: [],
     });
+  });
+
+  it('reports a rank violation when a tool exceeds its maxRank cap', () => {
+    const grade = gradeShortlist(
+      ['a', 'b', 'c', 'adobe_delete_segment', 'd'],
+      ['adobe_delete_segment'],
+      { maxRank: { adobe_delete_segment: 3 } }
+    );
+    expect(grade.rankViolations).toEqual(['adobe_delete_segment at rank 4, expected ≤ 3']);
+    expect(grade.exclusionViolations).toEqual([]);
+  });
+
+  it('reports a rank violation when a tool is absent from the shortlist', () => {
+    const grade = gradeShortlist(['a', 'b'], ['flow_disable'], { maxRank: { flow_disable: 2 } });
+    expect(grade.rankViolations).toEqual(['flow_disable not in shortlist (expected rank ≤ 2)']);
+  });
+
+  it('reports an exclusion violation when a banned tool appears in the shortlist', () => {
+    const grade = gradeShortlist(
+      ['adobe_list_datasets', 'adobe_delete_dataset'],
+      ['adobe_list_datasets'],
+      { excludedTools: ['adobe_delete_dataset'] }
+    );
+    expect(grade.exclusionViolations).toEqual(['adobe_delete_dataset at rank 2 (excluded)']);
+    expect(grade.rankViolations).toEqual([]);
+  });
+
+  it('passes cleanly when rank and exclusion constraints are met', () => {
+    const grade = gradeShortlist(
+      ['adobe_get_schema', 'adobe_list_schemas', 'other'],
+      ['adobe_get_schema'],
+      { maxRank: { adobe_get_schema: 2 }, excludedTools: ['adobe_delete_schema'] }
+    );
+    expect(grade.rankViolations).toEqual([]);
+    expect(grade.exclusionViolations).toEqual([]);
+    expect(grade.recall).toBe(1);
   });
 });
 

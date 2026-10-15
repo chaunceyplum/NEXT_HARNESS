@@ -109,9 +109,17 @@ export interface ShortlistGrade {
   missing: string[];
   /** 1-based rank of each expected tool that was found. */
   ranks: Record<string, number>;
+  /** Tools whose rank exceeded the fixture's maxRank cap. */
+  rankViolations: string[];
+  /** Excluded tools that appeared in the shortlist anyway. */
+  exclusionViolations: string[];
 }
 
-export function gradeShortlist(shortlist: string[], expectedTools: string[]): ShortlistGrade {
+export function gradeShortlist(
+  shortlist: string[],
+  expectedTools: string[],
+  opts: { maxRank?: Record<string, number>; excludedTools?: string[] } = {}
+): ShortlistGrade {
   const ranks: Record<string, number> = {};
   const missing: string[] = [];
   for (const name of expectedTools) {
@@ -120,7 +128,21 @@ export function gradeShortlist(shortlist: string[], expectedTools: string[]): Sh
     else ranks[name] = idx + 1;
   }
   const recall = expectedTools.length ? (expectedTools.length - missing.length) / expectedTools.length : 1;
-  return { recall, missing, ranks };
+
+  const rankViolations: string[] = [];
+  for (const [name, max] of Object.entries(opts.maxRank ?? {})) {
+    const rank = shortlist.indexOf(name) + 1;
+    if (rank === 0) rankViolations.push(`${name} not in shortlist (expected rank ≤ ${max})`);
+    else if (rank > max) rankViolations.push(`${name} at rank ${rank}, expected ≤ ${max}`);
+  }
+
+  const exclusionViolations: string[] = [];
+  for (const name of opts.excludedTools ?? []) {
+    const idx = shortlist.indexOf(name);
+    if (idx !== -1) exclusionViolations.push(`${name} at rank ${idx + 1} (excluded)`);
+  }
+
+  return { recall, missing, ranks, rankViolations, exclusionViolations };
 }
 
 // ── RAG judge calibration ──────────────────────────────────────────────────

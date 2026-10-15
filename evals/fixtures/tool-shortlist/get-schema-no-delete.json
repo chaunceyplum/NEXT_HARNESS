@@ -1,0 +1,8 @@
+{
+  "id": "get-schema-no-delete",
+  "note": "Fetching an XDM schema must not surface the schema delete tool",
+  "request": "Show me the full definition of the XDM schema named 'Loyalty Profile'.",
+  "k": 24,
+  "expectedTools": ["adobe_get_schema"],
+  "excludedTools": ["adobe_delete_schema"]
+}

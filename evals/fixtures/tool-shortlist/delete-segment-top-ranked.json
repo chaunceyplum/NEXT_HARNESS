@@ -1,0 +1,8 @@
+{
+  "id": "delete-segment-top-ranked",
+  "note": "The exact delete tool must rank in the top 3 for a precise deletion request",
+  "request": "Delete the AEP audience segment with ID abc123.",
+  "k": 24,
+  "expectedTools": ["adobe_delete_segment"],
+  "maxRank": { "adobe_delete_segment": 3 }
+}

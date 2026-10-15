@@ -1,0 +1,8 @@
+{
+  "id": "cja-segment-read-no-aep-writes",
+  "note": "CJA segment lookup must not surface AEP segment mutation tools",
+  "request": "Get the definition of my CJA segment called 'High Value Users'.",
+  "k": 24,
+  "expectedTools": ["cja_get_segment"],
+  "excludedTools": ["adobe_create_segment", "adobe_delete_segment", "adobe_update_segment"]
+}
