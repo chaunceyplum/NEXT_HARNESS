@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import type { ProductionMetrics } from '@/lib/production-metrics';
 
@@ -25,8 +25,8 @@ export default function MetricsPage() {
   const [data, setData] = useState<(ProductionMetrics & { days: number }) | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch(`/api/metrics?days=${days}`)
+  const fetchMetrics = useCallback((window: number) => {
+    fetch(`/api/metrics?days=${window}`)
       .then(async (res) => {
         const body = await res.json();
         if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -34,7 +34,11 @@ export default function MetricsPage() {
         setData(body);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [days]);
+  }, []);
+
+  useEffect(() => {
+    fetchMetrics(days);
+  }, [days, fetchMetrics]);
 
   const m = data?.days === days ? data : null;
 
