@@ -759,6 +759,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
   let tools: ToolSet;
   let toolsConsidered: string[];
+  let userMessage = userInput;
   const rolloutMode = resolveRolloutMode(opts.rolloutMode);
   // Collects fire-and-forget RAG judgments for live runs; drained once the
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
@@ -772,27 +773,32 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     toolsConsidered = Object.keys(opts.tools);
   } else {
     ragJudgmentSink = createRagJudgmentSink();
-    const live = await selectLiveTools(
+    // Kick off the memory fetch in parallel with tool selection — both are
+    // network calls and neither depends on the other's result.
+    const liveFetch = selectLiveTools(
       userInput,
       toolShortlistSize,
       toolRetries,
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink
     );
+    const memoryFetch = memoryEnabled()
+      ? listFacts().catch((err) => {
+          console.warn('[agent] Memory unavailable; running without it:', err instanceof Error ? err.message : err);
+          return null;
+        })
+      : Promise.resolve(null);
+
+    const [live, facts] = await Promise.all([liveFetch, memoryFetch]);
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
-  }
 
-  // Deployment memory (memory-store.ts), live runs only: stored facts lead
-  // the first message, and remember_fact saves new ones (not in read-only runs).
-  let userMessage = userInput;
-  if (!opts.tools && memoryEnabled()) {
-    try {
-      userMessage = memoryPreamble(await listFacts()) + userInput;
-    } catch (err) {
-      console.warn('[agent] Memory unavailable; running without it:', err instanceof Error ? err.message : err);
+    // Deployment memory (memory-store.ts): stored facts lead the first message,
+    // and remember_fact saves new ones (not in read-only runs).
+    if (facts) {
+      userMessage = memoryPreamble(facts) + userInput;
     }
-    if (resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun }).mode !== 'read-only') {
+    if (memoryEnabled() && resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun }).mode !== 'read-only') {
       tools = { ...tools, remember_fact: rememberFactTool(opts.runId, opts.actor) };
     }
   }
