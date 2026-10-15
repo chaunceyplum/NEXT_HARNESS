@@ -1,0 +1,5 @@
+{
+  "id": "walk-me-through-snowflake-source-to-aep",
+  "request": "Walk me through connecting our Snowflake account as a source in AEP, mapping the tables to XDM schemas, and scheduling an ongoing sync.",
+  "expected": "build"
+}

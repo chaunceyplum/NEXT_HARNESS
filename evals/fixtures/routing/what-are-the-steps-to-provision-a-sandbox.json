@@ -1,0 +1,5 @@
+{
+  "id": "what-are-the-steps-to-provision-a-sandbox",
+  "request": "What are the steps to provision a new AEP sandbox, connect the Snowflake source connector, and run an initial data sync?",
+  "expected": "build"
+}

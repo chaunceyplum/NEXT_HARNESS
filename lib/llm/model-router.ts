@@ -73,6 +73,10 @@ const BUILD_WORDS =
   /\b(end[- ]to[- ]end|from scratch|full (?:setup|implementation|pipeline)|set up (?:a|an|the) (?:new )?\w+ (?:and|with)|and then|multiple|several|all of the|migrate|implement)\b/i;
 const QUESTION_WORDS =
   /^\s*(what|which|who|where|when|why|how|list|show|find|get|count|is|are|does|do|can|explain|describe|tell me|give me)\b|\?\s*$/i;
+// Questions phrased as "what are the steps to X" or "walk me through X" are procedural requests,
+// not simple lookups — defer to the model rather than blindly returning "lookup".
+const PROCEDURAL_QUESTION =
+  /\b(steps? to|process for|walk me through|walk through|how to (?:set up|provision|configure|connect|create|build|implement|migrate)|provision|establish)\b/i;
 
 /** A category the rules are sure of, or undefined to ask the model. */
 export function classifyByRules(request: string): { category: RouteCategory; confidence: number; reason: string } | undefined {
@@ -81,7 +85,9 @@ export function classifyByRules(request: string): { category: RouteCategory; con
   if (words.length <= 4 && /\b(it|that|this|them|those|these)\b/i.test(request)) return undefined;
   const writes = WRITE_WORDS.test(request);
   const question = QUESTION_WORDS.test(request);
-  if (question && !writes) return { category: 'lookup', confidence: 0.85, reason: 'a question with no change verbs' };
+  // Don't shortcut to "lookup" if the question is procedural: "what are the steps to..."
+  // is asking the agent to do work, and the model decides better than a keyword rule.
+  if (question && !writes && !PROCEDURAL_QUESTION.test(request)) return { category: 'lookup', confidence: 0.85, reason: 'a question with no change verbs' };
   if (writes && BUILD_WORDS.test(request)) return { category: 'build', confidence: 0.75, reason: 'multi-part change wording' };
   if (writes && !question) return { category: 'change', confidence: 0.75, reason: 'change verbs, not a question' };
   return undefined;
