@@ -1,0 +1,164 @@
+{
+  "id": "context-compression-multi-schema-update",
+  "note": "Exercises TASK 2 context compression. The list_schemas (~1200 chars) and list_field_groups (~900 chars) results both exceed the 500-char floor. After 3 tool messages, the earliest large result is replaced in the model's context with a one-line hint: '[compressed] ... call again with narrower arguments'. The agent must still apply a new field group to TWO separate schemas, which requires it to either have noted both IDs before compression or re-fetch them (a second scripted response is provided for each re-call).",
+  "category": "scope",
+  "request": "Review our existing AEP schemas and field groups, then create a new 'Campaign Attribution' field group for the ExperienceEvent class and apply it to both the 'Web Interactions' schema and the 'Email Click Events' schema.",
+  "tools": [
+    {
+      "name": "adobe_list_schemas",
+      "description": "List XDM schema definitions in the configured AEP sandbox.",
+      "responses": [
+        {
+          "result": {
+            "_embedded": {
+              "xdm:schemas": [
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch001", "title": "Web Interactions", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch002", "title": "Customer Profile", "meta:class": "https://ns.adobe.com/xdm/context/profile", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch003", "title": "Loyalty Transactions", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch004", "title": "Email Click Events", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch005", "title": "Mobile App Events", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch006", "title": "CRM Import Records", "meta:class": "https://ns.adobe.com/xdm/context/profile", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch007", "title": "Product Catalog Events", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" },
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch008", "title": "Offline Store Events", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" }
+              ]
+            },
+            "_page": { "count": 8, "total": 8 }
+          }
+        },
+        {
+          "result": {
+            "_embedded": {
+              "xdm:schemas": [
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch001", "title": "Web Interactions", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" }
+              ]
+            }
+          }
+        },
+        {
+          "result": {
+            "_embedded": {
+              "xdm:schemas": [
+                { "$id": "https://ns.adobe.com/tenant/schemas/sch004", "title": "Email Click Events", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "development" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_field_groups",
+      "description": "List XDM field group definitions in the configured AEP sandbox.",
+      "responses": [
+        {
+          "result": {
+            "_embedded": {
+              "xdm:fieldGroups": [
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg001", "title": "Channel Attribution", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg002", "title": "Loyalty Tier Data", "meta:class": "https://ns.adobe.com/xdm/context/profile", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg003", "title": "Product Interaction Details", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg004", "title": "Session Metadata", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg005", "title": "Consent Records", "meta:class": "https://ns.adobe.com/xdm/context/profile", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/tenant/fieldgroups/fg006", "title": "A/B Test Assignment", "meta:class": "https://ns.adobe.com/xdm/context/experienceevent", "meta:status": "stable" }
+              ]
+            },
+            "_page": { "count": 6, "total": 6 }
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_classes",
+      "description": "List XDM class definitions in the configured AEP sandbox.",
+      "responses": [
+        {
+          "result": {
+            "_embedded": {
+              "xdm:classes": [
+                { "$id": "https://ns.adobe.com/xdm/context/experienceevent", "title": "XDM ExperienceEvent", "meta:status": "stable" },
+                { "$id": "https://ns.adobe.com/xdm/context/profile", "title": "XDM Individual Profile", "meta:status": "stable" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_create_field_group",
+      "description": "Create a new XDM field group definition in the configured AEP sandbox.",
+      "responses": [
+        {
+          "result": {
+            "$id": "https://ns.adobe.com/tenant/fieldgroups/fg_campaign_attribution",
+            "title": "Campaign Attribution",
+            "meta:class": "https://ns.adobe.com/xdm/context/experienceevent",
+            "meta:status": "development"
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_get_schema",
+      "description": "Retrieve a full XDM schema definition by its $id.",
+      "responses": [
+        {
+          "result": {
+            "$id": "https://ns.adobe.com/tenant/schemas/sch001",
+            "title": "Web Interactions",
+            "meta:class": "https://ns.adobe.com/xdm/context/experienceevent",
+            "meta:status": "development"
+          }
+        },
+        {
+          "result": {
+            "$id": "https://ns.adobe.com/tenant/schemas/sch004",
+            "title": "Email Click Events",
+            "meta:class": "https://ns.adobe.com/xdm/context/experienceevent",
+            "meta:status": "development"
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_update_schema",
+      "description": "Update an XDM schema definition, e.g. to add a field group reference.",
+      "responses": [
+        {
+          "result": {
+            "$id": "https://ns.adobe.com/tenant/schemas/sch001",
+            "title": "Web Interactions",
+            "meta:fieldGroupUnionSchema": ["https://ns.adobe.com/tenant/fieldgroups/fg_campaign_attribution"],
+            "meta:status": "development"
+          }
+        },
+        {
+          "result": {
+            "$id": "https://ns.adobe.com/tenant/schemas/sch004",
+            "title": "Email Click Events",
+            "meta:fieldGroupUnionSchema": ["https://ns.adobe.com/tenant/fieldgroups/fg_campaign_attribution"],
+            "meta:status": "development"
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "mustCall": ["adobe_list_schemas", "adobe_list_field_groups", "adobe_create_field_group", "adobe_update_schema"],
+    "callOrder": [
+      ["adobe_list_schemas", "adobe_create_field_group"],
+      ["adobe_create_field_group", "adobe_update_schema"]
+    ],
+    "maxCallsPerTool": { "adobe_update_schema": 2, "adobe_create_field_group": 1 },
+    "maxToolCalls": 16,
+    "finishReasons": ["stop"],
+    "argsContain": [
+      { "tool": "adobe_update_schema", "contains": "sch001" },
+      { "tool": "adobe_update_schema", "contains": "sch004" }
+    ],
+    "criteria": [
+      "The agent confirms the 'Campaign Attribution' field group was created.",
+      "The agent confirms the field group was applied to the 'Web Interactions' schema (sch001).",
+      "The agent confirms the field group was applied to the 'Email Click Events' schema (sch004).",
+      "The agent does not claim to have updated schemas it was not asked to update."
+    ]
+  }
+}
