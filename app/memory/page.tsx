@@ -45,11 +45,10 @@ export default function MemoryPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+    <div className="p-4 sm:p-8">
       <div className="max-w-3xl mx-auto space-y-6">
-        <div className="pt-8">
-          <Link href="/" className="text-blue-600 hover:text-blue-700 text-sm font-medium">← Back</Link>
-          <h1 className="text-3xl font-bold text-gray-900 mt-2">Deployment memory</h1>
+        <div className="pt-2">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Deployment memory</h1>
           <p className="text-gray-600 text-sm mt-1">
             Stable facts every run starts with, so the agent doesn&apos;t rediscover them: sandbox names, property ids, repos. The agent adds
             facts it has verified; fix or remove anything wrong here. Never store credentials or personal data (they&apos;re refused).
@@ -59,7 +58,7 @@ export default function MemoryPage() {
         {error && <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded text-red-800 text-sm">{error}</div>}
 
         <form
-          className="bg-white rounded-lg shadow p-4 flex flex-col sm:flex-row gap-2"
+          className="bg-white rounded-lg border border-gray-200 shadow p-4 flex flex-col sm:flex-row gap-2"
           onSubmit={async (e) => {
             e.preventDefault();
             if (await call('POST', { key, value })) {
@@ -70,12 +69,12 @@ export default function MemoryPage() {
         >
           <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="key, e.g. aep.prod_sandbox" className="border border-gray-300 rounded p-2 text-sm sm:w-64 font-mono" />
           <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="value" className="border border-gray-300 rounded p-2 text-sm flex-1" />
-          <button type="submit" disabled={busy || !key || !value} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded hover:bg-blue-700 disabled:opacity-50">
+          <button type="submit" disabled={busy || !key || !value} className="px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-full hover:bg-indigo-700 disabled:opacity-50 transition-colors">
             Save
           </button>
         </form>
 
-        <div className="bg-white rounded-lg shadow p-4">
+        <div className="bg-white rounded-lg border border-gray-200 shadow p-4">
           {facts === null && !error && <p className="text-sm text-gray-500">Loading…</p>}
           {facts?.length === 0 && <p className="text-sm text-gray-500">Nothing remembered yet.</p>}
           {facts && facts.length > 0 && (

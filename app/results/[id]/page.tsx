@@ -87,10 +87,10 @@ export default function RunDetailPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+      <div className="p-4 sm:p-8">
         <div className="max-w-4xl mx-auto">
-          <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-            <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <div className="bg-white rounded-lg border border-gray-200 shadow-lg p-8 text-center">
+            <div className="inline-block w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
             <p className="text-gray-600">Loading run...</p>
           </div>
         </div>
@@ -99,27 +99,22 @@ export default function RunDetailPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+    <div className="p-4 sm:p-8">
       <div className="max-w-4xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between pt-2">
           <div>
-            <h1 className="text-3xl sm:text-4xl font-bold text-gray-900">Run Detail</h1>
-            <p className="text-gray-600 text-sm mt-1">
-              <code className="bg-white px-2 py-0.5 rounded">{id}</code>
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Run Detail</h1>
+            <p className="text-gray-500 text-sm mt-1">
+              <code className="bg-white border border-gray-200 px-2 py-0.5 rounded">{id}</code>
             </p>
           </div>
-          <div className="flex items-center gap-4">
-            <button
-              onClick={handleReplay}
-              disabled={!record || replaying}
-              className="px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50"
-            >
-              {replaying ? 'Replaying...' : 'Replay'}
-            </button>
-            <Link href="/results" className="text-blue-600 hover:text-blue-700 font-medium text-sm">
-              ← All Runs
-            </Link>
-          </div>
+          <button
+            onClick={handleReplay}
+            disabled={!record || replaying}
+            className="px-4 py-2 bg-indigo-600 text-white text-sm font-bold rounded-full hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            {replaying ? 'Replaying...' : 'Replay'}
+          </button>
         </div>
 
         {error && (
@@ -131,7 +126,7 @@ export default function RunDetailPage() {
 
         {record && (
           <>
-            <div className="bg-white rounded-lg shadow-lg p-6 sm:p-8">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-lg p-6 sm:p-8">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-gray-500 font-medium">Description</p>

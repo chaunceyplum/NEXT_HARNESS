@@ -281,38 +281,22 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+    <div className="p-4 sm:p-8">
       <div className="max-w-3xl mx-auto">
         <KillSwitch />
         {/* Header */}
-        <div className="mb-12 pt-8 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-          <div className="text-center sm:text-left">
-            <h1 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-              Autonomous MarTech Builder
-            </h1>
-            <p className="text-lg sm:text-xl text-gray-600 max-w-lg">
-              Describe what you want, and an agent will pick the right tools to do it —
-              no fixed pipeline, no full rebuild for a narrow ask.
-            </p>
-          </div>
-          <div className="flex flex-col items-center sm:items-end gap-1">
-            <Link href="/results" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
-              View past runs →
-            </Link>
-            <Link href="/memory" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
-              Deployment memory →
-            </Link>
-            <Link href="/metrics" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
-              Production metrics →
-            </Link>
-            <Link href="/evals" className="text-blue-600 hover:text-blue-700 font-medium text-sm whitespace-nowrap">
-              View evals →
-            </Link>
-          </div>
+        <div className="mb-8 pt-4">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">
+            Autonomous MarTech Builder
+          </h1>
+          <p className="text-base text-gray-600 max-w-lg">
+            Describe what you want, and an agent will pick the right tools to do it —
+            no fixed pipeline, no full rebuild for a narrow ask.
+          </p>
         </div>
 
         {/* Main Card */}
-        <div className="bg-white rounded-lg shadow-lg p-8 mb-6">
+        <div className="bg-white rounded-lg border border-gray-200 shadow-lg p-8 mb-6">
           <form onSubmit={handleBuild} className="space-y-6">
             <div>
               <label htmlFor="description" className="block text-lg font-semibold text-gray-700 mb-3">
@@ -411,7 +395,7 @@ export default function Home() {
               <button
                 type="submit"
                 disabled={loading || !description.trim()}
-                className="flex-1 px-6 py-3 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="flex-1 px-6 py-3 bg-indigo-600 text-white font-bold rounded-full hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {loading ? (
                   <span className="flex items-center justify-center gap-2">
@@ -426,7 +410,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleStop}
-                  className="px-6 py-3 bg-gray-200 text-gray-700 font-bold rounded-lg hover:bg-gray-300 transition-colors"
+                  className="px-6 py-3 bg-gray-100 text-gray-700 font-bold rounded-full hover:bg-gray-200 transition-colors border border-gray-300"
                 >
                   Stop
                 </button>
@@ -516,7 +500,7 @@ export default function Home() {
         )}
 
         {/* Examples */}
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white rounded-lg border border-gray-200 shadow p-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Example Requests</h3>
           <ul className="space-y-3 text-sm text-gray-600">
             <li className="flex gap-3">

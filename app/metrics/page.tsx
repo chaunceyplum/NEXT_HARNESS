@@ -43,12 +43,11 @@ export default function MetricsPage() {
   const m = data?.days === days ? data : null;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
+    <div className="p-4 sm:p-8">
       <div className="max-w-5xl mx-auto space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 pt-8">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 pt-2">
           <div>
-            <Link href="/" className="text-blue-600 hover:text-blue-700 text-sm font-medium">← Back</Link>
-            <h1 className="text-3xl font-bold text-gray-900 mt-2">Production metrics</h1>
+            <h1 className="text-2xl sm:text-3xl font-bold text-gray-900">Production metrics</h1>
             <p className="text-gray-600 text-sm mt-1">
               Real runs, not eval fixtures. A run succeeds when it completed on its own, wasn&apos;t cut off by a limit, and nobody graded it bad (judge fail or 👎).
             </p>
@@ -60,7 +59,7 @@ export default function MetricsPage() {
                 type="button"
                 onClick={() => setDays(d)}
                 aria-pressed={d === days}
-                className={`px-3 py-1.5 text-sm rounded font-medium ${d === days ? 'bg-gray-900 text-white' : 'bg-white text-gray-700 hover:bg-gray-100'}`}
+                className={`px-3 py-1.5 text-sm rounded-full font-medium transition-colors ${d === days ? 'bg-indigo-600 text-white' : 'bg-white border border-gray-200 text-gray-700 hover:bg-gray-50'}`}
               >
                 {d === 1 ? '24h' : `${d}d`}
               </button>

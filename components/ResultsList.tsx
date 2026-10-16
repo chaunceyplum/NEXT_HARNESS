@@ -47,11 +47,11 @@ export function ResultsList({ initialRuns, initialTotal }: { initialRuns: RunSum
       )}
 
       {runs.length === 0 ? (
-        <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
+        <div className="bg-white rounded-lg border border-gray-200 shadow p-8 text-center text-gray-500">
           No runs recorded yet. Go run something from the home page.
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow-lg divide-y divide-gray-100">
+        <div className="bg-white rounded-lg border border-gray-200 shadow-lg divide-y divide-gray-100">
           {runs.map((run) => (
             <Link
               key={run.id}
@@ -88,7 +88,7 @@ export function ResultsList({ initialRuns, initialTotal }: { initialRuns: RunSum
         <div className="text-center">
           <button
             onClick={loadMore}
-            className="px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50"
+            className="px-4 py-2 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
           >
             Load more
           </button>

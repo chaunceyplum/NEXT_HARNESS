@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import Link from 'next/link';
 import { ApiError, EvalRunDetail, EvalTrialRecord } from '@/lib/types';
 import { groupByFixture } from '@/lib/eval-metrics';
 import { EVAL_SUITE_LABELS, passRateClass, pct, secs, usd } from '@/lib/eval-labels';
@@ -58,11 +57,8 @@ export default function EvalRunPage() {
     : [];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-8">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <Link href="/evals" className="text-blue-600 hover:text-blue-700 font-medium text-sm">
-          ← All eval runs
-        </Link>
+    <div className="p-4 sm:p-8">
+      <div className="max-w-4xl mx-auto space-y-6 pt-2">
 
         {error && (
           <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-lg">
@@ -72,13 +68,13 @@ export default function EvalRunPage() {
         )}
 
         {loading ? (
-          <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-            <div className="inline-block w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+          <div className="bg-white rounded-lg border border-gray-200 shadow-lg p-8 text-center">
+            <div className="inline-block w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4"></div>
             <p className="text-gray-600">Loading...</p>
           </div>
         ) : run ? (
           <>
-            <div className="bg-white rounded-lg shadow-lg p-6 space-y-3">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-lg p-6 space-y-3">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h1 className="text-2xl font-bold text-gray-900">{EVAL_SUITE_LABELS[run.suite] ?? run.suite}</h1>
@@ -154,7 +150,7 @@ export default function EvalRunPage() {
               </div>
             )}
 
-            <div className="bg-white rounded-lg shadow-lg divide-y divide-gray-100">
+            <div className="bg-white rounded-lg border border-gray-200 shadow-lg divide-y divide-gray-100">
               {fixtures.map(([fixtureId, trials]) => {
                 const status = trialStatus(trials);
                 const graded = trials.filter((t) => !t.errored);
