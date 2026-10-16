@@ -115,6 +115,12 @@ export interface BuildRequest {
    * just switches it on. Can also be set globally via THINKING_BUDGET_TOKENS.
    */
   thinkingBudget?: number;
+  /**
+   * Restrict the tool catalog to tools belonging to these platforms only. Each
+   * entry is a key from PLATFORM_GROUPS (lib/llm/tool-catalog.ts). Omit or
+   * leave empty to include all platforms.
+   */
+  platformFilter?: string[];
 }
 
 /**

@@ -35,7 +35,7 @@
 
 import { jsonSchema, streamText, stepCountIs, tool, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
-import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, toolMatchesPlatforms, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
@@ -194,6 +194,12 @@ export interface RunAgentOptions {
    * Per-request value takes precedence over the env var.
    */
   thinkingBudget?: number;
+  /**
+   * Restrict the tool catalog to tools belonging to these platforms only. Each
+   * entry is a key from PLATFORM_GROUPS (lib/llm/tool-catalog.ts). Omit or
+   * leave empty to include all platforms.
+   */
+  platformFilter?: string[];
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
   /** Requesting user, recorded on facts the run saves to memory. */
@@ -481,9 +487,15 @@ async function selectLiveTools(
   toolShortlistSize: number,
   toolRetries: number,
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
-  ragJudgmentSink: RagJudgmentSink
+  ragJudgmentSink: RagJudgmentSink,
+  platformFilter?: string[]
 ): Promise<LiveToolSelection> {
-  const catalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
+  const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
+  // Knowledge tools are always included — they're grounding/search tools the
+  // agent relies on for every run regardless of which platforms are selected.
+  const catalog = platformFilter && platformFilter.length > 0
+    ? rawCatalog.filter((t) => toolMatchesPlatforms(t.name, ['Knowledge']) || toolMatchesPlatforms(t.name, platformFilter))
+    : rawCatalog;
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
 
   const alwaysOn = ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name));
@@ -780,7 +792,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       toolShortlistSize,
       toolRetries,
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
-      ragJudgmentSink
+      ragJudgmentSink,
+      opts.platformFilter
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {

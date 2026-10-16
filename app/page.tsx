@@ -7,6 +7,19 @@ import AgentTrace from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
 
+// Knowledge tools are always included on every run and are not toggleable.
+const PLATFORM_GROUPS = [
+  'AEP Core',
+  'CJA',
+  'Tags (Reactor)',
+  'Data Prep',
+  'Sources',
+  'Destinations',
+  'Flow Service',
+  'Query Service',
+  'GitHub',
+] as const;
+
 // ── Streaming state ───────────────────────────────────────────────────────────
 
 interface RunState {
@@ -55,6 +68,7 @@ export default function Home() {
   const [maxSteps, setMaxSteps] = useState(20);
   const [planFirst, setPlanFirst] = useState(false);
   const [requirePlanApproval, setRequirePlanApproval] = useState(false);
+  const [enabledPlatforms, setEnabledPlatforms] = useState<Set<string>>(new Set(PLATFORM_GROUPS));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runState, setRunState] = useState<RunState | null>(null);
@@ -264,6 +278,7 @@ export default function Home() {
 
   async function handleBuild(e: React.FormEvent) {
     e.preventDefault();
+    const allEnabled = enabledPlatforms.size === PLATFORM_GROUPS.length;
     await streamRun((signal) =>
       fetch('/api/build', {
         method: 'POST',
@@ -274,6 +289,7 @@ export default function Home() {
           toolShortlistSize,
           maxSteps,
           ...(planFirst ? { planFirst: true, requirePlanApproval } : {}),
+          ...(!allEnabled ? { platformFilter: [...enabledPlatforms] } : {}),
         }),
         signal,
       })
@@ -382,6 +398,59 @@ export default function Home() {
                   Ask me to approve the plan before anything runs
                 </label>
               )}
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-semibold text-gray-700">Platform tools</span>
+                <div className="flex gap-3 text-xs text-gray-500">
+                  <button
+                    type="button"
+                    onClick={() => setEnabledPlatforms(new Set(PLATFORM_GROUPS))}
+                    disabled={loading || enabledPlatforms.size === PLATFORM_GROUPS.length}
+                    className="hover:text-indigo-600 disabled:opacity-40"
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEnabledPlatforms(new Set())}
+                    disabled={loading || enabledPlatforms.size === 0}
+                    className="hover:text-indigo-600 disabled:opacity-40"
+                  >
+                    None
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {PLATFORM_GROUPS.map((p) => {
+                  const on = enabledPlatforms.has(p);
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      disabled={loading}
+                      onClick={() => {
+                        setEnabledPlatforms((prev) => {
+                          const next = new Set(prev);
+                          if (on) next.delete(p); else next.add(p);
+                          return next;
+                        });
+                      }}
+                      className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                        on
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Only tools from the selected platforms will be shown to the agent. Deselect all others when you want a focused run.
+              </p>
             </div>
 
             {error && (

@@ -75,6 +75,36 @@ export function isAdobeScoped(name: string): boolean {
   return !NON_ADOBE_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
+/**
+ * Platform groupings for UI-driven tool filtering. Each entry maps a display
+ * label to an array of patterns: strings ending with '_' are prefix matches;
+ * others are exact name matches. All groups are enabled by default.
+ */
+export const PLATFORM_GROUPS: Record<string, string[]> = {
+  'AEP Core': ['adobe_'],
+  'CJA': ['cja_'],
+  'Tags (Reactor)': ['reactor_'],
+  'Data Prep': ['dataprep_'],
+  'Sources': ['source_'],
+  'Destinations': ['destination_'],
+  'Flow Service': ['flow_'],
+  'Query Service': ['query_'],
+  'GitHub': ['github_', 'msb_github_'],
+  'Knowledge': ['search_adobe_knowledge', 'query_rag_db', 'knowledge_base_health'],
+};
+
+/** Returns true if `toolName` belongs to any of the named `platforms`. */
+export function toolMatchesPlatforms(toolName: string, platforms: string[]): boolean {
+  for (const platform of platforms) {
+    const patterns = PLATFORM_GROUPS[platform];
+    if (!patterns) continue;
+    for (const pattern of patterns) {
+      if (pattern.endsWith('_') ? toolName.startsWith(pattern) : toolName === pattern) return true;
+    }
+  }
+  return false;
+}
+
 let catalogPromise: Promise<McpToolDefinition[]> | null = null;
 
 /** Fetch (and cache) the full tool catalog: MCP's tools/list plus the locally-defined tools. Safe to call repeatedly. */

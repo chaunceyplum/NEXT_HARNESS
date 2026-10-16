@@ -42,6 +42,7 @@ import { planFirstByDefault } from '@/lib/llm/planner';
 import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
 import { getModelRegistry } from '@/lib/llm/model-registry';
 import { checkInput } from '@/lib/llm/guardrails';
+import { PLATFORM_GROUPS } from '@/lib/llm/tool-catalog';
 import { runsBlockedReason } from '@/lib/kill-switch';
 import { streamJob } from '@/lib/run-jobs';
 import { startBuildRun } from '@/lib/build-run';
@@ -170,6 +171,25 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     };
   }
 
+  if (b.platformFilter !== undefined) {
+    if (!Array.isArray(b.platformFilter) || !b.platformFilter.every((p) => typeof p === 'string')) {
+      return {
+        ok: false,
+        error: { error: '"platformFilter" must be an array of strings', code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
+    const known = Object.keys(PLATFORM_GROUPS);
+    const unknown = (b.platformFilter as string[]).filter((p) => !known.includes(p));
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        error: { error: `Unknown platform(s): ${unknown.join(', ')}. Valid: ${known.join(', ')}`, code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
+  }
+
   return {
     ok: true,
     req: {
@@ -188,6 +208,9 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       requirePlanApproval: b.requirePlanApproval === true || process.env.PLAN_APPROVAL?.trim().toLowerCase() === 'true',
       rolloutMode: parseRolloutMode(b.rolloutMode),
       thinkingBudget: typeof b.thinkingBudget === 'number' ? b.thinkingBudget : undefined,
+      platformFilter: Array.isArray(b.platformFilter) && (b.platformFilter as string[]).length > 0
+        ? (b.platformFilter as string[])
+        : undefined,
     },
   };
 }
