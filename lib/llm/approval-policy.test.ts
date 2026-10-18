@@ -39,6 +39,8 @@ describe('approvalReason', () => {
     expect(approvalReason('adobe_delete_segment', {})).toBe('destructive');
     expect(approvalReason('execute_sql', { sql: 'DROP TABLE t' })).toBe('sql-write');
     expect(approvalReason('execute_sql', { sql: 'SELECT 1' })).toBeUndefined();
+    expect(approvalReason('intake_execute_sql', { sql: 'DELETE FROM leads' })).toBe('sql-write');
+    expect(approvalReason('intake_execute_sql', { sql: 'SELECT * FROM leads' })).toBeUndefined();
     expect(approvalReason('msb_github_commit_code', {})).toBe('outbound');
     expect(approvalReason('destination_create_dataflow', {})).toBe('outbound');
     expect(approvalReason('reactor_transition_library', {})).toBe('outbound');

@@ -102,3 +102,16 @@ describe('POST /api/build as a job', () => {
     expect((await cancel.POST(new Request('http://x', { method: 'POST' }), params('nope'))).status).toBe(404);
   });
 });
+
+describe('POST /api/build — publishTarget validation', () => {
+  it('rejects a publishTarget that names no environment', async () => {
+    const res = await POST(
+      new Request('http://x/api/build', {
+        method: 'POST',
+        body: JSON.stringify({ description: 'tag the site', launchMode: true, publishTarget: { propertyId: 'PR1' } }),
+      })
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/must name the environment/);
+  });
+});

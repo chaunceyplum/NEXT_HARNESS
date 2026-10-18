@@ -347,7 +347,7 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
+export type EvalSuite = 'agent' | 'launch' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
 
 export interface EvalRunSummary {
   id: string;

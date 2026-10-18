@@ -41,12 +41,6 @@ import { runAgent } from '@/lib/llm/agent';
 import { promptVersion } from '@/lib/version';
 import { ModelHealthTracker } from '@/lib/llm/model-health';
 import { estimateCostUsd } from '@/lib/llm/pricing';
-import {
-  LaunchValidationGate,
-  isLaunchHandoffTool,
-  isPublishTransitionTool,
-  LAUNCH_HANDOFF_TOOLS,
-} from '@/lib/llm/launch-validation';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
@@ -61,7 +55,8 @@ import {
   warnIfSelfJudging,
   warnSkip,
 } from './lib/env';
-import { gradeTrajectory, type RecordedCall, type TrajectoryExpectations } from './lib/grading';
+import { gradeTrajectory, type TrajectoryExpectations } from './lib/grading';
+import { gradeLaunchValidation, gradePublishTransition, lastResponsePerTool, type PublishExpectation } from './lib/launch-grading';
 import { buildScriptedTools, type ScriptedToolDef } from './lib/scripted-tools';
 
 type LaunchFixture = {
@@ -91,7 +86,7 @@ type LaunchFixture = {
    */
   expected: TrajectoryExpectations & {
     criteria?: string[];
-    publishTransition?: 'allowed' | 'refused';
+    publishTransition?: PublishExpectation;
   };
 };
 
@@ -115,9 +110,9 @@ const startedAt = new Date();
 let judgeUsed = false;
 afterAll(() =>
   report({
-    // Reuse the 'agent' suite: this IS the agent loop graded against scripted
-    // tools, just in Launch mode with the added validation-gate assertion.
-    suite: 'agent',
+    // Its own suite: sharing 'agent' made the two evals overwrite each other's
+    // metrics file and latest-run row (the baseline gate and LLM-Ops read both).
+    suite: 'launch',
     label: 'Launch tagging (runAgent launchMode + scripted Reactor tools, Phase 4 validation gate)',
     subject: modelKey,
     judgeModel: judgeUsed ? judgeKey : undefined,
@@ -126,94 +121,6 @@ afterAll(() =>
     results,
   })
 );
-
-/**
- * Phase 4 reliability check: replay the run's scripted-tool calls through a
- * fresh validation gate so the library handoff is validated the way a live
- * run's gate would validate it (launch-validation.ts). Returns the failures
- * found — empty means the produced library validates and every reference
- * resolves. Deterministic, no model/network call.
- *
- * The scripted path records each call's input but not its result, so observe()
- * is fed the input as both args and result: LaunchPropertyState reads
- * extension/data-element names out of either shape, and the fixture's scripted
- * responses mirror those inputs, so the state the gate sees matches what the
- * live run would have observed from the server echo.
- */
-function gradeLaunchValidation(calls: RecordedCall[], responseByTool: Map<string, unknown>): string[] {
-  const failures: string[] = [];
-  const gate = new LaunchValidationGate();
-
-  for (const call of calls) {
-    // Feed the gate both the args and the scripted result for this tool, so it
-    // absorbs the property state (installed extensions, known data elements)
-    // the run read as well as the resources it created.
-    gate.observe(call.toolName, call.input, responseByTool.get(call.toolName) ?? call.input);
-  }
-
-  const handoff = calls.find((c) => isLaunchHandoffTool(c.toolName));
-  if (!handoff) {
-    failures.push(
-      `no library handoff call (${[...LAUNCH_HANDOFF_TOOLS].join(' / ')}) — the run never produced a library to validate`
-    );
-    return failures;
-  }
-
-  try {
-    // Throws when the produced components don't validate or a reference doesn't
-    // resolve — the SAME block a live run would hit before the MCP write.
-    gate.gate(handoff.toolName, handoff.input);
-  } catch (err) {
-    failures.push(`library handoff failed Phase 4 validation: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return failures;
-}
-
-/**
- * Publish-trajectory check: replay the run's scripted calls through a fresh
- * gate (seeded with the fixture's observed environment stages and build
- * status), then assert the recorded reactor_transition_library call is treated
- * as the fixture expects — 'allowed' (gate does not throw) or 'refused' (the
- * production / unknown-stage / failed-build block throws). The eval path has no
- * live gate, so this stands the same code block up deterministically (no model
- * / network call), exactly like gradeLaunchValidation does for the handoff.
- */
-function gradePublishTransition(
-  calls: RecordedCall[],
-  responseByTool: Map<string, unknown>,
-  expectation: 'allowed' | 'refused'
-): string[] {
-  const failures: string[] = [];
-  const gate = new LaunchValidationGate();
-  for (const call of calls) {
-    gate.observe(call.toolName, call.input, responseByTool.get(call.toolName) ?? call.input);
-  }
-
-  const transition = calls.find((c) => isPublishTransitionTool(c.toolName));
-  if (!transition) {
-    // A refused fixture may legitimately end with no transition (the agent was
-    // steered away from prod). Only an 'allowed' fixture must have one.
-    if (expectation === 'allowed') {
-      failures.push('no reactor_transition_library call — the staging publish never reached the transition');
-    }
-    return failures;
-  }
-
-  let threw: Error | undefined;
-  try {
-    gate.gate(transition.toolName, transition.input);
-  } catch (err) {
-    threw = err instanceof Error ? err : new Error(String(err));
-  }
-
-  if (expectation === 'allowed' && threw) {
-    failures.push(`expected the dev/staging transition to be ALLOWED, but the gate refused it: ${threw.message}`);
-  }
-  if (expectation === 'refused' && !threw) {
-    failures.push('expected the transition to be REFUSED by the gate (production / unknown stage / failed build), but it was allowed');
-  }
-  return failures;
-}
 
 async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTrialRecord> {
   const t0 = Date.now();
@@ -254,7 +161,7 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
     // (2b) Publish trajectory — assert the production block / dev-staging
     // allowance on the recorded transition, replayed through a fresh gate.
     if (fixture.expected.publishTransition) {
-      notes.push(...gradePublishTransition(calls, responseByTool, fixture.expected.publishTransition));
+      notes.push(...gradePublishTransition(calls, responseByTool, fixture.expected.publishTransition, fixture.publishTarget));
     }
 
     // (3) Outcome, by the rubric judge, when the fixture declares criteria.
@@ -289,27 +196,6 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
   record.notes = notes.length ? notes.join('; ') : record.notes;
   record.durationMs = Date.now() - t0;
   return record;
-}
-
-/**
- * The result a tool returns on its LAST scripted response, keyed by tool name
- * — what the gate's observe() uses to read property state the run grounded on
- * (installed extensions, existing data elements). Reads scripted
- * `{ result }` responses; `{ error }` responses contribute nothing.
- */
-function lastResponsePerTool(defs: ScriptedToolDef[]): Map<string, unknown> {
-  const map = new Map<string, unknown>();
-  for (const def of defs) {
-    const responses = def.responses ?? [];
-    for (let i = responses.length - 1; i >= 0; i--) {
-      const r = responses[i];
-      if ('result' in r) {
-        map.set(def.name, r.result);
-        break;
-      }
-    }
-  }
-  return map;
 }
 
 describe.runIf(pre.status === 'fail')('Launch tagging eval preflight', () => {

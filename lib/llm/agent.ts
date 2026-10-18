@@ -15,7 +15,7 @@
  *      summary. Models that bind thinking to the exact prior conversation
  *      (see HISTORY_BOUND_MODEL_RE) reject any rewrite of earlier messages, so
  *      for those the API's server-side context editing clears them instead.
- *      The trace keeps the uncompressed results (each already capped at 12K
+ *      The trace keeps the uncompressed results (each already capped at 8K
  *      chars by capToolResult) — only the in-flight model context shrinks.
  *
  *   3. Last-step summary (TASK 3): the final allowed step is steered to a
@@ -47,7 +47,7 @@ import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from '
 import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
 import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
 import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from './launch-validation';
-import type { LaunchRequirements } from './launch-brief';
+import { parseLaunchBrief, type LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
@@ -299,17 +299,23 @@ function buildSystemMessage(
   return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled }), ...(providerOptions ? { providerOptions } : {}) };
 }
 
-/** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter containing it turns Launch mode on. */
+/** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter narrowed to it turns Launch mode on. */
 const LAUNCH_PLATFORM_GROUP = 'Tags (Reactor)';
+/** Groups that may ride along with the Launch group without making the run "not Launch" (grounding + the code-commit handoff). */
+const LAUNCH_COMPANION_GROUPS = new Set(['Knowledge', 'GitHub']);
 
 /**
  * Whether this run should ground on the Launch/Reactor object model: set
- * explicitly via opts.launchMode, or implied when the platform filter targets
- * the Launch/Reactor tag tools. Non-Launch runs keep the lean cached prefix.
+ * explicitly via opts.launchMode, or implied when the platform filter is
+ * narrowed to the Launch/Reactor tag tools (plus Knowledge/GitHub). A filter
+ * that merely still includes the Tags group alongside other platforms — e.g.
+ * every box ticked but CJA — is not a Launch run. Non-Launch runs keep the
+ * lean cached prefix.
  */
-function resolveLaunchMode(opts: Pick<RunAgentOptions, 'launchMode' | 'platformFilter'>): boolean {
+export function resolveLaunchMode(opts: Pick<RunAgentOptions, 'launchMode' | 'platformFilter'>): boolean {
   if (opts.launchMode !== undefined) return opts.launchMode;
-  return Boolean(opts.platformFilter?.includes(LAUNCH_PLATFORM_GROUP));
+  const filter = opts.platformFilter ?? [];
+  return filter.includes(LAUNCH_PLATFORM_GROUP) && filter.every((p) => p === LAUNCH_PLATFORM_GROUP || LAUNCH_COMPANION_GROUPS.has(p));
 }
 
 function tryGetModelEntry(modelKey: string) {
@@ -452,7 +458,7 @@ const RESULT_SUMMARY_THRESHOLD = 2;
  * RESULT_SUMMARY_THRESHOLD. Large list/read payloads otherwise accumulate at
  * full size in the context that's resent on every turn (the same mechanism
  * behind the documented 400K-token run). The trace keeps each result as the
- * tool returned it (after capToolResult's 12K cap) — only the model's
+ * tool returned it (after capToolResult's 8K cap) — only the model's
  * in-flight context is shrunk further.
  *
  * Returns a new messages array if anything was compressed, or undefined to
@@ -557,7 +563,13 @@ async function selectLiveTools(
   const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name));
   const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
-    shortlistTools(shortlistQuery, { k: toolShortlistSize, exclude: alwaysOn })
+    shortlistTools(shortlistQuery, {
+      k: toolShortlistSize,
+      exclude: alwaysOn,
+      // Rank only tools the platform filter kept, so filtered-out tools don't
+      // use up shortlist slots and leave the run with fewer usable tools.
+      include: (name) => catalogByName.has(name),
+    })
   );
 
   // TASK 9: the policy runs over the whole catalog, so a tool reached via
@@ -843,7 +855,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // the publish state machine, widens the seed plan + always-on tools to the
   // publish pipeline, and feeds the gate the fallback target. Off → every
   // publish-related path is byte-identical to today.
-  const publishEnabled = launchMode && Boolean(opts.publishTarget);
+  const publishEnabled =
+    launchMode && Boolean(opts.publishTarget?.environmentId || opts.publishTarget?.environmentName);
   // Collects fire-and-forget RAG judgments for live runs; drained once the
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
@@ -857,6 +870,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     launchMode && !opts.tools
       ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow', publishTarget: opts.publishTarget })
       : undefined;
+
+  // Phase 2: parse the free-text brief into typed requirements for a live
+  // Launch run, so the shortlist query, the seeded plan and the few-shot
+  // examples are specialised to it. Callers can pass opts.requirements to skip
+  // the parse; the eval path (opts.tools) doesn't parse. Fail-open: a parse
+  // failure runs the generic Launch flow rather than failing the run.
+  let requirements = opts.requirements;
+  if (launchMode && !opts.tools && !requirements) {
+    try {
+      requirements = await stage('Launch brief parse', () => parseLaunchBrief(userInput, startModelKey));
+    } catch (err) {
+      console.warn('[agent] Launch brief parse failed; running without parsed requirements:', err instanceof Error ? err.message : err);
+    }
+  }
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -874,7 +901,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
       opts.platformFilter,
-      { enabled: launchMode, publishEnabled, requirements: opts.requirements, gate: launchGate }
+      { enabled: launchMode, publishEnabled, requirements, gate: launchGate }
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {
@@ -908,7 +935,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       // library), so the plan is seeded deterministically from the Launch
       // template (launch-plan.ts) and specialised with the Phase 2
       // requirements, rather than asked of the model.
-      planTracker = new PlanTracker(seedLaunchPlan(opts.requirements, publishEnabled), (p) => opts.onPlan?.(p));
+      planTracker = new PlanTracker(seedLaunchPlan(requirements, publishEnabled), (p) => opts.onPlan?.(p));
     } else {
       try {
         const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
@@ -949,7 +976,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // Live Launch runs only (the eval path passes opts.tools); nothing to show
   // when no requirements were parsed or none overlap.
   if (launchMode && !opts.tools) {
-    const preamble = launchExamplesPreamble(selectLaunchExamples(opts.requirements));
+    const preamble = launchExamplesPreamble(selectLaunchExamples(requirements));
     if (preamble) userMessage = `${preamble}\n\n${userMessage}`;
   }
 
@@ -1097,7 +1124,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           // TASK 2: compress tool results from steps older than the threshold
           // so large list/read payloads don't accumulate at full size in the
           // context that's resent on every turn. The trace (onStep /
-          // result.steps) keeps the uncompressed (12K-capped) results; only
+          // result.steps) keeps the uncompressed (8K-capped) results; only
           // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.

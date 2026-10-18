@@ -54,6 +54,7 @@ export type ToolAccessLevel = 'read' | 'write' | 'destructive';
 const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
   msb_github_merge_pr: 'destructive',      // merging a PR is irreversible
   query_rag_db: 'read',                    // "query" is a verb here, but a server prefix in query_run etc.
+  intake_query: 'read',                    // mcp rejects anything but SELECT/WITH server-side
   find_tools: 'read',                      // synthetic (agent.ts)
   call_tool: 'write',                      // synthetic proxy (agent.ts) — classify its target via effectiveToolName
   policy_info: 'read',                     // synthetic (below)
