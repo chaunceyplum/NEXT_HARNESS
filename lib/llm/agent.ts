@@ -45,6 +45,7 @@ import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { LAUNCH_ALWAYS_ON_TOOLS, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import { LaunchValidationGate } from './launch-validation';
 import type { LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
@@ -520,7 +521,7 @@ async function selectLiveTools(
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
   ragJudgmentSink: RagJudgmentSink,
   platformFilter?: string[],
-  launch?: { enabled: boolean; requirements?: LaunchRequirements }
+  launch?: { enabled: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate }
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   // Knowledge tools are always included — they're grounding/search tools the
@@ -546,7 +547,10 @@ async function selectLiveTools(
   // Action guardrails (write cap, protected ids, result redaction) wrap the
   // same objects call_tool executes.
   const callable = applyActionGuards(
-    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink }), policy)
+    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink, launchGate: launch?.gate }), {
+      ...policy,
+      launchGate: launch?.gate,
+    })
   );
 
   const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
@@ -820,6 +824,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
   let ragJudgmentSink: RagJudgmentSink | undefined;
+  // Phase 4: the validation gate for a Launch-mode run (launch-validation.ts).
+  // It observes tool results to build property state and BLOCKS the library
+  // handoff until the structural / reference / dry-run checks pass. Non-Launch
+  // runs (and the eval path) get none, so the gate wrapper is a no-op there.
+  const resolvedPolicy = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
+  const launchGate =
+    launchMode && !opts.tools
+      ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow' })
+      : undefined;
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -837,7 +850,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
       opts.platformFilter,
-      { enabled: launchMode, requirements: opts.requirements }
+      { enabled: launchMode, requirements: opts.requirements, gate: launchGate }
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {

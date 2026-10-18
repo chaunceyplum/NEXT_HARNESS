@@ -23,6 +23,7 @@ import {
 } from './tool-call-cache';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
+import type { LaunchValidationGate } from './launch-validation';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
@@ -480,6 +481,14 @@ export interface BuildAiToolsOptions {
    * verdicts land here (see RagJudgmentSink). Omit to skip live judging.
    */
   ragJudgmentSink?: RagJudgmentSink;
+  /**
+   * Phase 4: Launch-mode validation gate (launch-validation.ts). When present,
+   * each tool call is observed to build property state, and the library handoff
+   * (reactor_create_library / reactor_update_library) is validated and BLOCKED
+   * before it reaches the MCP server if a check fails. Omit (non-Launch runs)
+   * and this is a no-op.
+   */
+  launchGate?: LaunchValidationGate;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
@@ -711,11 +720,21 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       // without requiring a hand-written Zod schema per tool.
       inputSchema: jsonSchema(def.inputSchema as never),
       execute: async (input: unknown, { abortSignal }) => {
+        const args = (input as Record<string, unknown>) ?? {};
+        // Phase 4: block the library handoff BEFORE the MCP write when the
+        // Launch validation gate is active and a check fails. Throwing here
+        // reuses the loop's tool-error feedback path (the model sees the
+        // reasons and retries) — see launch-validation.ts. No-op off Launch mode.
+        opts.launchGate?.gate(def.name, args);
         const result = await executeMcpToolWithRetry(
           def.name,
-          (input as Record<string, unknown>) ?? {},
+          args,
           { maxRetries, availableNames, grounding, deduper, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
         );
+        // Observe the successful result so property state (installed
+        // extensions, known data elements) and created resources are available
+        // for a later handoff's reference check.
+        opts.launchGate?.observe(def.name, args, result);
         return capToolResult(def.name, result);
       },
     });
