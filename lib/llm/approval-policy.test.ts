@@ -60,6 +60,31 @@ describe('approvalReason', () => {
     // dry-run only neutralises destructive tools; outbound writes still execute.
     expect(approvalReason('msb_github_commit_code', {}, { dryRun: true })).toBe('outbound');
   });
+
+  it('exempts a stage-verified dev/staging publish transition from the outbound gate', () => {
+    // A reactor_transition_library whose resolved target stage is development or
+    // staging is NOT gated — the user asked for an ungated dev/staging publish.
+    expect(approvalReason('reactor_transition_library', {}, { transitionStage: 'development' })).toBeUndefined();
+    expect(approvalReason('reactor_transition_library', {}, { transitionStage: 'staging' })).toBeUndefined();
+  });
+
+  it('still gates a transition whose target stage is production, unknown, or absent', () => {
+    // Production is independently refused by the gate in code; here it stays gated too.
+    expect(approvalReason('reactor_transition_library', {}, { transitionStage: 'production' })).toBe('outbound');
+    expect(approvalReason('reactor_transition_library', {}, { transitionStage: 'unknown' })).toBe('outbound');
+    // No stage resolved (e.g. non-publish run) → unchanged, still gated.
+    expect(approvalReason('reactor_transition_library', {})).toBe('outbound');
+  });
+
+  it('does not exempt any other outbound tool, even with a stage hint', () => {
+    expect(approvalReason('reactor_build_library', {}, { transitionStage: 'staging' })).toBe('outbound');
+    expect(approvalReason('msb_github_commit_code', {}, { transitionStage: 'development' })).toBe('outbound');
+  });
+
+  it('a verified dev/staging transition still waits in assisted mode (every write is approved)', () => {
+    // The user-tightened assisted gate is a separate safety mechanism, left intact.
+    expect(approvalReason('reactor_transition_library', {}, { mode: 'assisted', transitionStage: 'staging' })).toBe('assisted-mode');
+  });
 });
 
 describe('resolveRolloutMode', () => {

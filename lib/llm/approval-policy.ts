@@ -22,6 +22,7 @@
  */
 
 import { classifyTool } from './tool-policy';
+import { PUBLISH_TRANSITION_TOOL, type ResolvedStage } from './launch-validation';
 
 export type RolloutMode = 'autonomous' | 'assisted' | 'shadow';
 
@@ -116,11 +117,19 @@ function sqlOf(input: unknown): unknown {
  * Why this call needs a human decision, or undefined if it can run as is.
  * `toolName`/`input` are the effective call (call_tool already unwrapped).
  * `dryRun` means destructive tools are wrapped and won't execute.
+ *
+ * `transitionStage` is the resolved target stage of a reactor_transition_library
+ * call, from server truth (launch-validation.ts, via the run's gate). A
+ * transition whose target stage is a VERIFIED "development" or "staging" is
+ * exempt from the outbound-approval gate (the user asked for an ungated
+ * dev/staging publish); production stays blocked in code (the gate refuses it
+ * before it ever reaches here), and an "unknown"/absent stage stays gated —
+ * a publish that can't be proven safe is not exempted.
  */
 export function approvalReason(
   toolName: string,
   input: unknown,
-  opts: { mode?: RolloutMode; dryRun?: boolean } = {}
+  opts: { mode?: RolloutMode; dryRun?: boolean; transitionStage?: ResolvedStage } = {}
 ): ApprovalReason | undefined {
   const mode = opts.mode ?? 'autonomous';
   const level = classifyTool(toolName);
@@ -131,6 +140,16 @@ export function approvalReason(
   if (neutralised) return undefined;
   if (level === 'destructive') return 'destructive';
   if (toolName === 'execute_sql' && !isReadOnlySql(sqlOf(input))) return 'sql-write';
+  // A publish transition to a server-verified dev/staging environment is NOT
+  // gated — the user asked for an ungated dev/staging publish, and the
+  // production block (launch-validation.ts) independently refuses prod. Every
+  // other outbound tool, and a transition with an unknown stage, stays gated.
+  if (
+    toolName === PUBLISH_TRANSITION_TOOL &&
+    (opts.transitionStage === 'development' || opts.transitionStage === 'staging')
+  ) {
+    return mode === 'assisted' && level === 'write' ? 'assisted-mode' : undefined;
+  }
   if (OUTBOUND_TOOLS.has(toolName)) return 'outbound';
   if (mode === 'assisted' && level === 'write') return 'assisted-mode';
   return undefined;
