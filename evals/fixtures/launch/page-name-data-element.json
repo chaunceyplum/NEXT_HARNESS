@@ -1,0 +1,148 @@
+{
+  "id": "page-name-data-element",
+  "note": "A tagging brief that needs a NEW data element created and then referenced by a rule component in the same library. The property has 'core' installed but no 'Page Name' data element yet, so the agent must create it (reactor_create_data_element) before a component references %Page Name% — the Phase 4 reference check resolves it against data elements created THIS run. Scripted Reactor tools stand in for live MCP writes.",
+  "category": "launch",
+  "request": "In Launch property \"Acme Web\" (library \"Web Tagging Dev\"), capture the page name from the data-layer path digitalData.page.pageInfo.pageName as a data element called \"Page Name\" (persist it for the pageview), then add a window-loaded rule whose custom-code action logs %Page Name%. Populate the dev library — do not publish it.",
+  "maxSteps": 18,
+  "tools": [
+    {
+      "name": "reactor_list_extensions",
+      "description": "List the extensions installed in a Launch (Reactor) property. Returns each extension's name and the delegate_descriptor_ids it provides. Read this before building rule components or data elements so delegates resolve to an installed extension.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" }
+        },
+        "required": ["property_id"]
+      },
+      "responses": [
+        {
+          "result": {
+            "data": [
+              { "id": "EX1", "type": "extensions", "attributes": { "name": "core" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "reactor_list_data_elements",
+      "description": "List the data elements that already exist in a Launch (Reactor) property. Read this before referencing a data element so %references% resolve; create any that are missing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" }
+        },
+        "required": ["property_id"]
+      },
+      "responses": [
+        { "result": { "data": [] } }
+      ]
+    },
+    {
+      "name": "search_adobe_knowledge",
+      "description": "Semantic search over the Adobe solutions-architecture knowledge base (AEP, CJA, AJO, Launch documentation and patterns).",
+      "responses": [
+        {
+          "result": {
+            "results": [
+              {
+                "title": "Launch data element from a JavaScript variable",
+                "content": "A data element reading a data-layer path uses core::dataElements::javascript-variable with settings.path set to the dotted path, and storage_duration one of pageview/session/visitor. Rule components reference it as %Data Element Name%."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "reactor_create_data_element",
+      "description": "Create a data element in a Launch property. Carries a name, a delegate_descriptor_id in \"extension::type::delegate\" form, a settings object, and an optional storage_duration (pageview | session | visitor).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "name": { "type": "string" },
+          "delegate_descriptor_id": { "type": "string", "description": "e.g. core::dataElements::javascript-variable" },
+          "settings": { "type": "object" },
+          "storage_duration": { "type": "string", "enum": ["pageview", "session", "visitor"] }
+        },
+        "required": ["name", "delegate_descriptor_id", "settings"]
+      },
+      "responses": [
+        { "result": { "data": { "id": "DE9", "type": "data_elements", "attributes": { "name": "Page Name" } } } }
+      ]
+    },
+    {
+      "name": "reactor_create_rule_component",
+      "description": "Create a rule component (event, condition, or action) on a rule. Carries a delegate_descriptor_id in \"extension::type::delegate\" form plus a settings object. Reference a data element in settings as %Data Element Name%.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "rule_id": { "type": "string" },
+          "delegate_descriptor_id": { "type": "string" },
+          "settings": { "type": "object" }
+        },
+        "required": ["delegate_descriptor_id", "settings"]
+      },
+      "responses": [
+        { "result": { "data": { "id": "RC9", "type": "rule_components" } } }
+      ]
+    },
+    {
+      "name": "reactor_create_rule",
+      "description": "Create a rule in a Launch property. Rule components attach to it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "name": { "type": "string" }
+        },
+        "required": ["name"]
+      },
+      "responses": [
+        { "result": { "data": { "id": "RL9", "type": "rules", "attributes": { "name": "Window loaded - log page name" } } } }
+      ]
+    },
+    {
+      "name": "reactor_create_library",
+      "description": "Create or populate a Launch library with the given rules and data elements — the deliverable devs load to test. Does NOT publish or build the library to an environment.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "name": { "type": "string" },
+          "rule_components": { "type": "array", "items": { "type": "object" } },
+          "data_elements": { "type": "array", "items": { "type": "object" } }
+        },
+        "required": ["name"]
+      },
+      "responses": [
+        { "result": { "data": { "id": "LB9", "type": "libraries", "attributes": { "name": "Web Tagging Dev", "state": "development" } } } }
+      ]
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "reactor_list_extensions",
+      "reactor_create_data_element",
+      "reactor_create_rule_component",
+      "reactor_create_library"
+    ],
+    "callOrder": [
+      ["reactor_create_data_element", "reactor_create_rule_component"],
+      ["reactor_create_rule_component", "reactor_create_library"]
+    ],
+    "argsContain": [
+      { "tool": "reactor_create_data_element", "contains": "digitalData.page.pageInfo.pageName" },
+      { "tool": "reactor_create_data_element", "contains": "pageview" },
+      { "tool": "reactor_create_rule_component", "contains": "%Page Name%" }
+    ],
+    "finishReasons": ["stop"],
+    "criteria": [
+      "The answer reports that a 'Page Name' data element was created and a rule referencing it was added, and that the dev library was populated.",
+      "The answer does not claim to have published, built, or deployed the library to any environment."
+    ]
+  }
+}
