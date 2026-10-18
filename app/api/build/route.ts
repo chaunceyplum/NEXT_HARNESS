@@ -198,6 +198,30 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     };
   }
 
+  // publishTarget: an object with optional string members. ABSENT → library-only
+  // (unchanged behaviour); PRESENT → the run may publish to a dev/staging
+  // environment (resolved from server truth; production is refused in code).
+  if (b.publishTarget !== undefined) {
+    const pt = b.publishTarget;
+    if (!pt || typeof pt !== 'object' || Array.isArray(pt)) {
+      return {
+        ok: false,
+        error: { error: '"publishTarget" must be an object with optional "environmentId", "environmentName", and "propertyId" strings', code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
+    const ptObj = pt as Record<string, unknown>;
+    for (const key of ['environmentId', 'environmentName', 'propertyId']) {
+      if (ptObj[key] !== undefined && typeof ptObj[key] !== 'string') {
+        return {
+          ok: false,
+          error: { error: `"publishTarget.${key}" must be a string`, code: 'VALIDATION_ERROR' },
+          status: 400,
+        };
+      }
+    }
+  }
+
   return {
     ok: true,
     req: {
@@ -220,8 +244,19 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
         ? (b.platformFilter as string[])
         : undefined,
       launchMode: typeof b.launchMode === 'boolean' ? b.launchMode : undefined,
+      ...(b.publishTarget !== undefined ? { publishTarget: normalisePublishTarget(b.publishTarget) } : {}),
     },
   };
+}
+
+/** Pick only the known string members off a validated publishTarget object. */
+function normalisePublishTarget(value: unknown): BuildRequest['publishTarget'] {
+  const pt = (value ?? {}) as Record<string, unknown>;
+  const out: NonNullable<BuildRequest['publishTarget']> = {};
+  if (typeof pt.environmentId === 'string') out.environmentId = pt.environmentId;
+  if (typeof pt.environmentName === 'string') out.environmentName = pt.environmentName;
+  if (typeof pt.propertyId === 'string') out.propertyId = pt.propertyId;
+  return out;
 }
 
 // ── Route handler ─────────────────────────────────────────────────────────────

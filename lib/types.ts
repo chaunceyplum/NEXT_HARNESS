@@ -126,9 +126,23 @@ export interface BuildRequest {
    * model (injected into the cached system prompt — see lib/llm/agent-core.ts).
    * Omit to infer it from platformFilter targeting the Launch/Reactor group;
    * set false to keep the lean prompt even then. The deliverable stops at a
-   * populated library — there is no publish-to-environment tool.
+   * populated library unless publishTarget is set (see below).
    */
   launchMode?: boolean;
+  /**
+   * Publish target for a Launch run. ABSENT → library-only, byte-identical to
+   * today's behaviour (the run stops at a populated library and never
+   * publishes). PRESENT → the run MAY publish the populated library, subject
+   * to the dev/staging rule: publishing is permitted ONLY to a development or
+   * staging environment (resolved from server truth), and a production — or an
+   * unresolvable — stage is refused in code before the transition is sent.
+   *
+   * The stage decision is driven by `environmentId` / `environmentName`
+   * resolved against the environment facts the run reads (reactor_get_environment
+   * / reactor_list_environments); `propertyId` is accepted for completeness
+   * but does not drive the stage decision.
+   */
+  publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
 }
 
 /**
