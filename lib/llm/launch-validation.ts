@@ -37,8 +37,27 @@
  *      live API call — exactly as commit-validation.ts is a parse check, not
  *      the target repo's real build.
  *
- * Deliverable boundary (Phase 1) is unchanged: the gate validates populating a
- * library, never publishing — there is no build/transition handling here.
+ * Publish extension (dev/staging only — hard production block):
+ * Publishing a library (reactor_transition_library) is normally outside the
+ * deliverable boundary, but a run started with a publishTarget may transition
+ * the populated library to a dev/staging environment. Two things are enforced
+ * HERE, structurally, at the same pre-write seam the handoff uses:
+ *
+ *   - PRODUCTION BLOCK: a transition is allowed ONLY when the target
+ *     environment's `stage` resolves (from SERVER TRUTH observed on
+ *     reactor_get_environment / reactor_list_environments / reactor_create_
+ *     environment) to "development" or "staging". A "production" stage, or a
+ *     stage that cannot be determined, is REFUSED by throwing before the MCP
+ *     write — so a hallucinated or injected "publish to prod" cannot slip
+ *     through. Only the environment's `stage` field is authoritative; the
+ *     environment NAME text is never used to infer the stage.
+ *
+ *   - BUILD-FAILURE REFUSAL: if the latest observed build (reactor_get_build)
+ *     resolved to status "failed", a transition is refused with the build
+ *     error, so the agent fixes the components rather than calling
+ *     reactor_transition_library on a failed build (the API rejects that with
+ *     409 "Last build was not successful"). This reuses the SAME thrown
+ *     tool-error feedback path as the handoff gate — no new retry mechanism.
  */
 
 import { z } from 'zod';
@@ -67,6 +86,45 @@ const RULE_COMPONENT_WRITE_TOOLS = new Set(['reactor_create_rule_component', 're
 
 export function isLaunchHandoffTool(toolName: string): boolean {
   return LAUNCH_HANDOFF_TOOLS.has(toolName);
+}
+
+/**
+ * The publish transition this gate guards. A reactor_transition_library call
+ * is only ALLOWED when the target environment's stage resolves to a non-prod
+ * stage from server truth; production / unknown are refused (see the
+ * production block below).
+ */
+export const PUBLISH_TRANSITION_TOOL = 'reactor_transition_library';
+
+export function isPublishTransitionTool(toolName: string): boolean {
+  return toolName === PUBLISH_TRANSITION_TOOL;
+}
+
+/** Tools whose results carry environment `stage` facts the production block reads. */
+const ENVIRONMENT_READ_TOOLS = new Set([
+  'reactor_get_environment',
+  'reactor_list_environments',
+  'reactor_create_environment',
+]);
+
+/** Tools whose results carry a build `status` the build-failure refusal reads. */
+const BUILD_READ_TOOLS = new Set(['reactor_get_build', 'reactor_build_library']);
+
+/**
+ * A Launch environment's deployment stage. Only "development" and "staging"
+ * are publishable; "production" is refused in code. The Reactor API uses these
+ * exact lowercase values on an environment's `stage` attribute.
+ */
+export type EnvironmentStage = 'development' | 'staging' | 'production';
+
+/** The three publishable/non-publishable stages, plus "unknown" when it can't be resolved. */
+export type ResolvedStage = EnvironmentStage | 'unknown';
+
+const ENVIRONMENT_STAGES: ReadonlySet<string> = new Set<EnvironmentStage>(['development', 'staging', 'production']);
+
+/** Narrow an arbitrary string to a known EnvironmentStage, or undefined. */
+function asEnvironmentStage(value: unknown): EnvironmentStage | undefined {
+  return typeof value === 'string' && ENVIRONMENT_STAGES.has(value) ? (value as EnvironmentStage) : undefined;
 }
 
 // ── (1) STRUCTURAL — zod v4 schemas matching the Phase 1 contract ──────────────
@@ -159,6 +217,21 @@ export function validateDataElementShape(element: unknown): string[] {
 export class LaunchPropertyState {
   readonly installedExtensions = new Set<string>();
   readonly knownDataElements = new Set<string>();
+  /**
+   * Observed environment stages, keyed by BOTH the environment id and its
+   * name (lowercased), so a transition call that names either resolves. Only
+   * populated from a server-truth `stage` field — never inferred from name
+   * text. The production block reads this to decide allow/refuse.
+   */
+  readonly environmentStages = new Map<string, EnvironmentStage>();
+  /**
+   * The status of the latest observed build (reactor_get_build /
+   * reactor_build_library), e.g. "pending" | "succeeded" | "failed", with any
+   * surfaced error, so the build-failure refusal can block a transition on a
+   * failed build. undefined until a build result is observed.
+   */
+  latestBuildStatus?: string;
+  latestBuildError?: string;
 
   /** Record an extension as installed/available in the property. */
   addExtension(name: string): void {
@@ -171,8 +244,26 @@ export class LaunchPropertyState {
   }
 
   /**
-   * Observe one tool call's arguments + result and absorb any extension or
-   * data-element facts they carry. Never throws.
+   * Record an environment's stage under a key (its id or name). Only known
+   * stages are stored; name keys are lowercased so a case-insensitive match
+   * works. Never stores a stage inferred from anything but the `stage` field.
+   */
+  addEnvironmentStage(idOrName: string | undefined, stage: EnvironmentStage | undefined): void {
+    if (!idOrName || !stage) return;
+    this.environmentStages.set(idOrName, stage);
+    this.environmentStages.set(idOrName.toLowerCase(), stage);
+  }
+
+  /** Look up an observed stage by environment id or name (case-insensitive on name). */
+  stageOf(idOrName: string | undefined): EnvironmentStage | undefined {
+    if (!idOrName) return undefined;
+    return this.environmentStages.get(idOrName) ?? this.environmentStages.get(idOrName.toLowerCase());
+  }
+
+  /**
+   * Observe one tool call's arguments + result and absorb any extension,
+   * data-element, environment-stage, or build-status facts they carry. Never
+   * throws.
    */
   observe(toolName: string, args: unknown, result: unknown): void {
     try {
@@ -184,6 +275,19 @@ export class LaunchPropertyState {
         // A create/update also carries the name in its arguments.
         const argName = readName(args);
         if (argName) this.addDataElement(argName);
+      }
+      if (ENVIRONMENT_READ_TOOLS.has(toolName)) {
+        for (const env of collectEnvironmentStages(result)) {
+          this.addEnvironmentStage(env.id, env.stage);
+          this.addEnvironmentStage(env.name, env.stage);
+        }
+      }
+      if (BUILD_READ_TOOLS.has(toolName)) {
+        const build = readBuildStatus(result);
+        if (build.status) {
+          this.latestBuildStatus = build.status;
+          this.latestBuildError = build.error;
+        }
       }
     } catch {
       // Observing state is best-effort; a weird payload shape must not break the run.
@@ -240,6 +344,104 @@ function collectResourceNames(result: unknown): Set<string> {
   const names = new Set<string>();
   collectStringsAtKey(result, 'name', names);
   return names;
+}
+
+/** One environment's identifying facts, as read from a reactor_*environment result. */
+interface EnvironmentFacts {
+  id?: string;
+  name?: string;
+  stage?: EnvironmentStage;
+}
+
+/**
+ * Pull environment { id, name, stage } tuples out of a reactor_get_environment
+ * / reactor_list_environments / reactor_create_environment result. The JSON:API
+ * resource carries `id` at the resource level and `name`/`stage` under
+ * `attributes`; a bare `{ id, name, stage }` object is read too. Only the
+ * `stage` field is authoritative — the name is captured solely so a transition
+ * that names the environment by name still resolves to the observed stage.
+ * Defensive: anything unreadable is skipped, never thrown on.
+ */
+function collectEnvironmentStages(result: unknown): EnvironmentFacts[] {
+  const out: EnvironmentFacts[] = [];
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const v = value as Record<string, unknown>;
+    const attrs = (v.attributes && typeof v.attributes === 'object' ? (v.attributes as Record<string, unknown>) : v) as Record<string, unknown>;
+    const stage = asEnvironmentStage(attrs.stage ?? v.stage);
+    if (stage) {
+      const id = typeof v.id === 'string' ? v.id : typeof attrs.id === 'string' ? (attrs.id as string) : undefined;
+      const name = typeof attrs.name === 'string' ? (attrs.name as string) : typeof v.name === 'string' ? (v.name as string) : undefined;
+      out.push({ id, name, stage });
+    }
+    // Recurse into nested containers (data wrappers, included arrays, …).
+    for (const nested of Object.values(v)) {
+      if (nested && typeof nested === 'object') visit(nested);
+    }
+  };
+
+  visit(result);
+  return out;
+}
+
+/** The status (and any error) of a build, read defensively from a reactor_get_build / reactor_build_library result. */
+function readBuildStatus(result: unknown): { status?: string; error?: string } {
+  const statuses = new Set<string>();
+  collectStringsAtKey(result, 'status', statuses);
+  // A build result carries exactly one build; if several status strings turn
+  // up (nested resources), prefer a terminal one so a failed build is not
+  // masked by a nested "pending".
+  const all = [...statuses].map((s) => s.toLowerCase());
+  const status = all.find((s) => s === 'failed') ?? all.find((s) => s === 'succeeded') ?? all[0];
+
+  let error: string | undefined;
+  if (status === 'failed') {
+    const errors = new Set<string>();
+    for (const key of ['error', 'errors', 'detail', 'title', 'message']) collectStringsAtKey(result, key, errors);
+    error = [...errors].join('; ') || undefined;
+  }
+  return { status, error };
+}
+
+/**
+ * Resolve the target environment stage for a publish transition, from server
+ * truth captured in `state`. The target is named by a transition call's args
+ * (`environment_id` / `environmentId` / `environment` / `environment_name` /
+ * `environmentName`) or by the run's `publishTarget` ({ environmentId,
+ * environmentName }). Returns the observed stage, or 'unknown' when it cannot
+ * be determined — the production block refuses 'unknown' just like 'production'.
+ * Never infers a stage from the environment name text.
+ */
+export function resolveEnvironmentStage(
+  args: unknown,
+  state: LaunchPropertyState,
+  publishTarget?: { environmentId?: string; environmentName?: string }
+): ResolvedStage {
+  const candidates: Array<string | undefined> = [];
+  if (args && typeof args === 'object') {
+    const a = args as Record<string, unknown>;
+    for (const key of ['environment_id', 'environmentId', 'environment', 'environment_name', 'environmentName']) {
+      const v = a[key];
+      if (typeof v === 'string') candidates.push(v);
+      // A relationship object: { environment: { data: { id } } }.
+      if (v && typeof v === 'object') {
+        const id = (v as Record<string, unknown>).id ?? ((v as Record<string, unknown>).data as Record<string, unknown> | undefined)?.id;
+        if (typeof id === 'string') candidates.push(id);
+      }
+    }
+  }
+  candidates.push(publishTarget?.environmentId, publishTarget?.environmentName);
+
+  for (const candidate of candidates) {
+    const stage = state.stageOf(candidate);
+    if (stage) return stage;
+  }
+  return 'unknown';
 }
 
 // ── (2) REFERENCE — delegates + data-element references resolve ────────────────
@@ -393,6 +595,73 @@ export function validateBeforeLaunchHandoff(
 }
 
 /**
+ * Gate a publish transition (reactor_transition_library) BEFORE it reaches the
+ * MCP server, using the same throw-to-block mechanism as the handoff gate.
+ * Two refusals, in order:
+ *
+ *   1. If the latest observed build resolved to status "failed", throw with
+ *      the build error — the agent must fix the components, not transition a
+ *      failed build (the API rejects it 409 "Last build was not successful").
+ *   2. Resolve the target environment's stage from server truth and allow the
+ *      transition ONLY for "development" / "staging"; refuse "production" and
+ *      "unknown" (an unreadable stage is treated as production-equivalent — a
+ *      publish that can't be proven safe is not permitted).
+ *
+ * No-op for any tool that isn't a publish transition.
+ */
+export function validateBeforeTransition(
+  toolName: string,
+  args: unknown,
+  state: LaunchPropertyState,
+  publishTarget?: { environmentId?: string; environmentName?: string }
+): void {
+  if (!isPublishTransitionTool(toolName)) return;
+
+  if (state.latestBuildStatus === 'failed') {
+    throw new Error(
+      `Launch publish gate blocked ${toolName} — the latest build FAILED, so the library cannot be published ` +
+        `(the API rejects a transition on a failed build with 409 "Last build was not successful"). ` +
+        `Fix the components and rebuild, then poll reactor_get_build until status "succeeded" before transitioning.` +
+        (state.latestBuildError ? `\nBuild error: ${state.latestBuildError}` : '')
+    );
+  }
+
+  const stage = resolveEnvironmentStage(args, state, publishTarget);
+  if (stage === 'development' || stage === 'staging') return;
+
+  if (stage === 'production') {
+    const target = describeTransitionTarget(args, publishTarget);
+    throw new Error(
+      `Publishing to production is not permitted; stage=production for environment ${target}. ` +
+        `This harness publishes ONLY to development/staging environments. Target a dev/staging environment instead.`
+    );
+  }
+
+  // stage === 'unknown'
+  const target = describeTransitionTarget(args, publishTarget);
+  throw new Error(
+    `Cannot publish: the target environment's stage is unknown for ${target} — read it with ` +
+      `reactor_get_environment (or reactor_list_environments) first. Publishing is permitted ONLY to a ` +
+      `verified development/staging environment; an unverified stage is refused.`
+  );
+}
+
+/** A short, log-safe description of the transition's target environment, for an error message. */
+function describeTransitionTarget(
+  args: unknown,
+  publishTarget?: { environmentId?: string; environmentName?: string }
+): string {
+  if (args && typeof args === 'object') {
+    const a = args as Record<string, unknown>;
+    for (const key of ['environment_id', 'environmentId', 'environment_name', 'environmentName']) {
+      const v = a[key];
+      if (typeof v === 'string' && v) return v;
+    }
+  }
+  return publishTarget?.environmentId ?? publishTarget?.environmentName ?? '<unspecified>';
+}
+
+/**
  * Collect the rule components + data elements a handoff carries, from the
  * handoff tool's own arguments plus the components/data elements the run
  * created earlier (passed in by the caller). Shapes vary — the agent may pass
@@ -441,7 +710,19 @@ export class LaunchValidationGate {
   private readonly createdRuleComponents: unknown[] = [];
   private readonly createdDataElements: unknown[] = [];
 
-  constructor(private readonly opts: { dryRun?: boolean; shadow?: boolean } = {}) {}
+  constructor(
+    private readonly opts: {
+      dryRun?: boolean;
+      shadow?: boolean;
+      /**
+       * The run's publishTarget, when it was started with one. Lets a bare
+       * reactor_transition_library call (one that doesn't name the environment
+       * in its args) still resolve the target stage, so the production block
+       * and the approval exemption have server-truth to decide on.
+       */
+      publishTarget?: { environmentId?: string; environmentName?: string };
+    } = {}
+  ) {}
 
   /**
    * Observe a successful tool call (name + args + result): absorb property
@@ -469,12 +750,29 @@ export class LaunchValidationGate {
    * tool-error feedback path.
    */
   gate(toolName: string, args: unknown): void {
+    // Publish transition: hard production block + build-failure refusal.
+    if (isPublishTransitionTool(toolName)) {
+      validateBeforeTransition(toolName, args, this.state, this.opts.publishTarget);
+      return;
+    }
     if (!isLaunchHandoffTool(toolName)) return;
     const payload = collectHandoffPayload(args, {
       ruleComponents: this.createdRuleComponents,
       dataElements: this.createdDataElements,
     });
     validateBeforeLaunchHandoff(toolName, payload, this.state, this.opts);
+  }
+
+  /**
+   * The resolved stage of the environment a reactor_transition_library call
+   * would publish to, from the property state the run observed (server truth)
+   * plus the run's publishTarget fallback. 'unknown' when it cannot be
+   * determined. The approval layer reads this so a verified dev/staging
+   * transition is exempt from the outbound-approval gate without re-deriving
+   * the stage. Never infers a stage from the environment name text.
+   */
+  resolveStageFor(args: unknown): ResolvedStage {
+    return resolveEnvironmentStage(args, this.state, this.opts.publishTarget);
   }
 }
 

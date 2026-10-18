@@ -4,9 +4,12 @@ import {
   dataElementReferencesIn,
   extensionOfDelegate,
   isLaunchHandoffTool,
+  isPublishTransitionTool,
   LaunchPropertyState,
   LaunchValidationGate,
+  resolveEnvironmentStage,
   validateBeforeLaunchHandoff,
+  validateBeforeTransition,
   validateDataElementShape,
   validateLaunchHandoff,
   validateReferences,
@@ -293,5 +296,186 @@ describe('LaunchValidationGate', () => {
   it('ignores a non-handoff tool in gate()', () => {
     const gate = new LaunchValidationGate();
     expect(() => gate.gate('reactor_create_rule', { anything: true })).not.toThrow();
+  });
+});
+
+// ── Publish: environment-stage ingestion + resolution ───────────────────────────
+
+describe('isPublishTransitionTool', () => {
+  it('is true only for reactor_transition_library', () => {
+    expect(isPublishTransitionTool('reactor_transition_library')).toBe(true);
+    expect(isPublishTransitionTool('reactor_build_library')).toBe(false);
+    expect(isPublishTransitionTool('reactor_create_library')).toBe(false);
+  });
+});
+
+describe('LaunchPropertyState — environment stages', () => {
+  it('records a stage from a reactor_get_environment result, keyed by id and name', () => {
+    const state = new LaunchPropertyState();
+    state.observe('reactor_get_environment', {}, { data: { id: 'EN123', type: 'environments', attributes: { name: 'Staging', stage: 'staging' } } });
+    expect(state.stageOf('EN123')).toBe('staging');
+    expect(state.stageOf('Staging')).toBe('staging');
+    expect(state.stageOf('staging')).toBe('staging'); // case-insensitive name match
+  });
+
+  it('records multiple stages from a reactor_list_environments result', () => {
+    const state = new LaunchPropertyState();
+    state.observe('reactor_list_environments', {}, {
+      data: [
+        { id: 'EN1', attributes: { name: 'Dev', stage: 'development' } },
+        { id: 'EN2', attributes: { name: 'Prod', stage: 'production' } },
+      ],
+    });
+    expect(state.stageOf('EN1')).toBe('development');
+    expect(state.stageOf('EN2')).toBe('production');
+  });
+
+  it('ignores an unknown stage value and never infers a stage from the name', () => {
+    const state = new LaunchPropertyState();
+    // "production" only appears in the NAME, not the stage field — must not resolve to production.
+    state.observe('reactor_get_environment', {}, { data: { id: 'EN9', attributes: { name: 'production-mirror', stage: 'qa' } } });
+    expect(state.stageOf('EN9')).toBeUndefined();
+    expect(state.stageOf('production-mirror')).toBeUndefined();
+  });
+
+  it('never throws on an unexpected environment payload', () => {
+    const state = new LaunchPropertyState();
+    expect(() => state.observe('reactor_list_environments', null, 'nope')).not.toThrow();
+    expect(state.environmentStages.size).toBe(0);
+  });
+});
+
+describe('resolveEnvironmentStage', () => {
+  function stagedState(): LaunchPropertyState {
+    const state = new LaunchPropertyState();
+    state.addEnvironmentStage('EN-DEV', 'development');
+    state.addEnvironmentStage('EN-STAGE', 'staging');
+    state.addEnvironmentStage('EN-PROD', 'production');
+    return state;
+  }
+
+  it('resolves from the transition args (several key shapes)', () => {
+    const state = stagedState();
+    expect(resolveEnvironmentStage({ environment_id: 'EN-DEV' }, state)).toBe('development');
+    expect(resolveEnvironmentStage({ environmentId: 'EN-STAGE' }, state)).toBe('staging');
+    expect(resolveEnvironmentStage({ environment: { data: { id: 'EN-PROD' } } }, state)).toBe('production');
+  });
+
+  it('falls back to the run publishTarget when the args do not name an environment', () => {
+    const state = stagedState();
+    expect(resolveEnvironmentStage({}, state, { environmentId: 'EN-DEV' })).toBe('development');
+  });
+
+  it('is unknown when no candidate resolves to an observed stage', () => {
+    const state = stagedState();
+    expect(resolveEnvironmentStage({ environment_id: 'EN-MYSTERY' }, state)).toBe('unknown');
+    expect(resolveEnvironmentStage({}, state)).toBe('unknown');
+  });
+});
+
+describe('LaunchPropertyState — build status', () => {
+  it('records the latest build status and surfaces a failed build error', () => {
+    const state = new LaunchPropertyState();
+    state.observe('reactor_get_build', {}, { data: { id: 'B1', attributes: { status: 'failed', error: 'component X invalid' } } });
+    expect(state.latestBuildStatus).toBe('failed');
+    expect(state.latestBuildError).toContain('component X invalid');
+  });
+
+  it('records a succeeded build with no error', () => {
+    const state = new LaunchPropertyState();
+    state.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
+    expect(state.latestBuildStatus).toBe('succeeded');
+    expect(state.latestBuildError).toBeUndefined();
+  });
+});
+
+// ── Publish: the hard production block + build-failure refusal ───────────────────
+
+function publishReadyState(stage: 'development' | 'staging' | 'production'): LaunchPropertyState {
+  const state = new LaunchPropertyState();
+  state.addEnvironmentStage('EN-TARGET', stage);
+  state.latestBuildStatus = 'succeeded';
+  return state;
+}
+
+describe('validateBeforeTransition', () => {
+  it('is a no-op for a non-transition tool', () => {
+    expect(() => validateBeforeTransition('reactor_create_library', {}, publishReadyState('production'))).not.toThrow();
+  });
+
+  it('ALLOWS a transition to a verified development or staging environment', () => {
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('development'))
+    ).not.toThrow();
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('staging'))
+    ).not.toThrow();
+  });
+
+  it('REFUSES a transition to a production environment (hard block)', () => {
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('production'))
+    ).toThrow(/production is not permitted[\s\S]*stage=production[\s\S]*EN-TARGET/i);
+  });
+
+  it('REFUSES a transition when the target stage is unknown', () => {
+    const state = publishReadyState('development');
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-UNSEEN' }, state)
+    ).toThrow(/stage is unknown[\s\S]*reactor_get_environment/i);
+  });
+
+  it('REFUSES a transition when the latest build FAILED, surfacing the build error', () => {
+    const state = publishReadyState('development');
+    state.latestBuildStatus = 'failed';
+    state.latestBuildError = 'rule component RC2 references a missing data element';
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, state)
+    ).toThrow(/build FAILED[\s\S]*RC2 references a missing data element/i);
+  });
+
+  it('resolves the target from the run publishTarget when the args omit it', () => {
+    const state = publishReadyState('staging');
+    expect(() =>
+      validateBeforeTransition('reactor_transition_library', {}, state, { environmentId: 'EN-TARGET' })
+    ).not.toThrow();
+  });
+});
+
+describe('LaunchValidationGate — publish transition', () => {
+  it('builds environment stages from observed reads and ALLOWS a staging transition', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_list_environments', {}, { data: [{ id: 'EN-S', attributes: { name: 'Staging', stage: 'staging' } }] });
+    gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
+    expect(gate.resolveStageFor({ environment_id: 'EN-S' })).toBe('staging');
+    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-S' })).not.toThrow();
+  });
+
+  it('REFUSES a transition to an observed production environment (injected/hallucinated prod)', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_get_environment', {}, { data: { id: 'EN-P', attributes: { name: 'Prod', stage: 'production' } } });
+    gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
+    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-P' })).toThrow(/production is not permitted/i);
+  });
+
+  it('REFUSES a transition when the stage was never read (unknown is not exempt)', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
+    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-UNKNOWN' })).toThrow(/stage is unknown/i);
+  });
+
+  it('REFUSES a transition on a failed build before any stage check', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_list_environments', {}, { data: [{ id: 'EN-S', attributes: { stage: 'staging' } }] });
+    gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'failed', detail: 'bad component' } } });
+    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-S' })).toThrow(/build FAILED[\s\S]*bad component/i);
+  });
+
+  it('uses the run publishTarget as the resolution fallback for a bare transition', () => {
+    const gate = new LaunchValidationGate({ publishTarget: { environmentId: 'EN-DEV' } });
+    gate.observe('reactor_get_environment', {}, { data: { id: 'EN-DEV', attributes: { stage: 'development' } } });
+    gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
+    expect(gate.resolveStageFor({})).toBe('development');
+    expect(() => gate.gate('reactor_transition_library', {})).not.toThrow();
   });
 });
