@@ -190,6 +190,14 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     }
   }
 
+  if (b.launchMode !== undefined && typeof b.launchMode !== 'boolean') {
+    return {
+      ok: false,
+      error: { error: '"launchMode" must be a boolean', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
+
   return {
     ok: true,
     req: {
@@ -211,6 +219,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
       platformFilter: Array.isArray(b.platformFilter) && (b.platformFilter as string[]).length > 0
         ? (b.platformFilter as string[])
         : undefined,
+      launchMode: typeof b.launchMode === 'boolean' ? b.launchMode : undefined,
     },
   };
 }

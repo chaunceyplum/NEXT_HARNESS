@@ -200,6 +200,14 @@ export interface RunAgentOptions {
    * leave empty to include all platforms.
    */
   platformFilter?: string[];
+  /**
+   * Launch-tagging run: inject the Launch/Reactor object-model contract into
+   * the cached system-prompt prefix (agent-core.ts). Omit to infer it from
+   * platformFilter targeting the Launch/Reactor group; set false to force the
+   * lean prefix even then. The deliverable stops at a populated library — there
+   * is no publish-to-environment tool.
+   */
+  launchMode?: boolean;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
   /** Requesting user, recorded on facts the run saves to memory. */
@@ -253,7 +261,7 @@ export interface RunAgentOptions {
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = false): SystemModelMessage {
+function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = false, launchMode = false): SystemModelMessage {
   const entry = tryGetModelEntry(modelKey);
   const providerOptions: SystemModelMessage['providerOptions'] =
     entry?.provider === 'anthropic'
@@ -261,7 +269,20 @@ function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = f
       : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
         ? { bedrock: { cachePoint: { type: 'default' } } }
         : undefined;
-  return { role: 'system', content: systemPrompt({ toolDiscovery, memory }), ...(providerOptions ? { providerOptions } : {}) };
+  return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode }), ...(providerOptions ? { providerOptions } : {}) };
+}
+
+/** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter containing it turns Launch mode on. */
+const LAUNCH_PLATFORM_GROUP = 'Tags (Reactor)';
+
+/**
+ * Whether this run should ground on the Launch/Reactor object model: set
+ * explicitly via opts.launchMode, or implied when the platform filter targets
+ * the Launch/Reactor tag tools. Non-Launch runs keep the lean cached prefix.
+ */
+function resolveLaunchMode(opts: Pick<RunAgentOptions, 'launchMode' | 'platformFilter'>): boolean {
+  if (opts.launchMode !== undefined) return opts.launchMode;
+  return Boolean(opts.platformFilter?.includes(LAUNCH_PLATFORM_GROUP));
 }
 
 function tryGetModelEntry(modelKey: string) {
@@ -875,8 +896,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // Version fingerprints for this run (lib/version.ts). promptVersion matches
   // how the prompt is actually built: live runs include the find_tools rule.
   const toolDiscovery = 'find_tools' in tools;
+  const launchMode = resolveLaunchMode(opts);
   const versions = {
-    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools }),
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode }),
     toolset: toolsetVersion(
       Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
     ),
@@ -946,7 +968,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools),
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode),
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],

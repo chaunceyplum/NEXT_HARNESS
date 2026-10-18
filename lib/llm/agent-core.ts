@@ -49,14 +49,39 @@ function getEnvironmentContext(): string {
   return process.env.HARNESS_CONTEXT?.trim() ?? '';
 }
 
+/**
+ * Canonical Adobe Launch (Reactor) object-model contract, injected into the
+ * cached system-prompt prefix the SAME way getEnvironmentContext() injects
+ * HARNESS_CONTEXT — but GATED to Launch-mode runs (see systemPrompt's
+ * `launchMode`) so non-Launch runs keep their lean prefix and prompt cache.
+ *
+ * Kept deliberately tight: it rides the cached prompt prefix on every step of
+ * a Launch run, so it grounds the object model and the hard output boundary
+ * without reproducing documentation the knowledge base already covers.
+ */
+const LAUNCH_DOMAIN_CONTEXT = [
+  'Adobe Launch (Reactor) object model — ground every tag change in this hierarchy:',
+  '- A property holds libraries, rules, data elements, and extensions. A library is the unit devs load to test; it bundles the rule/data-element/extension revisions under test.',
+  '- A rule = events + conditions + actions. Each of those is a rule component with a delegate_descriptor_id (e.g. "core::events::click") naming the extension delegate it runs, plus a settings object holding that delegate\'s configuration.',
+  '- A data element has a name, a delegate_descriptor_id (its type, e.g. "core::dataElements::variable"), a settings object, and a storage_duration ("pageview" | "session" | "visitor", or none for no persistence).',
+  '- An extension is an installed package (extension_package) a property configures; rule components and data elements reference its delegates by delegate_descriptor_id.',
+  'Output / handoff contract: you are producing code to be committed to the repo and loaded into a Launch library for devs to test; do NOT publish to an environment. End by creating/populating the library and reporting its id.',
+  'Validation rules the generated code must satisfy:',
+  '- Every rule component\'s delegate_descriptor_id must come from an extension present in the property (install the extension first if it is missing).',
+  '- Every data element referenced from custom code must already exist in the property or be created in the same library.',
+].join('\n');
+
 // ── System prompt ─────────────────────────────────────────────────────────────
 
 /**
  * @param opts.toolDiscovery include the find_tools/call_tool rule — only true
  *   when those tools are in the run's tool set (live runs; not the eval path).
  * @param opts.memory include the remember_fact rule — only when that tool is present.
+ * @param opts.launchMode inject the Launch/Reactor object-model contract
+ *   (LAUNCH_DOMAIN_CONTEXT) into the cached prefix — only for Launch-tagging
+ *   runs, so non-Launch runs keep their lean prompt.
  */
-export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean } = {}): string {
+export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean } = {}): string {
   const envCtx = getEnvironmentContext();
 
   const lines = [
@@ -67,6 +92,14 @@ export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean }
   // steps discovering what sandbox, property, or repo it's working with.
   if (envCtx) {
     lines.push('', `Deployment context (use these defaults unless the request explicitly says otherwise):\n${envCtx}`);
+  }
+
+  // Launch-tagging runs only: ground the Launch/Reactor object model and the
+  // populated-library deliverable boundary. Injected the same way as the
+  // deployment context above, and gated so it rides the cache only when a run
+  // is actually doing Launch work.
+  if (opts.launchMode) {
+    lines.push('', LAUNCH_DOMAIN_CONTEXT);
   }
 
   lines.push(

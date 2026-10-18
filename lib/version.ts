@@ -24,10 +24,18 @@ export function shortHash(input: string): string {
  * `toolDiscovery` must match how the prompt is actually built for the run: live
  * runs include the find_tools/call_tool rule (toolDiscovery: true) and, with
  * memory on, the remember_fact rule (memory: true); the eval
- * path does not. Default false keeps the eval's historical value stable.
+ * path does not. `launchMode` adds the Launch/Reactor object-model block, only
+ * on Launch-tagging runs. Each defaults false, keeping the eval's historical
+ * value stable.
  */
-export function promptVersion(opts: { toolDiscovery?: boolean; memory?: boolean } = {}): string {
-  return shortHash(systemPrompt({ toolDiscovery: opts.toolDiscovery ?? false, memory: opts.memory ?? false }));
+export function promptVersion(opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean } = {}): string {
+  return shortHash(
+    systemPrompt({
+      toolDiscovery: opts.toolDiscovery ?? false,
+      memory: opts.memory ?? false,
+      launchMode: opts.launchMode ?? false,
+    })
+  );
 }
 
 /**

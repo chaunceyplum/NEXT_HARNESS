@@ -107,6 +107,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         rolloutMode: req.rolloutMode,
         thinkingBudget: req.thinkingBudget,
         platformFilter: req.platformFilter,
+        launchMode: req.launchMode,
         abortSignal: abort.signal,
         // TASK 8: stream each step as it completes, and checkpoint it
         onStep: (step) => {

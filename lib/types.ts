@@ -121,6 +121,14 @@ export interface BuildRequest {
    * leave empty to include all platforms.
    */
   platformFilter?: string[];
+  /**
+   * Launch-tagging run: ground the agent on the Adobe Launch/Reactor object
+   * model (injected into the cached system prompt — see lib/llm/agent-core.ts).
+   * Omit to infer it from platformFilter targeting the Launch/Reactor group;
+   * set false to keep the lean prompt even then. The deliverable stops at a
+   * populated library — there is no publish-to-environment tool.
+   */
+  launchMode?: boolean;
 }
 
 /**
