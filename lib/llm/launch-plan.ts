@@ -1,0 +1,181 @@
+/**
+ * Launch plan seed + Launch-mode tool RAG (Phase 3): the grounding template a
+ * Launch-tagging run executes, and the glue that lets the Phase 2 requirements
+ * object (launch-brief.ts) steer tool selection.
+ *
+ * Nothing new is invented on the planning side — the seed is an ordinary
+ * {@link Plan} normalised through planner.ts's own {@link normalisePlan}, so it
+ * flows through PlanTracker / planPreamble / update_plan / revise_plan exactly
+ * like an LLM-produced plan. The template just fixes the ordered backbone a
+ * tagging job always follows:
+ *
+ *   read the target property's extensions + existing data elements
+ *   -> ground each tag type against the KB (search_adobe_knowledge)
+ *   -> generate the rule/data-element components
+ *   -> validate them against the object model
+ *   -> create/populate the library
+ *
+ * Deliverable boundary (Phase 1): the plan stops at a populated library. There
+ * is no publish/build step — the run never transitions a library to an
+ * environment.
+ */
+
+import { normalisePlan, MAX_PLAN_STEPS, type Plan } from './planner';
+import type { LaunchRequirements } from './launch-brief';
+
+/**
+ * Core Reactor/Launch read + write tools a Launch-tagging run always needs,
+ * plus the knowledge search it grounds on. Added to the always-on set (on top
+ * of ALWAYS_ON_TOOLS) in Launch mode so the shortlist never has to win these
+ * on embedding similarity alone — a brief that talks about "add-to-cart
+ * clicks" doesn't reliably rank "reactor_create_data_element" highly, which
+ * previously left the agent able to read a property but not populate it.
+ *
+ * Matches the ALWAYS_ON_TOOLS contract in agent-core.ts: these are filtered
+ * against the live MCP catalog in agent.ts, so a name the connected server
+ * doesn't expose is silently dropped rather than erroring. Names follow the
+ * Reactor REST resource model (properties -> extensions / data elements /
+ * rules{+ rule components} -> libraries). No build/transition tool is listed:
+ * the deliverable stops at a populated library.
+ */
+export const LAUNCH_ALWAYS_ON_TOOLS = [
+  // Grounding.
+  'search_adobe_knowledge',
+  // Read the target property's current state before changing it.
+  'reactor_list_extensions',
+  'reactor_list_data_elements',
+  'reactor_list_rules',
+  'reactor_get_property',
+  // Create/populate the library and its resources (populate, never publish).
+  'reactor_create_data_element',
+  'reactor_update_data_element',
+  'reactor_create_rule',
+  'reactor_update_rule',
+  'reactor_create_rule_component',
+  'reactor_update_rule_component',
+  'reactor_create_library',
+  'reactor_update_library',
+  'reactor_create_extension',
+];
+
+/** The fixed, ordered backbone every Launch-tagging job follows. */
+interface SeedStep {
+  description: string;
+  tool: string | null;
+  expectedOutput: string;
+}
+
+function seedSteps(requirements?: LaunchRequirements): SeedStep[] {
+  const propertyName = requirements?.target.propertyName;
+  const libraryName = requirements?.target.libraryName;
+  const propertyRef = propertyName ? `property "${propertyName}"` : 'the target property';
+  const libraryRef = libraryName ? `library "${libraryName}"` : 'the target library';
+  const tagCount = requirements?.rules.length;
+  const dataElementCount = requirements?.dataElements.length;
+
+  return [
+    {
+      description: `Read ${propertyRef}'s installed extensions.`,
+      tool: 'reactor_list_extensions',
+      expectedOutput: 'the installed extensions and their delegate_descriptor_ids',
+    },
+    {
+      description: `Read ${propertyRef}'s existing data elements.`,
+      tool: 'reactor_list_data_elements',
+      expectedOutput: 'the data elements already present (so none are recreated)',
+    },
+    {
+      description:
+        `Ground each tag type${tagCount ? ` (${tagCount} rule(s))` : ''} against the knowledge base: ` +
+        'look up the delegate and settings for every event/condition/action and data element the brief needs.',
+      tool: 'search_adobe_knowledge',
+      expectedOutput: 'the delegate_descriptor_id and settings shape for each component, cited from the KB',
+    },
+    {
+      description:
+        `Generate the rule components and data element definitions${dataElementCount ? ` (${dataElementCount} data element(s))` : ''} ` +
+        'from the grounded delegates and the brief requirements.',
+      tool: null,
+      expectedOutput: 'each rule and data element expressed as delegate_descriptor_id + settings',
+    },
+    {
+      description:
+        'Validate the generated components against the object model: every delegate_descriptor_id comes from an ' +
+        'installed extension, and every referenced data element exists or is created in this library.',
+      tool: null,
+      expectedOutput: 'a validated set with no missing extensions or data-element references',
+    },
+    {
+      description: `Create/populate ${libraryRef} with the validated rules and data elements.`,
+      tool: 'reactor_create_library',
+      expectedOutput: 'the populated library id (deliverable boundary — do not publish)',
+    },
+  ];
+}
+
+/**
+ * Build the seeded Launch plan as a normalised {@link Plan}, deterministically
+ * (no model call). The goal and per-step wording are specialised from the
+ * Phase 2 requirements when they are available, so the plan the executor runs
+ * names the real property/library/tag counts instead of placeholders.
+ *
+ * Runs through planner.ts's {@link normalisePlan}, so it is renumbered from 1,
+ * starts every step pending, and is capped at MAX_PLAN_STEPS exactly like a
+ * generated plan — PlanTracker/planPreamble treat it identically.
+ */
+export function seedLaunchPlan(requirements?: LaunchRequirements): Plan {
+  const steps = seedSteps(requirements).slice(0, MAX_PLAN_STEPS);
+  const goal =
+    requirements?.summary ??
+    'Build the briefed Launch tags and populate a library for devs to test (no publish).';
+  return normalisePlan(
+    {
+      goal: goal.slice(0, 300),
+      steps: steps.map((s, i) => ({
+        id: i + 1,
+        description: s.description.slice(0, 200),
+        tool: s.tool,
+        expectedOutput: s.expectedOutput.slice(0, 200),
+        dependsOn: i === 0 ? [] : [i], // each step builds on the previous one
+      })),
+    },
+    1
+  );
+}
+
+/**
+ * Expand the raw request into a tool-shortlist query enriched with the parsed
+ * requirements, so the semantic shortlist (tool-retrieval.ts shortlistTools)
+ * ranks the Reactor/Launch tools the job actually needs. The requirements add
+ * the distinctive terms a free-text brief often buries — delegate ids, data
+ * element and data-layer references, the target property/library — which the
+ * raw brief alone may not surface.
+ *
+ * Falls back to the raw input unchanged when there are no requirements.
+ */
+export function launchShortlistQuery(userInput: string, requirements?: LaunchRequirements): string {
+  if (!requirements) return userInput;
+
+  const terms: string[] = ['Adobe Launch Reactor tags library property extension rule data element'];
+
+  if (requirements.target.propertyName) terms.push(`property ${requirements.target.propertyName}`);
+  if (requirements.target.libraryName) terms.push(`library ${requirements.target.libraryName}`);
+
+  for (const rule of requirements.rules) {
+    terms.push(rule.name);
+    for (const component of rule.components) {
+      terms.push(component.kind);
+      if (component.delegateDescriptorId) terms.push(component.delegateDescriptorId);
+    }
+  }
+
+  for (const element of requirements.dataElements) {
+    terms.push(element.name);
+    if (element.delegateDescriptorId) terms.push(element.delegateDescriptorId);
+    if (element.dataLayerReference) terms.push(element.dataLayerReference);
+  }
+
+  terms.push(...requirements.dataLayerReferences);
+
+  return [userInput, terms.join(' ')].join('\n');
+}

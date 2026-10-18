@@ -44,6 +44,8 @@ import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from '.
 import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
+import { LAUNCH_ALWAYS_ON_TOOLS, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import type { LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
   budgetFinalNote,
@@ -208,6 +210,14 @@ export interface RunAgentOptions {
    * is no publish-to-environment tool.
    */
   launchMode?: boolean;
+  /**
+   * Parsed Launch requirements (launch-brief.ts) for a Launch-tagging run.
+   * When present on a Launch-mode run they feed BOTH the tool shortlist query
+   * (so the right Reactor tools get ranked, see launch-plan.ts) AND the seeded
+   * plan (so the template names the real property/library/tag counts). Ignored
+   * outside Launch mode.
+   */
+  requirements?: LaunchRequirements;
   /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
   budget?: Partial<RunBudgetLimits>;
   /** Requesting user, recorded on facts the run saves to memory. */
@@ -509,7 +519,8 @@ async function selectLiveTools(
   toolRetries: number,
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
   ragJudgmentSink: RagJudgmentSink,
-  platformFilter?: string[]
+  platformFilter?: string[],
+  launch?: { enabled: boolean; requirements?: LaunchRequirements }
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   // Knowledge tools are always included — they're grounding/search tools the
@@ -519,9 +530,15 @@ async function selectLiveTools(
     : rawCatalog;
   const catalogByName = new Map(catalog.map((t) => [t.name, t]));
 
-  const alwaysOn = ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name));
+  // In Launch mode add the core Reactor/Launch read+write tools to the
+  // always-on set (launch-plan.ts) so they don't have to win a shortlist slot
+  // on embedding similarity, and expand the shortlist query with the parsed
+  // requirements so the rest of the relevant tools still get ranked.
+  const alwaysOnNames = launch?.enabled ? [...ALWAYS_ON_TOOLS, ...LAUNCH_ALWAYS_ON_TOOLS] : ALWAYS_ON_TOOLS;
+  const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name));
+  const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
-    shortlistTools(userInput, { k: toolShortlistSize, exclude: alwaysOn })
+    shortlistTools(shortlistQuery, { k: toolShortlistSize, exclude: alwaysOn })
   );
 
   // TASK 9: the policy runs over the whole catalog, so a tool reached via
@@ -794,6 +811,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   let toolsConsidered: string[];
   let userMessage = userInput;
   const rolloutMode = resolveRolloutMode(opts.rolloutMode);
+  // Launch-tagging run: grounds the prompt (buildSystemMessage), seeds the plan
+  // from the Launch template, and widens tool selection to the Reactor tools
+  // (both via launch-plan.ts). Explicit opts.launchMode wins; otherwise it's
+  // inferred from a Launch/Reactor platform filter.
+  const launchMode = resolveLaunchMode(opts);
   // Collects fire-and-forget RAG judgments for live runs; drained once the
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
@@ -814,7 +836,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       toolRetries,
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
-      opts.platformFilter
+      opts.platformFilter,
+      { enabled: launchMode, requirements: opts.requirements }
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {
@@ -842,11 +865,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   let planTracker: PlanTracker | undefined;
   if (opts.planFirst) {
     const planModel = startModelKey || getDefaultModelKey();
-    try {
-      const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
-      planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
-    } catch (err) {
-      console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+    if (launchMode) {
+      // Launch-tagging runs follow a fixed grounding backbone (read property
+      // state -> ground against the KB -> generate -> validate -> populate the
+      // library), so the plan is seeded deterministically from the Launch
+      // template (launch-plan.ts) and specialised with the Phase 2
+      // requirements, rather than asked of the model.
+      planTracker = new PlanTracker(seedLaunchPlan(opts.requirements), (p) => opts.onPlan?.(p));
+    } else {
+      try {
+        const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
+        planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
+      } catch (err) {
+        console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+      }
     }
     if (planTracker) {
       opts.onPlan?.(planTracker.plan);
@@ -896,7 +928,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // Version fingerprints for this run (lib/version.ts). promptVersion matches
   // how the prompt is actually built: live runs include the find_tools rule.
   const toolDiscovery = 'find_tools' in tools;
-  const launchMode = resolveLaunchMode(opts);
   const versions = {
     prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode }),
     toolset: toolsetVersion(
