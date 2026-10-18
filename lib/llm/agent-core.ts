@@ -71,6 +71,30 @@ const LAUNCH_DOMAIN_CONTEXT = [
   '- Every data element referenced from custom code must already exist in the property or be created in the same library.',
 ].join('\n');
 
+/**
+ * Operational guidance for calling the reactor_* tools (Adobe Launch API,
+ * reactor.adobe.io, JSON:API). Companion to LAUNCH_DOMAIN_CONTEXT: that block
+ * grounds WHAT the Launch objects are; this block grounds the ORDER to touch
+ * them in and the state-machine / error traps the model keeps hitting — most
+ * reactor_* "errors" come from ignoring the resource dependency order or a
+ * resource's state machine, not from a broken tool.
+ *
+ * Injected into the cached prefix under the same `launchMode` gate as
+ * LAUNCH_DOMAIN_CONTEXT. Kept to the high-value dependency chain + the common
+ * traps; the full reference (search fields, callback/secret/audit specifics,
+ * the which-tool map) lives in docs/reactor-tools-context.md.
+ */
+const LAUNCH_TOOLS_CONTEXT = [
+  'Adobe Reactor (reactor_*) tool usage — most failures come from ignoring resource order or a resource state machine, not from a broken tool:',
+  'Resource dependency chain (create top-down, delete bottom-up): company → property → { extensions, hosts → environment, data_elements, rules → rule_components, callbacks, libraries → builds }. Resolve a property_id FIRST (reactor_list_properties, or reactor_create_property) — almost every other tool needs it. There is no root /properties list; it is company-scoped.',
+  'Extensions: a new property ALREADY has Core installed — do NOT reactor_install_extension for Core (409 "can only add each extension_package once"); reactor_list_extensions and reuse it. reactor_install_extension is for additional packages (Web SDK, Analytics, …). Install the extension that provides a delegate BEFORE creating a data element or rule component that uses it — the prefix before "::" in delegate_descriptor_id is the extension name.',
+  'Data elements & rule components: delegate_descriptor_id is extensionName::type::delegateName (e.g. core::events::click, core::dataElements::javascript-variable, core::actions::custom-code). settings is type-specific JSON; for core::actions::custom-code include a source (language defaults to javascript). Do not pass extension_id — it is auto-resolved from the delegate prefix unless disambiguation is needed.',
+  'Libraries / builds / publishing is a state machine — order matters: reactor_create_library bound to an environment_id → reactor_add_resources_to_library (re-revises automatically) → reactor_build_library (returns build_id, status pending) → poll reactor_get_build until status succeeded → reactor_transition_library submit → approve → publish. Submitting before a successful build returns 409 "Last build was not successful." A library can only be deleted while in development state. (Per the handoff contract above, stop at a populated library for devs to test — do not publish.)',
+  'Secrets (reactor_create_secret / list_secrets / …) work ONLY on event-forwarding (Edge) properties; on a normal web/mobile tag property they 405/409 — do not call them unless the property is event-forwarding.',
+  'reactor_search matches a field against a term, not free text — it defaults to attributes.name; pass field (e.g. attributes.settings, attributes.delegate_descriptor_id) to match others, scope with property_id, and narrow with resource_types. Audit events are company-level only (property_id is accepted but ignored — filter with type_filter).',
+  'Deleting a property cascades its rules, data elements, environments, hosts, libraries, and callbacks, and is irreversible on the live account — confirm property_id before reactor_delete_property.',
+].join('\n');
+
 // ── System prompt ─────────────────────────────────────────────────────────────
 
 /**
@@ -99,7 +123,7 @@ export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean; 
   // deployment context above, and gated so it rides the cache only when a run
   // is actually doing Launch work.
   if (opts.launchMode) {
-    lines.push('', LAUNCH_DOMAIN_CONTEXT);
+    lines.push('', LAUNCH_DOMAIN_CONTEXT, '', LAUNCH_TOOLS_CONTEXT);
   }
 
   lines.push(
