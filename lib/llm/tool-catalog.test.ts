@@ -129,8 +129,17 @@ describe('capRagResult', () => {
   });
 
   it('is generous enough to preserve a genuine multi-paragraph explanatory answer', () => {
+    // The new limit is 4,000 chars, so a moderate answer still passes through.
     const result = { answer: 'A merge policy determines which record wins when identities merge. '.repeat(20) };
     expect(capRagResult(result)).toBe(result);
+  });
+
+  it('caps results larger than 4,000 chars to prevent context overflow', () => {
+    // Verify the new tighter limit is enforced
+    const largeResult = { data: 'x'.repeat(5000) };
+    const capped = capRagResult(largeResult);
+    expect(typeof capped).toBe('string');
+    expect(capped).toMatch(/truncated, 501\d chars total/);
   });
 });
 
@@ -184,6 +193,21 @@ describe('isRateLimitError', () => {
 describe('capToolResult', () => {
   it('passes through undefined results instead of throwing', () => {
     expect(capToolResult('t', undefined)).toBeUndefined();
+  });
+
+  it('caps results larger than 8,000 chars to prevent context overflow', () => {
+    // Verify the new tighter limit (reduced from 12,000 to 8,000) is enforced
+    const largeResult = { data: 'x'.repeat(10000) };
+    const capped = capToolResult('test_tool', largeResult);
+    expect(typeof capped).toBe('string');
+    expect(capped).toMatch(/truncated — 1001\d chars total/);
+    expect((capped as string).length).toBeLessThan(JSON.stringify(largeResult).length);
+  });
+
+  it('preserves moderate-sized results that fit within the limit', () => {
+    const moderateResult = { data: 'x'.repeat(7000) };
+    const capped = capToolResult('test_tool', moderateResult);
+    expect(capped).toBe(moderateResult);
   });
 });
 

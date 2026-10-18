@@ -401,14 +401,17 @@ export function pickRagTool(toolName: string, available: Set<string>): string | 
  * tokens largely because ~9 of these searches (2-4K tokens/~8-16K chars
  * each), made across a troubleshooting loop, each stayed in full in every
  * subsequent turn's context — the multi-step loop resends the whole
- * conversation so far on every turn. Capped generously enough to still
- * carry a complete explanatory answer for a genuine knowledge question
- * (e.g. "what's the best merge policy for..."), just not an unbounded one.
- * This is a backstop, not the primary fix for a troubleshooting loop —
- * that's the system prompt's "stop repeating the same failed approach"
- * rule (lib/llm/agent-core.ts).
+ * conversation so far on every turn.
+ *
+ * Reduced from 6,000 to 4,000 chars after a production run overflowed
+ * Haiku's 200K-token context window (365,912 tokens). At ~3.5 chars per
+ * token, 4,000 chars ≈ 1,100 tokens, which still carries a complete
+ * explanatory answer for a genuine knowledge question while preventing
+ * unbounded accumulation. The agent-core system prompt already instructs the
+ * model to stop repeating the same failing approach, so this cap is a
+ * backstop, not the primary fix for troubleshooting loops.
  */
-const MAX_CHARS_IN_RAG_RESULT = 6000;
+const MAX_CHARS_IN_RAG_RESULT = 4_000;
 
 export function capRagResult(result: unknown): unknown {
   const json = JSON.stringify(result);
@@ -672,17 +675,23 @@ export async function executeMcpToolWithRetry(
  * same way capRagResult() already does for knowledge-search results. This is
  * also what the trace and persisted run record see — there's no uncapped copy.
  *
- * 12 000 chars covers a large list_* response or a moderate read (e.g. a
- * CJA project definition) without truncating typical narrow-tool results
- * (create/update confirmation objects, short list pages) at all. The
- * truncation note tells the model to narrow its query rather than retry
- * blind.
+ * Reduced from 12,000 to 8,000 chars after a production run overflowed
+ * Haiku's 200K-token context window (365,912 tokens). With multi-step runs
+ * potentially making many tool calls, even capped results accumulate quickly.
+ * At ~3.5 chars per token, 8,000 chars ≈ 2,300 tokens, which still covers a
+ * large list_* response or a moderate read (e.g. a CJA project definition)
+ * without truncating typical narrow-tool results (create/update confirmation
+ * objects, short list pages) at all. The compressOldToolMessages logic in
+ * agent.ts further compresses results from steps older than 2, and
+ * server-side context editing clears old tool results on history-bound
+ * models, so this cap is one of three layers defending against context
+ * overflow.
  *
- * RAG results are already capped at 6 000 chars by capRagResult(), which
+ * RAG results are already capped at 4,000 chars by capRagResult(), which
  * fires before this wrapper — the two caps don't conflict, this one is just
  * a backstop for every other tool.
  */
-const MAX_CHARS_PER_TOOL_RESULT = 12_000;
+const MAX_CHARS_PER_TOOL_RESULT = 8_000;
 
 export function capToolResult(toolName: string, result: unknown): unknown {
   // JSON.stringify returns undefined (not a string) for undefined/functions.
