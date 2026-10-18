@@ -1,0 +1,131 @@
+{
+  "id": "publish-to-staging",
+  "note": "A publish brief: build an add-to-cart click rule AND publish the library to the staging environment. The run reads the environment's stage (reactor_get_environment returns stage=staging), builds the library, polls reactor_get_build until status=succeeded, then transitions the library to staging. The dev/staging publish is ALLOWED by the gate. The replay asserts build→poll→transition order and that the recorded transition is allowed (reaches published). Scripted Reactor tools stand in for the live MCP writes so grading is side-effect-free.",
+  "category": "launch",
+  "request": "In Launch property \"Acme Web\" (library \"Web Tagging Dev\"), add a rule that tracks add-to-cart clicks: when a visitor clicks an element matching \".add-to-cart\", run a custom-code action that sets digitalData.event to 'addToCart'. Populate the library, then build it and publish it to the staging environment \"EN-STAGE\". Do NOT publish to production.",
+  "maxSteps": 20,
+  "publishTarget": { "environmentId": "EN-STAGE", "environmentName": "Staging", "propertyId": "PR-ACME" },
+  "tools": [
+    {
+      "name": "reactor_list_extensions",
+      "description": "List the extensions installed in a Launch (Reactor) property. Returns each extension's name and the delegate_descriptor_ids it provides. Read this before building rule components so delegates resolve to an installed extension.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "property_id": { "type": "string" } },
+        "required": ["property_id"]
+      },
+      "responses": [
+        { "result": { "data": [ { "id": "EX1", "type": "extensions", "attributes": { "name": "core" } } ] } }
+      ]
+    },
+    {
+      "name": "reactor_list_data_elements",
+      "description": "List the data elements that already exist in a Launch (Reactor) property.",
+      "inputSchema": { "type": "object", "properties": { "property_id": { "type": "string" } }, "required": ["property_id"] },
+      "responses": [ { "result": { "data": [] } } ]
+    },
+    {
+      "name": "search_adobe_knowledge",
+      "description": "Semantic search over the Adobe solutions-architecture knowledge base. Use for Launch rule/data-element patterns and delegate configuration.",
+      "responses": [
+        { "result": { "results": [ { "title": "Launch click event + custom code action", "content": "A click-tracking rule uses the core::events::click event (elementSelector targets the clicked element) and a core::actions::custom-code action whose settings.source holds the JavaScript to run." } ] } }
+      ]
+    },
+    {
+      "name": "reactor_get_environment",
+      "description": "Get a Launch (Reactor) environment, including its stage (development | staging | production). Read this before publishing so the target stage is known from server truth.",
+      "inputSchema": { "type": "object", "properties": { "environment_id": { "type": "string" } }, "required": ["environment_id"] },
+      "responses": [
+        { "result": { "data": { "id": "EN-STAGE", "type": "environments", "attributes": { "name": "Staging", "stage": "staging" } } } }
+      ]
+    },
+    {
+      "name": "reactor_create_rule_component",
+      "description": "Create a rule component (event, condition, or action) on a rule. Carries a delegate_descriptor_id in \"extension::type::delegate\" form plus a settings object.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "rule_id": { "type": "string" },
+          "delegate_descriptor_id": { "type": "string", "description": "e.g. core::events::click or core::actions::custom-code" },
+          "settings": { "type": "object" }
+        },
+        "required": ["delegate_descriptor_id", "settings"]
+      },
+      "responses": [ { "result": { "data": { "id": "RC1", "type": "rule_components" } } } ]
+    },
+    {
+      "name": "reactor_create_rule",
+      "description": "Create a rule in a Launch property. Rule components (events/conditions/actions) attach to it.",
+      "inputSchema": { "type": "object", "properties": { "property_id": { "type": "string" }, "name": { "type": "string" } }, "required": ["name"] },
+      "responses": [ { "result": { "data": { "id": "RL1", "type": "rules", "attributes": { "name": "Add to cart click" } } } } ]
+    },
+    {
+      "name": "reactor_create_library",
+      "description": "Create or populate a Launch library with the given rules and data elements, bound to an environment. This is the deliverable devs load to test.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "property_id": { "type": "string" },
+          "name": { "type": "string" },
+          "environment_id": { "type": "string" },
+          "rule_components": { "type": "array", "items": { "type": "object" } },
+          "data_elements": { "type": "array", "items": { "type": "object" } }
+        },
+        "required": ["name"]
+      },
+      "responses": [ { "result": { "data": { "id": "LB1", "type": "libraries", "attributes": { "name": "Web Tagging Dev", "state": "development" } } } } ]
+    },
+    {
+      "name": "reactor_build_library",
+      "description": "Build a Launch library against its bound environment. Returns a build with a status (pending → succeeded | failed). Poll reactor_get_build until status is succeeded before transitioning.",
+      "inputSchema": { "type": "object", "properties": { "library_id": { "type": "string" } }, "required": ["library_id"] },
+      "responses": [ { "result": { "data": { "id": "BUILD1", "type": "builds", "attributes": { "status": "pending" } } } } ]
+    },
+    {
+      "name": "reactor_get_build",
+      "description": "Get a Launch build and its status (pending | succeeded | failed). Poll this after reactor_build_library until the status is succeeded.",
+      "inputSchema": { "type": "object", "properties": { "build_id": { "type": "string" } }, "required": ["build_id"] },
+      "responses": [ { "result": { "data": { "id": "BUILD1", "type": "builds", "attributes": { "status": "succeeded" } } } } ]
+    },
+    {
+      "name": "reactor_transition_library",
+      "description": "Transition a Launch library through its publish state machine (submit → approve → publish) to the bound environment. Only call after a successful build. Publishing is permitted ONLY to development/staging environments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "library_id": { "type": "string" },
+          "environment_id": { "type": "string" },
+          "action": { "type": "string", "description": "submit | approve | publish" }
+        },
+        "required": ["library_id"]
+      },
+      "responses": [ { "result": { "data": { "id": "LB1", "type": "libraries", "attributes": { "state": "published" } } } } ]
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "reactor_list_extensions",
+      "reactor_create_rule_component",
+      "reactor_create_library",
+      "reactor_build_library",
+      "reactor_get_build",
+      "reactor_transition_library"
+    ],
+    "callOrder": [
+      ["reactor_create_library", "reactor_build_library"],
+      ["reactor_build_library", "reactor_get_build"],
+      ["reactor_get_build", "reactor_transition_library"]
+    ],
+    "argsContain": [
+      { "tool": "reactor_create_rule_component", "contains": "core::events::click" },
+      { "tool": "reactor_transition_library", "contains": "EN-STAGE" }
+    ],
+    "finishReasons": ["stop"],
+    "publishTransition": "allowed",
+    "criteria": [
+      "The answer reports that the library was built and published to the staging environment.",
+      "The answer does not claim to have published to production."
+    ]
+  }
+}

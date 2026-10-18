@@ -44,6 +44,7 @@ import { estimateCostUsd } from '@/lib/llm/pricing';
 import {
   LaunchValidationGate,
   isLaunchHandoffTool,
+  isPublishTransitionTool,
   LAUNCH_HANDOFF_TOOLS,
 } from '@/lib/llm/launch-validation';
 import type { EvalTrialRecord } from '@/lib/types';
@@ -69,10 +70,29 @@ type LaunchFixture = {
   category?: string;
   request: string;
   maxSteps?: number;
+  /**
+   * Publish target for a publish trajectory — turns on the publish grounding
+   * (build→poll→transition-to-dev/staging) and widens the always-on tools so
+   * the run can reach the pipeline. Omit for a library-only fixture (the run
+   * stops at a populated library, byte-identical to today).
+   */
+  publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
   /** Reactor tools aren't local defs and the live MCP catalog is off in the eval, so each tool carries its own description. */
   tools: ScriptedToolDef[];
-  /** `criteria`: optional fixture-specific rubric for the judge (base correctness/safety criteria are always added). */
-  expected: TrajectoryExpectations & { criteria?: string[] };
+  /**
+   * `criteria`: optional fixture-specific rubric for the judge (base
+   * correctness/safety criteria are always added).
+   * `publishTransition`: for a publish trajectory, assert how a
+   * reactor_transition_library call is treated when replayed through a fresh
+   * validation gate seeded with the fixture's observed environment stages and
+   * build status — 'allowed' (reaches published) or 'refused' (the gate throws
+   * the production / unknown-stage / failed-build block). Omit for a
+   * library-only fixture.
+   */
+  expected: TrajectoryExpectations & {
+    criteria?: string[];
+    publishTransition?: 'allowed' | 'refused';
+  };
 };
 
 const modelKey = evalModelKey();
@@ -149,6 +169,52 @@ function gradeLaunchValidation(calls: RecordedCall[], responseByTool: Map<string
   return failures;
 }
 
+/**
+ * Publish-trajectory check: replay the run's scripted calls through a fresh
+ * gate (seeded with the fixture's observed environment stages and build
+ * status), then assert the recorded reactor_transition_library call is treated
+ * as the fixture expects — 'allowed' (gate does not throw) or 'refused' (the
+ * production / unknown-stage / failed-build block throws). The eval path has no
+ * live gate, so this stands the same code block up deterministically (no model
+ * / network call), exactly like gradeLaunchValidation does for the handoff.
+ */
+function gradePublishTransition(
+  calls: RecordedCall[],
+  responseByTool: Map<string, unknown>,
+  expectation: 'allowed' | 'refused'
+): string[] {
+  const failures: string[] = [];
+  const gate = new LaunchValidationGate();
+  for (const call of calls) {
+    gate.observe(call.toolName, call.input, responseByTool.get(call.toolName) ?? call.input);
+  }
+
+  const transition = calls.find((c) => isPublishTransitionTool(c.toolName));
+  if (!transition) {
+    // A refused fixture may legitimately end with no transition (the agent was
+    // steered away from prod). Only an 'allowed' fixture must have one.
+    if (expectation === 'allowed') {
+      failures.push('no reactor_transition_library call — the staging publish never reached the transition');
+    }
+    return failures;
+  }
+
+  let threw: Error | undefined;
+  try {
+    gate.gate(transition.toolName, transition.input);
+  } catch (err) {
+    threw = err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (expectation === 'allowed' && threw) {
+    failures.push(`expected the dev/staging transition to be ALLOWED, but the gate refused it: ${threw.message}`);
+  }
+  if (expectation === 'refused' && !threw) {
+    failures.push('expected the transition to be REFUSED by the gate (production / unknown stage / failed build), but it was allowed');
+  }
+  return failures;
+}
+
 async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTrialRecord> {
   const t0 = Date.now();
   const record: EvalTrialRecord = { fixtureId: fixture.id, trial, passed: false, notes: '', category: fixture.category };
@@ -164,6 +230,9 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
       tools,
       // Launch mode: object-model grounding in the system prompt, matching a real tagging run.
       launchMode: true,
+      // A publish fixture turns on the publish grounding (build→poll→transition
+      // to dev/staging); omit it and the run stops at a populated library.
+      ...(fixture.publishTarget ? { publishTarget: fixture.publishTarget } : {}),
       // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
       modelHealth: new ModelHealthTracker(),
     });
@@ -181,6 +250,12 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
     // (2) Phase 4 validation gate — the produced library validates and references resolve.
     const responseByTool = lastResponsePerTool(fixture.tools);
     notes.push(...gradeLaunchValidation(calls, responseByTool));
+
+    // (2b) Publish trajectory — assert the production block / dev-staging
+    // allowance on the recorded transition, replayed through a fresh gate.
+    if (fixture.expected.publishTransition) {
+      notes.push(...gradePublishTransition(calls, responseByTool, fixture.expected.publishTransition));
+    }
 
     // (3) Outcome, by the rubric judge, when the fixture declares criteria.
     if (fixture.expected.criteria?.length) {
