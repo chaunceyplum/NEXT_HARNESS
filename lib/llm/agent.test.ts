@@ -118,7 +118,7 @@ vi.mock('../memory-store', () => ({
   saveFact: async (f: { key: string; value: string }) => (savedFacts.push(f), f),
 }));
 
-const { runAgent } = await import('./agent');
+const { runAgent, resolveLaunchMode } = await import('./agent');
 
 beforeEach(() => {
   script = [];
@@ -499,5 +499,24 @@ describe('runAgent plan-first with model "auto"', () => {
     const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', planFirst: true });
     expect(result.route?.modelKey).toBe('test:plain');
     expect(result.plan?.goal).toBe('g');
+  });
+});
+
+describe('resolveLaunchMode', () => {
+  it('honours an explicit launchMode either way', () => {
+    expect(resolveLaunchMode({ launchMode: true })).toBe(true);
+    expect(resolveLaunchMode({ launchMode: false, platformFilter: ['Tags (Reactor)'] })).toBe(false);
+  });
+
+  it('infers Launch mode only when the filter is narrowed to Tags (+ Knowledge/GitHub)', () => {
+    expect(resolveLaunchMode({ platformFilter: ['Tags (Reactor)'] })).toBe(true);
+    expect(resolveLaunchMode({ platformFilter: ['Tags (Reactor)', 'Knowledge', 'GitHub'] })).toBe(true);
+  });
+
+  it('does not infer Launch mode from a broad filter that still includes Tags', () => {
+    // e.g. every platform ticked except CJA — the UI sends a filter, but this isn't a Launch run.
+    expect(resolveLaunchMode({ platformFilter: ['AEP Core', 'Tags (Reactor)', 'Destinations', 'Knowledge'] })).toBe(false);
+    expect(resolveLaunchMode({ platformFilter: ['AEP Core'] })).toBe(false);
+    expect(resolveLaunchMode({})).toBe(false);
   });
 });

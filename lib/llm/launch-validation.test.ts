@@ -57,8 +57,18 @@ describe('validateRuleComponentShape', () => {
     expect(errors[0]).toMatch(/extension::type::delegate/);
   });
 
-  it('rejects a missing settings object', () => {
-    const errors = validateRuleComponentShape({ delegate_descriptor_id: 'core::events::click' });
+  it('accepts an omitted settings object (mcp defaults it to "{}")', () => {
+    expect(validateRuleComponentShape({ delegate_descriptor_id: 'core::events::click' })).toEqual([]);
+  });
+
+  it('accepts settings as a JSON string, as mcp\'s all-string tool schema sends them', () => {
+    expect(
+      validateRuleComponentShape({ delegate_descriptor_id: 'core::events::click', settings: '{"elementSelector":".add"}' })
+    ).toEqual([]);
+  });
+
+  it('rejects settings that are a string but not JSON object', () => {
+    const errors = validateRuleComponentShape({ delegate_descriptor_id: 'core::events::click', settings: 'not json' });
     expect(errors.some((e) => e.startsWith('settings:'))).toBe(true);
   });
 
@@ -218,7 +228,7 @@ describe('validateLaunchHandoff', () => {
 describe('isLaunchHandoffTool', () => {
   it('is true for the library create/update handoff and false otherwise', () => {
     expect(isLaunchHandoffTool('reactor_create_library')).toBe(true);
-    expect(isLaunchHandoffTool('reactor_update_library')).toBe(true);
+    expect(isLaunchHandoffTool('reactor_add_resources_to_library')).toBe(true);
     expect(isLaunchHandoffTool('reactor_create_rule')).toBe(false);
     expect(isLaunchHandoffTool('reactor_build_library')).toBe(false); // publishing is out of scope
   });
@@ -405,23 +415,23 @@ describe('validateBeforeTransition', () => {
 
   it('ALLOWS a transition to a verified development or staging environment', () => {
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('development'))
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-TARGET' }, publishReadyState('development'))
     ).not.toThrow();
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('staging'))
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-TARGET' }, publishReadyState('staging'))
     ).not.toThrow();
   });
 
   it('REFUSES a transition to a production environment (hard block)', () => {
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, publishReadyState('production'))
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-TARGET' }, publishReadyState('production'))
     ).toThrow(/production is not permitted[\s\S]*stage=production[\s\S]*EN-TARGET/i);
   });
 
   it('REFUSES a transition when the target stage is unknown', () => {
     const state = publishReadyState('development');
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-UNSEEN' }, state)
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-UNSEEN' }, state)
     ).toThrow(/stage is unknown[\s\S]*reactor_get_environment/i);
   });
 
@@ -430,14 +440,14 @@ describe('validateBeforeTransition', () => {
     state.latestBuildStatus = 'failed';
     state.latestBuildError = 'rule component RC2 references a missing data element';
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', { environment_id: 'EN-TARGET' }, state)
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-TARGET' }, state)
     ).toThrow(/build FAILED[\s\S]*RC2 references a missing data element/i);
   });
 
   it('resolves the target from the run publishTarget when the args omit it', () => {
     const state = publishReadyState('staging');
     expect(() =>
-      validateBeforeTransition('reactor_transition_library', {}, state, { environmentId: 'EN-TARGET' })
+      validateBeforeTransition('reactor_transition_library', { library_id: 'LB1', action: 'submit' }, state, { environmentId: 'EN-TARGET' })
     ).not.toThrow();
   });
 });
@@ -447,35 +457,115 @@ describe('LaunchValidationGate — publish transition', () => {
     const gate = new LaunchValidationGate();
     gate.observe('reactor_list_environments', {}, { data: [{ id: 'EN-S', attributes: { name: 'Staging', stage: 'staging' } }] });
     gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
-    expect(gate.resolveStageFor({ environment_id: 'EN-S' })).toBe('staging');
-    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-S' })).not.toThrow();
+    expect(gate.resolveStageFor({ library_id: 'LB1', action: 'submit', environment_id: 'EN-S' })).toBe('staging');
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-S' })).not.toThrow();
   });
 
   it('REFUSES a transition to an observed production environment (injected/hallucinated prod)', () => {
     const gate = new LaunchValidationGate();
     gate.observe('reactor_get_environment', {}, { data: { id: 'EN-P', attributes: { name: 'Prod', stage: 'production' } } });
     gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
-    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-P' })).toThrow(/production is not permitted/i);
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-P' })).toThrow(/production is not permitted/i);
   });
 
   it('REFUSES a transition when the stage was never read (unknown is not exempt)', () => {
     const gate = new LaunchValidationGate();
     gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
-    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-UNKNOWN' })).toThrow(/stage is unknown/i);
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-UNKNOWN' })).toThrow(/stage is unknown/i);
   });
 
   it('REFUSES a transition on a failed build before any stage check', () => {
     const gate = new LaunchValidationGate();
     gate.observe('reactor_list_environments', {}, { data: [{ id: 'EN-S', attributes: { stage: 'staging' } }] });
     gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'failed', detail: 'bad component' } } });
-    expect(() => gate.gate('reactor_transition_library', { environment_id: 'EN-S' })).toThrow(/build FAILED[\s\S]*bad component/i);
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit', environment_id: 'EN-S' })).toThrow(/build FAILED[\s\S]*bad component/i);
   });
 
   it('uses the run publishTarget as the resolution fallback for a bare transition', () => {
     const gate = new LaunchValidationGate({ publishTarget: { environmentId: 'EN-DEV' } });
     gate.observe('reactor_get_environment', {}, { data: { id: 'EN-DEV', attributes: { stage: 'development' } } });
     gate.observe('reactor_get_build', {}, { data: { attributes: { status: 'succeeded' } } });
-    expect(gate.resolveStageFor({})).toBe('development');
-    expect(() => gate.gate('reactor_transition_library', {})).not.toThrow();
+    expect(gate.resolveStageFor({ library_id: 'LB1', action: 'submit' })).toBe('development');
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit' })).not.toThrow();
+  });
+});
+
+// ── Real mcp shapes: production path, bound environment, populate step ──────
+
+describe('LaunchValidationGate — production path is refused regardless of publishTarget', () => {
+  const stagingRun = () => {
+    const gate = new LaunchValidationGate({ publishTarget: { environmentId: 'EN-STG' } });
+    gate.observe('reactor_list_environments', { property_id: 'PR1' }, {
+      environments: [
+        { id: 'EN-STG', name: 'Staging', stage: 'staging' },
+        { id: 'EN-PRD', name: 'Production', stage: 'production' },
+      ],
+    });
+    gate.observe('reactor_get_build', {}, { build_id: 'BL1', status: 'succeeded' });
+    return gate;
+  };
+
+  it.each(['approve', 'publish'])('REFUSES action "%s" even with a staging publishTarget', (action) => {
+    const gate = stagingRun();
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action })).toThrow(/production path/i);
+    // ...and never exempts it from human approval.
+    expect(gate.resolveStageFor({ library_id: 'LB1', action })).toBe('production');
+  });
+
+  it('REFUSES a transition with no action', () => {
+    expect(() => stagingRun().gate('reactor_transition_library', { library_id: 'LB1' })).toThrow(/production path/i);
+  });
+
+  it('ALLOWS submit to staging', () => {
+    expect(() => stagingRun().gate('reactor_transition_library', { library_id: 'LB1', action: 'submit' })).not.toThrow();
+  });
+
+  it('uses the library\'s bound environment over the publishTarget', () => {
+    const gate = stagingRun();
+    gate.observe('reactor_create_library', { property_id: 'PR1', name: 'lib', environment_id: 'EN-PRD' }, { id: 'LB1', name: 'lib', state: 'development' });
+    expect(gate.resolveStageFor({ library_id: 'LB1', action: 'submit' })).toBe('production');
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit' })).toThrow(/production/i);
+  });
+
+  it('REFUSES transitioning a library already on the production path', () => {
+    const gate = stagingRun();
+    gate.observe('reactor_get_library', { library_id: 'LB1' }, { id: 'LB1', state: 'approved', environment: 'EN-STG' });
+    expect(() => gate.gate('reactor_transition_library', { library_id: 'LB1', action: 'submit' })).toThrow(/approved/);
+  });
+
+  it('REFUSES building an approved library (that build deploys to production)', () => {
+    const gate = stagingRun();
+    gate.observe('reactor_transition_library', { library_id: 'LB1', action: 'approve' }, { id: 'LB1', state: 'approved' });
+    expect(() => gate.gate('reactor_build_library', { library_id: 'LB1' })).toThrow(/production/i);
+  });
+
+  it('REFUSES building a library bound to a production environment, allows a development one', () => {
+    const gate = stagingRun();
+    gate.observe('reactor_create_library', { property_id: 'PR1', name: 'p', environment_id: 'EN-PRD' }, { id: 'LB9', state: 'development' });
+    expect(() => gate.gate('reactor_build_library', { library_id: 'LB9' })).toThrow(/production/i);
+    gate.observe('reactor_create_library', { property_id: 'PR1', name: 'd' }, { id: 'LB2', state: 'development' });
+    expect(() => gate.gate('reactor_build_library', { library_id: 'LB2' })).not.toThrow();
+  });
+});
+
+describe('LaunchValidationGate — real mcp populate flow', () => {
+  it('sees extensions installed with reactor_install_extension', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_list_extensions', { property_id: 'PR1' }, { extensions: [{ id: 'EX1', name: 'core' }] });
+    gate.observe('reactor_install_extension', { property_id: 'PR1', extension_package_id: 'EP9' }, { id: 'EX2', name: 'adobe-alloy' });
+    gate.observe('reactor_create_rule_component', {
+      rule_id: 'RL1', name: 'send', delegate_descriptor_id: 'adobe-alloy::actions::send-event', settings: '{}',
+    }, { id: 'RC1' });
+    expect(() => gate.gate('reactor_add_resources_to_library', { library_id: 'LB1', rule_ids: ['RL1'] })).not.toThrow();
+  });
+
+  it('BLOCKS reactor_add_resources_to_library when a created component is invalid', () => {
+    const gate = new LaunchValidationGate();
+    gate.observe('reactor_list_extensions', { property_id: 'PR1' }, { extensions: [{ id: 'EX1', name: 'core' }] });
+    gate.gate('reactor_create_library', { property_id: 'PR1', name: 'lib' }); // empty library: nothing to validate yet
+    gate.observe('reactor_create_rule_component', {
+      rule_id: 'RL1', name: 'x', delegate_descriptor_id: 'core::actions::custom-code', settings: '{"source":"%missing%"}',
+    }, { id: 'RC1' });
+    expect(() => gate.gate('reactor_add_resources_to_library', { library_id: 'LB1', rule_ids: ['RL1'] })).toThrow(/missing/);
   });
 });

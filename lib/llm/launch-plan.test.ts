@@ -167,8 +167,7 @@ describe('seedLaunchPlan — publish backbone', () => {
     const transitionText = `${transition!.description} ${transition!.expectedOutput}`.toLowerCase();
     // The seeded transition targets dev/staging and explicitly disallows prod.
     expect(transitionText).toMatch(/development\/staging|dev\/staging/);
-    expect(transitionText).toMatch(/production is not permitted/);
-    // The transition's named target is the dev/staging environment, not production.
-    expect(transitionText).toMatch(/to the named development\/staging environment/);
+    expect(transitionText).toMatch(/action "submit"/);
+    expect(transitionText).toMatch(/never "approve" or "publish"/);
   });
 });

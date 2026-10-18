@@ -3,6 +3,7 @@ import type { EvalSuite } from './types';
 /** Display names for each eval suite — shared by the /evals list and detail pages. */
 export const EVAL_SUITE_LABELS: Record<EvalSuite, string> = {
   agent: 'Agent behavior',
+  launch: 'Launch tagging',
   tool_shortlist: 'Tool shortlisting',
   rag_judge: 'RAG judge calibration',
   judge_calibration: 'Eval judge calibration',

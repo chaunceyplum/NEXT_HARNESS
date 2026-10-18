@@ -58,6 +58,8 @@ describe('systemPrompt publish grounding (conditional)', () => {
     expect(publish).toMatch(/reactor_transition_library/);
     // Permitted ONLY to development/staging; production refused.
     expect(publish).toMatch(/development or staging/i);
-    expect(publish).toMatch(/production is refused in code/i);
+    expect(publish).toMatch(/refused in code/i);
+    expect(publish).toMatch(/NEVER use action "approve" or "publish"/);
+    expect(publish).not.toMatch(/submit → approve → publish\) to the named/);
   });
 });

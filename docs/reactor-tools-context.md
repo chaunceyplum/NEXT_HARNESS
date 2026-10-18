@@ -61,6 +61,11 @@ handled for you.
 - Poll `reactor_get_build` until status is `succeeded` before transitioning.
 - `reactor_transition_library` submit → approve → publish. Submitting before a
   successful build returns 409 "Last build was not successful."
+  The harness only ever sends `submit` (development → submitted, which builds to
+  the staging environment) or `reject`: `approve`/`publish`, transitioning an
+  approved library, and building an approved library or one bound to a
+  production environment are the production path, refused in code by
+  `lib/llm/launch-validation.ts`.
 - A library can only be deleted while in `development` state.
 - Read current members with `reactor_list_library_resources` (reads the
   per-type relationship endpoints).

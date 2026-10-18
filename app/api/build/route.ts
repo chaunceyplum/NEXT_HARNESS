@@ -220,6 +220,13 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
         };
       }
     }
+    if (!ptObj.environmentId && !ptObj.environmentName) {
+      return {
+        ok: false,
+        error: { error: '"publishTarget" must name the environment ("environmentId" or "environmentName")', code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
   }
 
   return {

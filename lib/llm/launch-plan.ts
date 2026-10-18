@@ -54,8 +54,8 @@ export const LAUNCH_ALWAYS_ON_TOOLS = [
   'reactor_create_rule_component',
   'reactor_update_rule_component',
   'reactor_create_library',
-  'reactor_update_library',
-  'reactor_create_extension',
+  'reactor_add_resources_to_library',
+  'reactor_install_extension',
 ];
 
 /**
@@ -69,6 +69,8 @@ export const LAUNCH_PUBLISH_ALWAYS_ON_TOOLS = [
   // Read the target environment's stage from server truth (production block).
   'reactor_get_environment',
   'reactor_list_environments',
+  // Read the library's bound environment and state (the gate checks both).
+  'reactor_get_library',
   // Build → poll → transition the populated library (dev/staging only).
   'reactor_build_library',
   'reactor_get_build',
@@ -155,8 +157,8 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
     },
     {
       description:
-        'Transition the built library (submit → approve → publish) to the named development/staging environment. ' +
-        'Publishing to production is not permitted.',
+        'If the target is staging, transition the built library with action "submit" (and build again); a ' +
+        'development target is already live after the build. Never "approve" or "publish" — that is production.',
       tool: 'reactor_transition_library',
       expectedOutput: 'the library published to the dev/staging environment',
     }

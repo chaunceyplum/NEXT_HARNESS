@@ -71,6 +71,11 @@ export interface ShortlistOptions {
   k?: number;
   /** Tool names to never include (e.g. ones already added as always-on/gated). */
   exclude?: string[];
+  /**
+   * Only rank tools this predicate accepts (e.g. a run's platform filter).
+   * Applied before the top-K cut, so filtered-out tools don't use up slots.
+   */
+  include?: (name: string) => boolean;
 }
 
 // ── Lexical fallback (no embedding provider required) ────────────────────
@@ -95,12 +100,17 @@ async function getLexicalIndex(): Promise<LexicalIndexEntry[]> {
   return lexicalIndexPromise;
 }
 
-async function shortlistToolsLexical(query: string, k: number, exclude: Set<string>): Promise<string[]> {
+async function shortlistToolsLexical(
+  query: string,
+  k: number,
+  exclude: Set<string>,
+  include: (name: string) => boolean
+): Promise<string[]> {
   const index = await getLexicalIndex();
   const queryTokens = tokenize(query);
 
   return index
-    .filter((entry) => !exclude.has(entry.name))
+    .filter((entry) => !exclude.has(entry.name) && include(entry.name))
     .map((entry) => {
       let overlap = 0;
       for (const t of queryTokens) if (entry.tokens.has(t)) overlap++;
@@ -117,11 +127,12 @@ let warnedAboutLexicalFallback = false;
 export async function shortlistTools(query: string, opts: ShortlistOptions = {}): Promise<string[]> {
   const k = opts.k ?? 12;
   const exclude = new Set(opts.exclude ?? []);
+  const include = opts.include ?? (() => true);
 
   try {
     const [index, [queryEmbedding]] = await Promise.all([getToolIndex(), embedTexts([query])]);
     return index
-      .filter((entry) => !exclude.has(entry.name))
+      .filter((entry) => !exclude.has(entry.name) && include(entry.name))
       .map((entry) => ({ name: entry.name, score: cosineSimilarity(queryEmbedding, entry.embedding) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, k)
@@ -136,6 +147,6 @@ export async function shortlistTools(query: string, opts: ShortlistOptions = {})
           'more accurate semantic shortlisting.'
       );
     }
-    return shortlistToolsLexical(query, k, exclude);
+    return shortlistToolsLexical(query, k, exclude, include);
   }
 }

@@ -109,6 +109,9 @@ export function isReadOnlySql(sql: unknown): boolean {
   return !SQL_WRITE_WORDS.test(stmt) && !SQL_SIDE_EFFECT_FUNCS.test(stmt);
 }
 
+/** Tools that run caller-supplied SQL: a write statement needs a human decision. */
+const SQL_TOOLS = new Set(['execute_sql', 'intake_execute_sql']);
+
 function sqlOf(input: unknown): unknown {
   return input && typeof input === 'object' ? (input as { sql?: unknown }).sql : undefined;
 }
@@ -139,7 +142,7 @@ export function approvalReason(
   if (CREDENTIAL_TOOLS.has(toolName)) return 'credentials';
   if (neutralised) return undefined;
   if (level === 'destructive') return 'destructive';
-  if (toolName === 'execute_sql' && !isReadOnlySql(sqlOf(input))) return 'sql-write';
+  if (SQL_TOOLS.has(toolName) && !isReadOnlySql(sqlOf(input))) return 'sql-write';
   // A publish transition to a server-verified dev/staging environment is NOT
   // gated — the user asked for an ungated dev/staging publish, and the
   // production block (launch-validation.ts) independently refuses prod. Every

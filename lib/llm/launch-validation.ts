@@ -66,16 +66,22 @@ import { classifyTool } from './tool-policy';
 // ── The handoff tools this gate covers ─────────────────────────────────────────
 
 /**
- * The real library handoff: creating or updating the library the devs load to
- * test. Validation blocks these until all three checks pass. (reactor_build_
- * library / reactor_transition_library are deliberately absent — publishing is
- * outside the deliverable boundary and already gated for human approval in
- * approval-policy.ts.)
+ * The real library handoff: creating the library the devs load to test, and
+ * populating it — reactor_add_resources_to_library is the call that actually
+ * puts rules/data elements into a library (reactor_create_library only takes
+ * a property, a name and an environment). Validation blocks these until all
+ * three checks pass. Building and transitioning are guarded separately (the
+ * publish gate below).
  */
-export const LAUNCH_HANDOFF_TOOLS = new Set(['reactor_create_library', 'reactor_update_library']);
+export const LAUNCH_HANDOFF_TOOLS = new Set(['reactor_create_library', 'reactor_add_resources_to_library']);
 
 /** Tools whose results seed the property state the reference check reads. */
-const EXTENSION_READ_TOOLS = new Set(['reactor_list_extensions', 'reactor_get_extension', 'reactor_create_extension']);
+const EXTENSION_READ_TOOLS = new Set([
+  'reactor_list_extensions',
+  'reactor_get_extension',
+  'reactor_install_extension',
+  'reactor_update_extension',
+]);
 const DATA_ELEMENT_READ_TOOLS = new Set([
   'reactor_list_data_elements',
   'reactor_get_data_element',
@@ -110,6 +116,30 @@ const ENVIRONMENT_READ_TOOLS = new Set([
 /** Tools whose results carry a build `status` the build-failure refusal reads. */
 const BUILD_READ_TOOLS = new Set(['reactor_get_build', 'reactor_build_library']);
 
+/** Building a library deploys it to the environment its state maps to. */
+export const BUILD_TOOL = 'reactor_build_library';
+
+/** Tools whose args/results carry a library's id, state and bound environment. */
+const LIBRARY_READ_TOOLS = new Set([
+  'reactor_create_library',
+  'reactor_get_library',
+  'reactor_list_libraries',
+  'reactor_transition_library',
+]);
+
+/**
+ * reactor_transition_library actions this harness may send. In Reactor,
+ * "submit" moves a development library to submitted (it then builds to the
+ * property's staging environment) and "reject" sends it back to development.
+ * "approve" and "publish" are the production path — an approved library builds
+ * to production, and mcp's "publish" action publishes it there — so they are
+ * refused outright, whatever environment the run was pointed at.
+ */
+const NON_PRODUCTION_TRANSITION_ACTIONS = new Set(['submit', 'reject', 'develop']);
+
+/** Library states whose builds deploy to production. */
+const PRODUCTION_LIBRARY_STATES = new Set(['approved', 'published']);
+
 /**
  * A Launch environment's deployment stage. Only "development" and "staging"
  * are publishable; "production" is refused in code. The Reactor API uses these
@@ -142,7 +172,22 @@ const delegateDescriptorId = z
   .string()
   .regex(DELEGATE_DESCRIPTOR_RE, 'must be in "extension::type::delegate" form, e.g. "core::events::click"');
 
-const settings = z.record(z.string(), z.unknown());
+/**
+ * mcp types every tool parameter as a string, so settings usually arrive as a
+ * JSON string (and mcp defaults an omitted one to "{}"). Accept an object, a
+ * JSON string that parses to an object, or nothing.
+ */
+const settings = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return {};
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value; // left as a string, so the record check reports it
+    }
+  }
+  return value;
+}, z.record(z.string(), z.unknown(), { error: 'must be a JSON object (or a JSON string encoding one)' }));
 
 /** A Launch rule component (an event, condition, or action) as the create/update tool receives it. */
 export const ruleComponentSchema = z.object({
@@ -232,6 +277,10 @@ export class LaunchPropertyState {
    */
   latestBuildStatus?: string;
   latestBuildError?: string;
+  /** Observed library state ("development" | "submitted" | "approved" | …), by library id. */
+  readonly libraryStates = new Map<string, string>();
+  /** Observed environment id each library is bound to, by library id. */
+  readonly libraryEnvironments = new Map<string, string>();
 
   /** Record an extension as installed/available in the property. */
   addExtension(name: string): void {
@@ -280,6 +329,12 @@ export class LaunchPropertyState {
         for (const env of collectEnvironmentStages(result)) {
           this.addEnvironmentStage(env.id, env.stage);
           this.addEnvironmentStage(env.name, env.stage);
+        }
+      }
+      if (LIBRARY_READ_TOOLS.has(toolName)) {
+        for (const lib of collectLibraryFacts(args, result)) {
+          if (lib.state) this.libraryStates.set(lib.id, lib.state);
+          if (lib.environmentId) this.libraryEnvironments.set(lib.id, lib.environmentId);
         }
       }
       if (BUILD_READ_TOOLS.has(toolName)) {
@@ -408,6 +463,66 @@ function readBuildStatus(result: unknown): { status?: string; error?: string } {
   return { status, error };
 }
 
+/** One library's id, state and bound environment, as read from a reactor_*library call. */
+interface LibraryFacts {
+  id: string;
+  state?: string;
+  environmentId?: string;
+}
+
+/**
+ * Library facts from a library tool's args + result. mcp's library tools return
+ * flat objects ({ id, name, state } and, from reactor_get_library,
+ * environment: "<id>"); reactor_create_library's environment comes from its
+ * environment_id argument. JSON:API shapes are read too. Defensive: anything
+ * unreadable is skipped.
+ */
+function collectLibraryFacts(args: unknown, result: unknown): LibraryFacts[] {
+  const out: LibraryFacts[] = [];
+  const argObj = args && typeof args === 'object' ? (args as Record<string, unknown>) : {};
+
+  const read = (value: unknown, fallbackEnv?: string): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      for (const item of value) read(item);
+      return;
+    }
+    const v = value as Record<string, unknown>;
+    if (Array.isArray(v.libraries)) read(v.libraries);
+    if (Array.isArray(v.data) || (v.data && typeof v.data === 'object')) read(v.data);
+    const id = typeof v.id === 'string' ? v.id : undefined;
+    if (!id || !id.startsWith('LB')) return;
+    const attrs = v.attributes && typeof v.attributes === 'object' ? (v.attributes as Record<string, unknown>) : v;
+    const state = typeof attrs.state === 'string' ? attrs.state.toLowerCase() : undefined;
+    let environmentId: string | undefined;
+    const env = v.environment ?? attrs.environment;
+    if (typeof env === 'string') environmentId = env;
+    const rel = (v.relationships as Record<string, unknown> | undefined)?.environment as
+      | { data?: { id?: unknown } | null }
+      | undefined;
+    if (!environmentId && typeof rel?.data?.id === 'string') environmentId = rel.data.id;
+    out.push({ id, state, environmentId: environmentId ?? fallbackEnv });
+  };
+
+  const argEnv = typeof argObj.environment_id === 'string' ? argObj.environment_id : undefined;
+  read(result, argEnv);
+  return out;
+}
+
+/** The library id a library tool call targets, from its args. */
+function libraryIdOf(args: unknown): string | undefined {
+  if (!args || typeof args !== 'object') return undefined;
+  const id = (args as Record<string, unknown>).library_id;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/** The (lowercased) action of a reactor_transition_library call. */
+function transitionActionOf(args: unknown): string | undefined {
+  if (!args || typeof args !== 'object') return undefined;
+  const action = (args as Record<string, unknown>).action;
+  return typeof action === 'string' ? action.trim().toLowerCase() : undefined;
+}
+
 /**
  * Resolve the target environment stage for a publish transition, from server
  * truth captured in `state`. The target is named by a transition call's args
@@ -423,6 +538,13 @@ export function resolveEnvironmentStage(
   publishTarget?: { environmentId?: string; environmentName?: string }
 ): ResolvedStage {
   const candidates: Array<string | undefined> = [];
+  // The environment a library is actually bound to is the truth for where its
+  // builds land; a publishTarget can't override it.
+  const libraryId = libraryIdOf(args);
+  const boundEnvironment = libraryId ? state.libraryEnvironments.get(libraryId) : undefined;
+  if (boundEnvironment) {
+    return state.stageOf(boundEnvironment) ?? 'unknown';
+  }
   if (args && typeof args === 'object') {
     const a = args as Record<string, unknown>;
     for (const key of ['environment_id', 'environmentId', 'environment', 'environment_name', 'environmentName']) {
@@ -617,6 +739,23 @@ export function validateBeforeTransition(
 ): void {
   if (!isPublishTransitionTool(toolName)) return;
 
+  const action = transitionActionOf(args);
+  if (!action || !NON_PRODUCTION_TRANSITION_ACTIONS.has(action)) {
+    throw new Error(
+      `Launch publish gate blocked ${toolName} with action "${action ?? '<missing>'}" — "approve" and "publish" ` +
+        `are the production path (an approved library builds to production), and this harness publishes ONLY to ` +
+        `development/staging. Use action "submit" to move a built development library to staging.`
+    );
+  }
+  const libraryId = libraryIdOf(args);
+  const libraryState = libraryId ? state.libraryStates.get(libraryId) : undefined;
+  if (libraryState && PRODUCTION_LIBRARY_STATES.has(libraryState)) {
+    throw new Error(
+      `Launch publish gate blocked ${toolName} — library ${libraryId} is "${libraryState}", which is on the ` +
+        `production path. This harness does not move libraries past staging.`
+    );
+  }
+
   if (state.latestBuildStatus === 'failed') {
     throw new Error(
       `Launch publish gate blocked ${toolName} — the latest build FAILED, so the library cannot be published ` +
@@ -644,6 +783,32 @@ export function validateBeforeTransition(
       `reactor_get_environment (or reactor_list_environments) first. Publishing is permitted ONLY to a ` +
       `verified development/staging environment; an unverified stage is refused.`
   );
+}
+
+/**
+ * Gate reactor_build_library: a build deploys the library to the environment
+ * its state maps to, so building an approved/published library — or one bound
+ * to a production environment — is a production deploy. Refused; any other
+ * build (a development library, the normal populate→build step) is allowed.
+ */
+export function validateBeforeBuild(toolName: string, args: unknown, state: LaunchPropertyState): void {
+  if (toolName !== BUILD_TOOL) return;
+  const libraryId = libraryIdOf(args);
+  if (!libraryId) return;
+  const libraryState = state.libraryStates.get(libraryId);
+  if (libraryState && PRODUCTION_LIBRARY_STATES.has(libraryState)) {
+    throw new Error(
+      `Launch publish gate blocked ${toolName} — library ${libraryId} is "${libraryState}", so building it ` +
+        `deploys to production. This harness builds only development/staging libraries.`
+    );
+  }
+  const boundEnvironment = state.libraryEnvironments.get(libraryId);
+  if (boundEnvironment && state.stageOf(boundEnvironment) === 'production') {
+    throw new Error(
+      `Launch publish gate blocked ${toolName} — library ${libraryId} is bound to production environment ` +
+        `${boundEnvironment}. Bind it to a development environment instead.`
+    );
+  }
 }
 
 /** A short, log-safe description of the transition's target environment, for an error message. */
@@ -755,6 +920,10 @@ export class LaunchValidationGate {
       validateBeforeTransition(toolName, args, this.state, this.opts.publishTarget);
       return;
     }
+    if (toolName === BUILD_TOOL) {
+      validateBeforeBuild(toolName, args, this.state);
+      return;
+    }
     if (!isLaunchHandoffTool(toolName)) return;
     const payload = collectHandoffPayload(args, {
       ruleComponents: this.createdRuleComponents,
@@ -772,6 +941,10 @@ export class LaunchValidationGate {
    * the stage. Never infers a stage from the environment name text.
    */
   resolveStageFor(args: unknown): ResolvedStage {
+    // "approve"/"publish" (or no action) are the production path whatever the
+    // environment says — never exempt them from approval.
+    const action = transitionActionOf(args);
+    if (!action || !NON_PRODUCTION_TRANSITION_ACTIONS.has(action)) return 'production';
     return resolveEnvironmentStage(args, this.state, this.opts.publishTarget);
   }
 }
