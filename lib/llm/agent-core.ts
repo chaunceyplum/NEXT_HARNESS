@@ -59,17 +59,26 @@ function getEnvironmentContext(): string {
  * a Launch run, so it grounds the object model and the hard output boundary
  * without reproducing documentation the knowledge base already covers.
  */
-const LAUNCH_DOMAIN_CONTEXT = [
-  'Adobe Launch (Reactor) object model — ground every tag change in this hierarchy:',
-  '- A property holds libraries, rules, data elements, and extensions. A library is the unit devs load to test; it bundles the rule/data-element/extension revisions under test.',
-  '- A rule = events + conditions + actions. Each of those is a rule component with a delegate_descriptor_id (e.g. "core::events::click") naming the extension delegate it runs, plus a settings object holding that delegate\'s configuration.',
-  '- A data element has a name, a delegate_descriptor_id (its type, e.g. "core::dataElements::variable"), a settings object, and a storage_duration ("pageview" | "session" | "visitor", or none for no persistence).',
-  '- An extension is an installed package (extension_package) a property configures; rule components and data elements reference its delegates by delegate_descriptor_id.',
-  'Output / handoff contract: you are producing code to be committed to the repo and loaded into a Launch library for devs to test; do NOT publish to an environment. End by creating/populating the library and reporting its id.',
-  'Validation rules the generated code must satisfy:',
-  '- Every rule component\'s delegate_descriptor_id must come from an extension present in the property (install the extension first if it is missing).',
-  '- Every data element referenced from custom code must already exist in the property or be created in the same library.',
-].join('\n');
+function launchDomainContext(publishEnabled: boolean): string {
+  // The handoff/output line is the ONLY difference between the publish and
+  // non-publish variants. When publishEnabled is false this array is
+  // byte-identical to the historical LAUNCH_DOMAIN_CONTEXT, so a non-publish
+  // Launch run's prompt (and its promptVersion fingerprint) is unchanged.
+  const handoffLine = publishEnabled
+    ? 'Output / handoff contract: you are producing code to be committed to the repo and loaded into a Launch library for devs to test, and this run MAY publish that library to the named dev/staging environment. Publishing is permitted ONLY to a development or staging environment — a production environment is refused in code. End by reporting the library id and, if you published, the environment and published build.'
+    : 'Output / handoff contract: you are producing code to be committed to the repo and loaded into a Launch library for devs to test; do NOT publish to an environment. End by creating/populating the library and reporting its id.';
+  return [
+    'Adobe Launch (Reactor) object model — ground every tag change in this hierarchy:',
+    '- A property holds libraries, rules, data elements, and extensions. A library is the unit devs load to test; it bundles the rule/data-element/extension revisions under test.',
+    '- A rule = events + conditions + actions. Each of those is a rule component with a delegate_descriptor_id (e.g. "core::events::click") naming the extension delegate it runs, plus a settings object holding that delegate\'s configuration.',
+    '- A data element has a name, a delegate_descriptor_id (its type, e.g. "core::dataElements::variable"), a settings object, and a storage_duration ("pageview" | "session" | "visitor", or none for no persistence).',
+    '- An extension is an installed package (extension_package) a property configures; rule components and data elements reference its delegates by delegate_descriptor_id.',
+    handoffLine,
+    'Validation rules the generated code must satisfy:',
+    '- Every rule component\'s delegate_descriptor_id must come from an extension present in the property (install the extension first if it is missing).',
+    '- Every data element referenced from custom code must already exist in the property or be created in the same library.',
+  ].join('\n');
+}
 
 /**
  * Operational guidance for calling the reactor_* tools (Adobe Launch API,
@@ -84,16 +93,24 @@ const LAUNCH_DOMAIN_CONTEXT = [
  * traps; the full reference (search fields, callback/secret/audit specifics,
  * the which-tool map) lives in docs/reactor-tools-context.md.
  */
-const LAUNCH_TOOLS_CONTEXT = [
-  'Adobe Reactor (reactor_*) tool usage — most failures come from ignoring resource order or a resource state machine, not from a broken tool:',
-  'Resource dependency chain (create top-down, delete bottom-up): company → property → { extensions, hosts → environment, data_elements, rules → rule_components, callbacks, libraries → builds }. Resolve a property_id FIRST (reactor_list_properties, or reactor_create_property) — almost every other tool needs it. There is no root /properties list; it is company-scoped.',
-  'Extensions: a new property ALREADY has Core installed — do NOT reactor_install_extension for Core (409 "can only add each extension_package once"); reactor_list_extensions and reuse it. reactor_install_extension is for additional packages (Web SDK, Analytics, …). Install the extension that provides a delegate BEFORE creating a data element or rule component that uses it — the prefix before "::" in delegate_descriptor_id is the extension name.',
-  'Data elements & rule components: delegate_descriptor_id is extensionName::type::delegateName (e.g. core::events::click, core::dataElements::javascript-variable, core::actions::custom-code). settings is type-specific JSON; for core::actions::custom-code include a source (language defaults to javascript). Do not pass extension_id — it is auto-resolved from the delegate prefix unless disambiguation is needed.',
-  'Libraries / builds / publishing is a state machine — order matters: reactor_create_library bound to an environment_id → reactor_add_resources_to_library (re-revises automatically) → reactor_build_library (returns build_id, status pending) → poll reactor_get_build until status succeeded → reactor_transition_library submit → approve → publish. Submitting before a successful build returns 409 "Last build was not successful." A library can only be deleted while in development state. (Per the handoff contract above, stop at a populated library for devs to test — do not publish.)',
-  'Secrets (reactor_create_secret / list_secrets / …) work ONLY on event-forwarding (Edge) properties; on a normal web/mobile tag property they 405/409 — do not call them unless the property is event-forwarding.',
-  'reactor_search matches a field against a term, not free text — it defaults to attributes.name; pass field (e.g. attributes.settings, attributes.delegate_descriptor_id) to match others, scope with property_id, and narrow with resource_types. Audit events are company-level only (property_id is accepted but ignored — filter with type_filter).',
-  'Deleting a property cascades its rules, data elements, environments, hosts, libraries, and callbacks, and is irreversible on the live account — confirm property_id before reactor_delete_property.',
-].join('\n');
+function launchToolsContext(publishEnabled: boolean): string {
+  // Only the libraries/builds/publishing line differs between variants; every
+  // other line is identical. When publishEnabled is false this array is
+  // byte-identical to the historical LAUNCH_TOOLS_CONTEXT.
+  const libraryLine = publishEnabled
+    ? 'Libraries / builds / publishing is a state machine — order matters: reactor_create_library bound to an environment_id → reactor_add_resources_to_library (re-revises automatically) → reactor_build_library (returns build_id, status pending) → poll reactor_get_build until status succeeded → reactor_transition_library submit → approve → publish. Submitting before a successful build returns 409 "Last build was not successful." A library can only be deleted while in development state. This run MAY publish: after populating the library, build it, poll reactor_get_build until status "succeeded", then reactor_transition_library (submit → approve → publish) to the named environment. Publish ONLY to a development or staging environment — publishing to production is refused in code; never attempt a production transition. If a build\'s status comes back "failed", fix the components and rebuild — do not transition a failed build.'
+    : 'Libraries / builds / publishing is a state machine — order matters: reactor_create_library bound to an environment_id → reactor_add_resources_to_library (re-revises automatically) → reactor_build_library (returns build_id, status pending) → poll reactor_get_build until status succeeded → reactor_transition_library submit → approve → publish. Submitting before a successful build returns 409 "Last build was not successful." A library can only be deleted while in development state. (Per the handoff contract above, stop at a populated library for devs to test — do not publish.)';
+  return [
+    'Adobe Reactor (reactor_*) tool usage — most failures come from ignoring resource order or a resource state machine, not from a broken tool:',
+    'Resource dependency chain (create top-down, delete bottom-up): company → property → { extensions, hosts → environment, data_elements, rules → rule_components, callbacks, libraries → builds }. Resolve a property_id FIRST (reactor_list_properties, or reactor_create_property) — almost every other tool needs it. There is no root /properties list; it is company-scoped.',
+    'Extensions: a new property ALREADY has Core installed — do NOT reactor_install_extension for Core (409 "can only add each extension_package once"); reactor_list_extensions and reuse it. reactor_install_extension is for additional packages (Web SDK, Analytics, …). Install the extension that provides a delegate BEFORE creating a data element or rule component that uses it — the prefix before "::" in delegate_descriptor_id is the extension name.',
+    'Data elements & rule components: delegate_descriptor_id is extensionName::type::delegateName (e.g. core::events::click, core::dataElements::javascript-variable, core::actions::custom-code). settings is type-specific JSON; for core::actions::custom-code include a source (language defaults to javascript). Do not pass extension_id — it is auto-resolved from the delegate prefix unless disambiguation is needed.',
+    libraryLine,
+    'Secrets (reactor_create_secret / list_secrets / …) work ONLY on event-forwarding (Edge) properties; on a normal web/mobile tag property they 405/409 — do not call them unless the property is event-forwarding.',
+    'reactor_search matches a field against a term, not free text — it defaults to attributes.name; pass field (e.g. attributes.settings, attributes.delegate_descriptor_id) to match others, scope with property_id, and narrow with resource_types. Audit events are company-level only (property_id is accepted but ignored — filter with type_filter).',
+    'Deleting a property cascades its rules, data elements, environments, hosts, libraries, and callbacks, and is irreversible on the live account — confirm property_id before reactor_delete_property.',
+  ].join('\n');
+}
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -102,10 +119,17 @@ const LAUNCH_TOOLS_CONTEXT = [
  *   when those tools are in the run's tool set (live runs; not the eval path).
  * @param opts.memory include the remember_fact rule — only when that tool is present.
  * @param opts.launchMode inject the Launch/Reactor object-model contract
- *   (LAUNCH_DOMAIN_CONTEXT) into the cached prefix — only for Launch-tagging
+ *   (launchDomainContext) into the cached prefix — only for Launch-tagging
  *   runs, so non-Launch runs keep their lean prompt.
+ * @param opts.publishEnabled only meaningful with launchMode: swap the "do NOT
+ *   publish / stop at a populated library" handoff lines for the full
+ *   build→poll→transition-to-dev/staging state machine (production refused).
+ *   Defaults false, so a non-publish Launch run's prompt is byte-identical to
+ *   before and its promptVersion fingerprint does not shift.
  */
-export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean } = {}): string {
+export function systemPrompt(
+  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean } = {}
+): string {
   const envCtx = getEnvironmentContext();
 
   const lines = [
@@ -123,7 +147,11 @@ export function systemPrompt(opts: { toolDiscovery?: boolean; memory?: boolean; 
   // deployment context above, and gated so it rides the cache only when a run
   // is actually doing Launch work.
   if (opts.launchMode) {
-    lines.push('', LAUNCH_DOMAIN_CONTEXT, '', LAUNCH_TOOLS_CONTEXT);
+    // publishEnabled only takes effect inside a Launch run; it swaps the two
+    // publish-related lines for the permitted state machine. False keeps the
+    // historical text byte-identical.
+    const publishEnabled = opts.publishEnabled === true;
+    lines.push('', launchDomainContext(publishEnabled), '', launchToolsContext(publishEnabled));
   }
 
   lines.push(

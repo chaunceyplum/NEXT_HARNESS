@@ -27,6 +27,20 @@ describe('promptVersion', () => {
   it('defaults to the no-discovery variant (matches the eval)', () => {
     expect(promptVersion()).toBe(promptVersion({ toolDiscovery: false }));
   });
+
+  it('does not shift for non-publish/non-launch paths when publishEnabled defaults false', () => {
+    // publishEnabled defaults false, so adding the arg must not move the hash
+    // for the historical prompts (eval, live, launch non-publish).
+    expect(promptVersion({ toolDiscovery: false })).toBe(promptVersion({ toolDiscovery: false, publishEnabled: false }));
+    expect(promptVersion({ toolDiscovery: true, launchMode: true })).toBe(
+      promptVersion({ toolDiscovery: true, launchMode: true, publishEnabled: false })
+    );
+    // publishEnabled only moves the hash inside a Launch run.
+    expect(promptVersion({ toolDiscovery: true, publishEnabled: true })).toBe(promptVersion({ toolDiscovery: true }));
+    expect(promptVersion({ toolDiscovery: true, launchMode: true, publishEnabled: true })).not.toBe(
+      promptVersion({ toolDiscovery: true, launchMode: true })
+    );
+  });
 });
 
 describe('toolsetVersion', () => {

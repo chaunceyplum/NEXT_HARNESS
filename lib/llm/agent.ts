@@ -44,9 +44,9 @@ import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from '.
 import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
-import { LAUNCH_ALWAYS_ON_TOOLS, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
 import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
-import { LaunchValidationGate } from './launch-validation';
+import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from './launch-validation';
 import type { LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
 import {
@@ -213,6 +213,15 @@ export interface RunAgentOptions {
    */
   launchMode?: boolean;
   /**
+   * Publish target for a Launch run (lib/types.ts BuildRequest.publishTarget).
+   * ABSENT → the run stops at a populated library (byte-identical to today).
+   * PRESENT → the run may publish the library, but ONLY to a development or
+   * staging environment (resolved from server truth); a production or
+   * unresolvable stage is refused in code (launch-validation.ts). Only takes
+   * effect on a Launch run (publishEnabled = launchMode && Boolean(publishTarget)).
+   */
+  publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
+  /**
    * Parsed Launch requirements (launch-brief.ts) for a Launch-tagging run.
    * When present on a Launch-mode run they feed BOTH the tool shortlist query
    * (so the right Reactor tools get ranked, see launch-plan.ts) AND the seeded
@@ -273,7 +282,13 @@ export interface RunAgentOptions {
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = false, launchMode = false): SystemModelMessage {
+function buildSystemMessage(
+  modelKey: string,
+  toolDiscovery: boolean,
+  memory = false,
+  launchMode = false,
+  publishEnabled = false
+): SystemModelMessage {
   const entry = tryGetModelEntry(modelKey);
   const providerOptions: SystemModelMessage['providerOptions'] =
     entry?.provider === 'anthropic'
@@ -281,7 +296,7 @@ function buildSystemMessage(modelKey: string, toolDiscovery: boolean, memory = f
       : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
         ? { bedrock: { cachePoint: { type: 'default' } } }
         : undefined;
-  return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode }), ...(providerOptions ? { providerOptions } : {}) };
+  return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled }), ...(providerOptions ? { providerOptions } : {}) };
 }
 
 /** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter containing it turns Launch mode on. */
@@ -522,7 +537,7 @@ async function selectLiveTools(
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
   ragJudgmentSink: RagJudgmentSink,
   platformFilter?: string[],
-  launch?: { enabled: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate }
+  launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate }
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   // Knowledge tools are always included — they're grounding/search tools the
@@ -536,7 +551,9 @@ async function selectLiveTools(
   // always-on set (launch-plan.ts) so they don't have to win a shortlist slot
   // on embedding similarity, and expand the shortlist query with the parsed
   // requirements so the rest of the relevant tools still get ranked.
-  const alwaysOnNames = launch?.enabled ? [...ALWAYS_ON_TOOLS, ...LAUNCH_ALWAYS_ON_TOOLS] : ALWAYS_ON_TOOLS;
+  const alwaysOnNames = launch?.enabled
+    ? [...ALWAYS_ON_TOOLS, ...launchAlwaysOnTools(launch.publishEnabled === true)]
+    : ALWAYS_ON_TOOLS;
   const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name));
   const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
@@ -821,6 +838,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // (both via launch-plan.ts). Explicit opts.launchMode wins; otherwise it's
   // inferred from a Launch/Reactor platform filter.
   const launchMode = resolveLaunchMode(opts);
+  // A Launch run started with a publishTarget may publish the populated
+  // library to a dev/staging environment. This flag swaps the grounding to
+  // the publish state machine, widens the seed plan + always-on tools to the
+  // publish pipeline, and feeds the gate the fallback target. Off → every
+  // publish-related path is byte-identical to today.
+  const publishEnabled = launchMode && Boolean(opts.publishTarget);
   // Collects fire-and-forget RAG judgments for live runs; drained once the
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
@@ -832,7 +855,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   const resolvedPolicy = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const launchGate =
     launchMode && !opts.tools
-      ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow' })
+      ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow', publishTarget: opts.publishTarget })
       : undefined;
 
   if (opts.tools) {
@@ -851,7 +874,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
       opts.platformFilter,
-      { enabled: launchMode, requirements: opts.requirements, gate: launchGate }
+      { enabled: launchMode, publishEnabled, requirements: opts.requirements, gate: launchGate }
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {
@@ -885,7 +908,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       // library), so the plan is seeded deterministically from the Launch
       // template (launch-plan.ts) and specialised with the Phase 2
       // requirements, rather than asked of the model.
-      planTracker = new PlanTracker(seedLaunchPlan(opts.requirements), (p) => opts.onPlan?.(p));
+      planTracker = new PlanTracker(seedLaunchPlan(opts.requirements, publishEnabled), (p) => opts.onPlan?.(p));
     } else {
       try {
         const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
@@ -939,7 +962,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     ? undefined
     : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
-        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun });
+        // A publish transition's exemption from the outbound gate is decided
+        // from the gate's server-truth stage (launch-validation.ts): a verified
+        // dev/staging target is not gated, production/unknown stay gated (and
+        // production is independently refused by the gate before it runs). The
+        // gate exists only on live Launch runs; otherwise no stage is passed
+        // and behaviour is unchanged.
+        const transitionStage =
+          launchGate && call.toolName === PUBLISH_TRANSITION_TOOL ? launchGate.resolveStageFor(call.input) : undefined;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun, transitionStage });
         if (!reason) return 'not-applicable' as const;
         approvalReasons.set(toolCall.toolCallId, reason);
         if (!opts.approveTool) {
@@ -956,7 +987,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // how the prompt is actually built: live runs include the find_tools rule.
   const toolDiscovery = 'find_tools' in tools;
   const versions = {
-    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode }),
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode, publishEnabled }),
     toolset: toolsetVersion(
       Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
     ),
@@ -1026,7 +1057,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode),
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled),
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],

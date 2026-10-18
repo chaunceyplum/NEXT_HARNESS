@@ -58,6 +58,33 @@ export const LAUNCH_ALWAYS_ON_TOOLS = [
   'reactor_create_extension',
 ];
 
+/**
+ * The publish pipeline tools a Launch run only needs when it was started with
+ * a publishTarget: read the environment's stage (so the production block has
+ * server truth), build the library, poll the build, and transition it. Kept
+ * OFF the non-publish list so a library-only run's always-on set — and the
+ * tools the model can even reach — is unchanged.
+ */
+export const LAUNCH_PUBLISH_ALWAYS_ON_TOOLS = [
+  // Read the target environment's stage from server truth (production block).
+  'reactor_get_environment',
+  'reactor_list_environments',
+  // Build → poll → transition the populated library (dev/staging only).
+  'reactor_build_library',
+  'reactor_get_build',
+  'reactor_transition_library',
+];
+
+/**
+ * The always-on Reactor/Launch tools for a Launch run. Non-publish runs get
+ * exactly {@link LAUNCH_ALWAYS_ON_TOOLS} (byte-identical to before); a publish
+ * run also gets {@link LAUNCH_PUBLISH_ALWAYS_ON_TOOLS} so it can actually reach
+ * the build→poll→transition pipeline.
+ */
+export function launchAlwaysOnTools(publishEnabled: boolean): string[] {
+  return publishEnabled ? [...LAUNCH_ALWAYS_ON_TOOLS, ...LAUNCH_PUBLISH_ALWAYS_ON_TOOLS] : LAUNCH_ALWAYS_ON_TOOLS;
+}
+
 /** The fixed, ordered backbone every Launch-tagging job follows. */
 interface SeedStep {
   description: string;
@@ -65,7 +92,7 @@ interface SeedStep {
   expectedOutput: string;
 }
 
-function seedSteps(requirements?: LaunchRequirements): SeedStep[] {
+function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): SeedStep[] {
   const propertyName = requirements?.target.propertyName;
   const libraryName = requirements?.target.libraryName;
   const propertyRef = propertyName ? `property "${propertyName}"` : 'the target property';
@@ -73,7 +100,7 @@ function seedSteps(requirements?: LaunchRequirements): SeedStep[] {
   const tagCount = requirements?.rules.length;
   const dataElementCount = requirements?.dataElements.length;
 
-  return [
+  const base: SeedStep[] = [
     {
       description: `Read ${propertyRef}'s installed extensions.`,
       tool: 'reactor_list_extensions',
@@ -108,9 +135,33 @@ function seedSteps(requirements?: LaunchRequirements): SeedStep[] {
     {
       description: `Create/populate ${libraryRef} with the validated rules and data elements.`,
       tool: 'reactor_create_library',
-      expectedOutput: 'the populated library id (deliverable boundary — do not publish)',
+      expectedOutput: publishEnabled
+        ? 'the populated library id, ready to build and publish to dev/staging'
+        : 'the populated library id (deliverable boundary — do not publish)',
     },
   ];
+
+  if (!publishEnabled) return base;
+
+  // Publish runs continue past the populated library: build → poll the build
+  // until it succeeds → transition to the named dev/staging environment. Never
+  // a production transition (the gate refuses it in code). Two steps keep the
+  // whole backbone within MAX_PLAN_STEPS.
+  base.push(
+    {
+      description: `Build ${libraryRef} and poll the build until its status is "succeeded" (fix components and rebuild if it fails).`,
+      tool: 'reactor_build_library',
+      expectedOutput: 'a build whose status reaches "succeeded" (no transition on a failed build)',
+    },
+    {
+      description:
+        'Transition the built library (submit → approve → publish) to the named development/staging environment. ' +
+        'Publishing to production is not permitted.',
+      tool: 'reactor_transition_library',
+      expectedOutput: 'the library published to the dev/staging environment',
+    }
+  );
+  return base;
 }
 
 /**
@@ -122,12 +173,19 @@ function seedSteps(requirements?: LaunchRequirements): SeedStep[] {
  * Runs through planner.ts's {@link normalisePlan}, so it is renumbered from 1,
  * starts every step pending, and is capped at MAX_PLAN_STEPS exactly like a
  * generated plan — PlanTracker/planPreamble treat it identically.
+ *
+ * `publishEnabled` (a run started with a publishTarget) appends the
+ * build→poll→transition-to-dev/staging backbone after the populate step, and
+ * never a production transition. Omit it (or pass false) for the historical
+ * library-only backbone, which is byte-identical to before.
  */
-export function seedLaunchPlan(requirements?: LaunchRequirements): Plan {
-  const steps = seedSteps(requirements).slice(0, MAX_PLAN_STEPS);
+export function seedLaunchPlan(requirements?: LaunchRequirements, publishEnabled = false): Plan {
+  const steps = seedSteps(requirements, publishEnabled).slice(0, MAX_PLAN_STEPS);
   const goal =
     requirements?.summary ??
-    'Build the briefed Launch tags and populate a library for devs to test (no publish).';
+    (publishEnabled
+      ? 'Build the briefed Launch tags, populate a library, and publish it to the dev/staging environment.'
+      : 'Build the briefed Launch tags and populate a library for devs to test (no publish).');
   return normalisePlan(
     {
       goal: goal.slice(0, 300),

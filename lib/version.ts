@@ -25,15 +25,20 @@ export function shortHash(input: string): string {
  * runs include the find_tools/call_tool rule (toolDiscovery: true) and, with
  * memory on, the remember_fact rule (memory: true); the eval
  * path does not. `launchMode` adds the Launch/Reactor object-model block, only
- * on Launch-tagging runs. Each defaults false, keeping the eval's historical
- * value stable.
+ * on Launch-tagging runs. `publishEnabled` (only meaningful with launchMode)
+ * swaps in the publish state machine for a run started with a publishTarget.
+ * Each defaults false, keeping the eval's historical value stable — a
+ * non-publish/non-launch run's fingerprint does not shift.
  */
-export function promptVersion(opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean } = {}): string {
+export function promptVersion(
+  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean } = {}
+): string {
   return shortHash(
     systemPrompt({
       toolDiscovery: opts.toolDiscovery ?? false,
       memory: opts.memory ?? false,
       launchMode: opts.launchMode ?? false,
+      publishEnabled: opts.publishEnabled ?? false,
     })
   );
 }

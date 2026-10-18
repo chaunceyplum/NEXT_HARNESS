@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { LAUNCH_ALWAYS_ON_TOOLS, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import {
+  LAUNCH_ALWAYS_ON_TOOLS,
+  LAUNCH_PUBLISH_ALWAYS_ON_TOOLS,
+  launchAlwaysOnTools,
+  launchShortlistQuery,
+  seedLaunchPlan,
+} from './launch-plan';
 import { MAX_PLAN_STEPS } from './planner';
 import type { LaunchRequirements } from './launch-brief';
 
@@ -116,5 +122,53 @@ describe('LAUNCH_ALWAYS_ON_TOOLS', () => {
 
   it('lists no publish/build/transition tool (deliverable stops at a populated library)', () => {
     expect(LAUNCH_ALWAYS_ON_TOOLS.some((n) => /build|transition|publish/.test(n))).toBe(false);
+  });
+});
+
+describe('launchAlwaysOnTools', () => {
+  it('returns exactly the library-only set when publishing is off (byte-identical)', () => {
+    expect(launchAlwaysOnTools(false)).toEqual(LAUNCH_ALWAYS_ON_TOOLS);
+  });
+
+  it('adds the build→poll→transition pipeline (and environment reads) when publishing is on', () => {
+    const tools = launchAlwaysOnTools(true);
+    for (const name of LAUNCH_ALWAYS_ON_TOOLS) expect(tools).toContain(name);
+    for (const name of LAUNCH_PUBLISH_ALWAYS_ON_TOOLS) expect(tools).toContain(name);
+    expect(tools).toContain('reactor_get_environment');
+    expect(tools).toContain('reactor_build_library');
+    expect(tools).toContain('reactor_get_build');
+    expect(tools).toContain('reactor_transition_library');
+  });
+});
+
+describe('seedLaunchPlan — publish backbone', () => {
+  it('is byte-identical to today when publishEnabled is omitted/false', () => {
+    expect(seedLaunchPlan(requirements, false)).toEqual(seedLaunchPlan(requirements));
+    const text = JSON.stringify(seedLaunchPlan(requirements, false)).toLowerCase();
+    expect(text).not.toContain('reactor_transition_library');
+  });
+
+  it('appends build and transition steps for a publish run, within the step cap', () => {
+    const plan = seedLaunchPlan(requirements, true);
+    const tools = plan.steps.map((s) => s.tool);
+    expect(tools).toContain('reactor_build_library');
+    expect(tools).toContain('reactor_transition_library');
+    expect(plan.steps.length).toBeLessThanOrEqual(MAX_PLAN_STEPS);
+    // The populate step still comes before the build + transition.
+    const populate = tools.indexOf('reactor_create_library');
+    expect(tools.indexOf('reactor_build_library')).toBeGreaterThan(populate);
+    expect(tools.indexOf('reactor_transition_library')).toBeGreaterThan(tools.indexOf('reactor_build_library'));
+  });
+
+  it('seeds a transition to dev/staging only — never one that targets production', () => {
+    const plan = seedLaunchPlan(requirements, true);
+    const transition = plan.steps.find((s) => s.tool === 'reactor_transition_library');
+    expect(transition).toBeDefined();
+    const transitionText = `${transition!.description} ${transition!.expectedOutput}`.toLowerCase();
+    // The seeded transition targets dev/staging and explicitly disallows prod.
+    expect(transitionText).toMatch(/development\/staging|dev\/staging/);
+    expect(transitionText).toMatch(/production is not permitted/);
+    // The transition's named target is the dev/staging environment, not production.
+    expect(transitionText).toMatch(/to the named development\/staging environment/);
   });
 });

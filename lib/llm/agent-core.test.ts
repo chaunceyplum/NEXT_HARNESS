@@ -31,3 +31,33 @@ describe('systemPrompt Launch grounding', () => {
     expect(launch.length).toBeGreaterThan(lean.length);
   });
 });
+
+describe('systemPrompt publish grounding (conditional)', () => {
+  it('a launch run with publishEnabled false is byte-identical to the historical launch prompt', () => {
+    const base = systemPrompt({ toolDiscovery: true, launchMode: true });
+    const explicitFalse = systemPrompt({ toolDiscovery: true, launchMode: true, publishEnabled: false });
+    expect(explicitFalse).toBe(base);
+    // The non-publish handoff contract still forbids publishing.
+    expect(base).toMatch(/do NOT publish to an environment/);
+    expect(base).toMatch(/stop at a populated library for devs to test — do not publish/);
+  });
+
+  it('publishEnabled is inert without launchMode (non-launch prompt unchanged)', () => {
+    const lean = systemPrompt({ toolDiscovery: true });
+    expect(systemPrompt({ toolDiscovery: true, publishEnabled: true })).toBe(lean);
+  });
+
+  it('publishEnabled swaps in the build→poll→transition state machine and the dev/staging-only clause', () => {
+    const publish = systemPrompt({ toolDiscovery: true, launchMode: true, publishEnabled: true });
+    // No longer forbids publishing.
+    expect(publish).not.toMatch(/do NOT publish to an environment/);
+    expect(publish).not.toMatch(/stop at a populated library for devs to test — do not publish/);
+    // Full state machine present.
+    expect(publish).toMatch(/reactor_build_library/);
+    expect(publish).toMatch(/poll reactor_get_build until status/i);
+    expect(publish).toMatch(/reactor_transition_library/);
+    // Permitted ONLY to development/staging; production refused.
+    expect(publish).toMatch(/development or staging/i);
+    expect(publish).toMatch(/production is refused in code/i);
+  });
+});
