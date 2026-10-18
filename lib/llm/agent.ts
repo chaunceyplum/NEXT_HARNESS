@@ -45,6 +45,7 @@ import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { LAUNCH_ALWAYS_ON_TOOLS, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
 import { LaunchValidationGate } from './launch-validation';
 import type { LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
@@ -914,6 +915,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       tools = { ...tools, ...buildPlanTools(planTracker) };
       userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userMessage}`;
     }
+  }
+
+  // Phase 5: few-shot grounding. The agent's only knowledge base is the
+  // MCP-owned search_adobe_knowledge, which this repo can't seed, so a small
+  // curated set of known-good rule/data-element example documents lives in
+  // launch-examples.ts. Retrieve the ones closest to the Phase 2 requirements
+  // and inject them ahead of the request, so the generation step pattern-matches
+  // against validated shapes rather than inventing delegate/settings layouts.
+  // Live Launch runs only (the eval path passes opts.tools); nothing to show
+  // when no requirements were parsed or none overlap.
+  if (launchMode && !opts.tools) {
+    const preamble = launchExamplesPreamble(selectLaunchExamples(opts.requirements));
+    if (preamble) userMessage = `${preamble}\n\n${userMessage}`;
   }
 
   // TASK 9: gate risky calls on a human decision (live runs only).
