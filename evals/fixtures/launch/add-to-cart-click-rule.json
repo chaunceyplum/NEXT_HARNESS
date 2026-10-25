@@ -4,6 +4,14 @@
   "category": "launch",
   "request": "In Launch property \"Acme Web\" (library \"Web Tagging Dev\"), add a rule that tracks add-to-cart clicks: when a visitor clicks an element matching \".add-to-cart\", run a custom-code action that sets digitalData.event to 'addToCart'. Populate the dev library with it — do not publish or build it to any environment.",
   "maxSteps": 16,
+  "knowledge": {
+    "results": [
+      {
+        "title": "Launch click event + custom code action",
+        "content": "A click-tracking rule uses the core::events::click event (elementSelector targets the clicked element) and a core::actions::custom-code action whose settings.source holds the JavaScript to run."
+      }
+    ]
+  },
   "tools": [
     {
       "name": "reactor_list_extensions",
@@ -71,22 +79,6 @@
                 "name": "Page Name",
                 "type": "core::dataElements::javascript-variable",
                 "enabled": true
-              }
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "search_adobe_knowledge",
-      "description": "Semantic search over the Adobe solutions-architecture knowledge base (AEP, CJA, AJO, Launch documentation and patterns). Use for Launch rule/data-element patterns and delegate configuration.",
-      "responses": [
-        {
-          "result": {
-            "results": [
-              {
-                "title": "Launch click event + custom code action",
-                "content": "A click-tracking rule uses the core::events::click event (elementSelector targets the clicked element) and a core::actions::custom-code action whose settings.source holds the JavaScript to run."
               }
             ]
           }

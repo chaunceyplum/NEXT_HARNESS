@@ -89,6 +89,7 @@ vi.mock('./tool-catalog', () => ({
   // scripted tools here never judge, so an empty-draining stub is enough.
   createRagJudgmentSink: () => ({ track() {}, async drain() { return []; } }),
   isKnowledgeTool: (name: string) => name === 'search_adobe_knowledge',
+  capRagResult: (result: unknown) => result,
   buildAiTools: (defs: typeof CATALOG): ToolSet =>
     Object.fromEntries(
       defs.map((d) => [
@@ -110,7 +111,8 @@ vi.mock('./tool-retrieval', () => ({ shortlistTools: async () => ['adobe_list_se
 
 // Planning-stage knowledge lookup: scripted excerpts, or none.
 let planningExcerpts: string | undefined;
-vi.mock('./planning-retrieval', () => ({
+vi.mock('./planning-retrieval', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./planning-retrieval')>()),
   retrieveForPlanning: async (query: string) =>
     planningExcerpts ? { tool: 'search_adobe_knowledge', query, context: planningExcerpts } : undefined,
 }));
@@ -483,6 +485,13 @@ describe('runAgent knowledge retrieval', () => {
     await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true });
     expect(JSON.stringify(calls[0].prompt)).toContain('Segmentation Service');
     expect(JSON.stringify(calls[1].prompt)).toContain('Segmentation Service');
+  });
+
+  it('uses caller-supplied knowledge as the excerpts on the scripted-tools path', async () => {
+    script = [{ text: 'done' }];
+    const tools = { adobe_list_segments: tool({ description: 'list segments', inputSchema: jsonSchema({ type: 'object' }), execute: async () => ({}) }) };
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', tools, knowledge: { results: [{ title: 'Segmentation Service' }] } });
+    expect(JSON.stringify(calls[0].prompt.at(-1))).toContain('Segmentation Service');
   });
 
   it('leaves the request alone when planning found nothing', async () => {

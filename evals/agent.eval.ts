@@ -62,6 +62,12 @@ type AgentFixture = {
   maxSteps?: number;
   /** `description`/`inputSchema` may be omitted to use the real definition (local tools, or the live MCP catalog if configured). */
   tools: Array<Omit<ScriptedToolDef, 'description'> & { description?: string }>;
+  /**
+   * The knowledge-search result the run's planning-stage lookup returns
+   * (runAgent opts.knowledge). The model has no search tool, so knowledge
+   * reaches it only this way. Omit for a run where the lookup finds nothing.
+   */
+  knowledge?: unknown;
   /** `criteria`: fixture-specific rubric criteria for the judge (the base correctness/safety criteria are always added). */
   expected: TrajectoryExpectations & { criteria?: string[] };
   /**
@@ -133,6 +139,7 @@ async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrial
       modelKey,
       maxSteps: fixture.maxSteps ?? 12,
       tools,
+      knowledge: fixture.knowledge,
       // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
       modelHealth: new ModelHealthTracker(),
       // When the fixture declares approveTools, wire up a scripted approver so the

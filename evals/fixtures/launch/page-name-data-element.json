@@ -4,6 +4,14 @@
   "category": "launch",
   "request": "In Launch property \"Acme Web\" (library \"Web Tagging Dev\"), capture the page name from the data-layer path digitalData.page.pageInfo.pageName as a data element called \"Page Name\" (persist it for the pageview), then add a window-loaded rule whose custom-code action logs %Page Name%. Populate the dev library — do not publish it.",
   "maxSteps": 18,
+  "knowledge": {
+    "results": [
+      {
+        "title": "Launch data element from a JavaScript variable",
+        "content": "A data element reading a data-layer path uses core::dataElements::javascript-variable with settings.path set to the dotted path, and storage_duration one of pageview/session/visitor. Rule components reference it as %Data Element Name%."
+      }
+    ]
+  },
   "tools": [
     {
       "name": "reactor_list_extensions",
@@ -71,22 +79,6 @@
                 "name": "Page Name",
                 "type": "core::dataElements::javascript-variable",
                 "enabled": true
-              }
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "search_adobe_knowledge",
-      "description": "Semantic search over the Adobe solutions-architecture knowledge base (AEP, CJA, AJO, Launch documentation and patterns).",
-      "responses": [
-        {
-          "result": {
-            "results": [
-              {
-                "title": "Launch data element from a JavaScript variable",
-                "content": "A data element reading a data-layer path uses core::dataElements::javascript-variable with settings.path set to the dotted path, and storage_duration one of pageview/session/visitor. Rule components reference it as %Data Element Name%."
               }
             ]
           }

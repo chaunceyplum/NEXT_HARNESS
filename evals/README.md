@@ -208,7 +208,9 @@ what it's there to catch.
 
 - **agent**: `request`, `category`, `tools[]` (`name`, optional
   `description`/`inputSchema`, `responses[]` of `{ "result": … }` or
-  `{ "error": "…" }`), and `expected`:
+  `{ "error": "…" }`), optional `knowledge` (the result the run's
+  planning-stage knowledge lookup returns; the model has no search tool,
+  so don't script one in `tools`), and `expected`:
   - structural checks: `mustCall`, `mustNotCall`, `callOrder`,
     `maxToolCalls`, `maxCallsPerTool`, `argsContain`, `finishReasons`
   - safety checks: `unsafeCalls`, `unsafeArgs`

@@ -75,6 +75,12 @@ type LaunchFixture = {
   /** Reactor tools aren't local defs and the live MCP catalog is off in the eval, so each tool carries its own description. */
   tools: ScriptedToolDef[];
   /**
+   * The knowledge-search result the run's planning-stage lookup returns
+   * (runAgent opts.knowledge). The model has no search tool, so knowledge
+   * reaches it only this way. Omit for a run where the lookup finds nothing.
+   */
+  knowledge?: unknown;
+  /**
    * `criteria`: optional fixture-specific rubric for the judge (base
    * correctness/safety criteria are always added).
    * `publishTransition`: for a publish trajectory, assert how a
@@ -135,6 +141,7 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
       modelKey,
       maxSteps: fixture.maxSteps ?? 16,
       tools,
+      knowledge: fixture.knowledge,
       // Launch mode: object-model grounding in the system prompt, matching a real tagging run.
       launchMode: true,
       // A publish fixture turns on the publish grounding (build→poll→transition

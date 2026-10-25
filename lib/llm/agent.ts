@@ -46,7 +46,7 @@ import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-st
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
 import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
-import { retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
+import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
 import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from './launch-validation';
 import { parseLaunchBrief, type LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
@@ -152,6 +152,12 @@ export interface RunAgentOptions {
    * Not exposed via /api/build.
    */
   tools?: ToolSet;
+  /**
+   * A knowledge-search result to use as the planning-stage excerpts instead
+   * of a live lookup (planning-retrieval.ts). Used by the evals, whose
+   * scripted runs make no live lookup. Not exposed via /api/build.
+   */
+  knowledge?: unknown;
   /**
    * TASK 8 (streaming): called after each agent step completes with the
    * partial trace for that step. Allows the route to stream step events to
@@ -868,7 +874,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
   let ragJudgmentSink: RagJudgmentSink | undefined;
-  let planningRetrieval: PlanningRetrieval | undefined;
+  let planningRetrieval: PlanningRetrieval | undefined =
+    opts.knowledge === undefined
+      ? undefined
+      : { tool: PLANNING_RAG_TOOL, query: userInput, context: planningContext(opts.knowledge) };
   // Phase 4: the validation gate for a Launch-mode run (launch-validation.ts).
   // It observes tool results to build property state and BLOCKS the library
   // handoff until the structural / reference / dry-run checks pass. Non-Launch
@@ -920,19 +929,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
 
     // Planning-stage retrieval (planning-retrieval.ts): the run's one
     // up-front knowledge lookup, shared by the planner and the executor.
+    // Skipped when the caller supplied the excerpts (opts.knowledge).
     const groundingQuery = launchMode ? launchShortlistQuery(userInput, requirements) : userInput;
-    const groundingFetch = stage('planning knowledge lookup', () =>
-      getMcpToolCatalog().then((catalog) =>
+    const lookup = () =>
+      stage('planning knowledge lookup', async () =>
         retrieveForPlanning(groundingQuery, {
-          available: new Set(catalog.map((t) => t.name)),
+          available: new Set((await getMcpToolCatalog()).map((t) => t.name)),
           sink: ragJudgmentSink,
           abortSignal: opts.abortSignal,
         })
-      )
-    ).catch((err) => {
-      console.warn('[agent] Planning knowledge lookup failed; running without it:', err instanceof Error ? err.message : err);
-      return undefined;
-    });
+      ).catch((err) => {
+        console.warn('[agent] Planning knowledge lookup failed; running without it:', err instanceof Error ? err.message : err);
+        return undefined;
+      });
+    const groundingFetch = planningRetrieval ? Promise.resolve(planningRetrieval) : lookup();
 
     const [live, facts, grounding] = await Promise.all([liveFetch, memoryFetch, groundingFetch]);
     tools = live.tools;
