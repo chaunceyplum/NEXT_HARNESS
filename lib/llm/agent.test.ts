@@ -77,7 +77,7 @@ vi.mock('./model-registry', () => {
   };
 });
 
-const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment', 'execute_sql', 'adobe_create_export_job'].map((name) => ({
+const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_segment', 'execute_sql', 'adobe_create_export_job', 'search_adobe_knowledge'].map((name) => ({
   name,
   description: name.replace(/_/g, ' '),
   inputSchema: { type: 'object', properties: { id: { type: 'string' }, sql: { type: 'string' } } },
@@ -88,6 +88,7 @@ vi.mock('./tool-catalog', () => ({
   // runAgent creates a sink on the live path and drains it at the end; the
   // scripted tools here never judge, so an empty-draining stub is enough.
   createRagJudgmentSink: () => ({ track() {}, async drain() { return []; } }),
+  isKnowledgeTool: (name: string) => name === 'search_adobe_knowledge',
   buildAiTools: (defs: typeof CATALOG): ToolSet =>
     Object.fromEntries(
       defs.map((d) => [
@@ -107,6 +108,13 @@ vi.mock('./tool-catalog', () => ({
 
 vi.mock('./tool-retrieval', () => ({ shortlistTools: async () => ['adobe_list_segments'] }));
 
+// Planning-stage knowledge lookup: scripted excerpts, or none.
+let planningExcerpts: string | undefined;
+vi.mock('./planning-retrieval', () => ({
+  retrieveForPlanning: async (query: string) =>
+    planningExcerpts ? { tool: 'search_adobe_knowledge', query, context: planningExcerpts } : undefined,
+}));
+
 // Deployment memory: scripted facts; saved facts recorded.
 let memoryFacts: Array<{ key: string; value: string }> = [];
 const savedFacts: unknown[] = [];
@@ -124,6 +132,7 @@ beforeEach(() => {
   script = [];
   calls = [];
   executed = [];
+  planningExcerpts = undefined;
   delete process.env.TOOL_DRY_RUN;
   delete process.env.BUILD_POLICY;
   delete process.env.RUN_MAX_TOKENS;
@@ -450,6 +459,36 @@ describe('runAgent plan-first', () => {
     warn.mockRestore();
     expect(result.plan).toBeUndefined();
     expect(result.finalText).toBe('done anyway');
+  });
+});
+
+describe('runAgent knowledge retrieval', () => {
+  it('never offers the model a knowledge-search tool, directly or through call_tool', async () => {
+    script = [
+      { toolCall: { toolName: 'call_tool', input: { tool_name: 'search_adobe_knowledge', arguments: { query: 'merge policy' } } } },
+      { text: 'no search' },
+    ];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    expect((calls[0].tools ?? []).map((t) => t.name)).not.toContain('search_adobe_knowledge');
+    expect(result.steps[0].toolResults[0].error).toMatch(/not available on this run/);
+    expect(executed).toEqual([]);
+  });
+
+  it('hands the planning-stage excerpts to the planner and the executor', async () => {
+    planningExcerpts = 'KB excerpts: segments live in the Segmentation Service.';
+    script = [
+      { text: JSON.stringify({ goal: 'List segments', steps: [{ id: 1, description: 'List', tool: 'adobe_list_segments', expectedOutput: 'names', dependsOn: [] }] }) },
+      { text: 'done' },
+    ];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true });
+    expect(JSON.stringify(calls[0].prompt)).toContain('Segmentation Service');
+    expect(JSON.stringify(calls[1].prompt)).toContain('Segmentation Service');
+  });
+
+  it('leaves the request alone when planning found nothing', async () => {
+    script = [{ text: 'done' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    expect(JSON.stringify(calls[0].prompt.at(-1))).not.toContain('Knowledge-base excerpts');
   });
 });
 

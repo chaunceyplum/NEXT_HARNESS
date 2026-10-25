@@ -164,6 +164,15 @@ const RAG_TOOLS = new Set([
 ]);
 
 /**
+ * Whether `name` is a knowledge-search tool. These are never handed to the
+ * model: retrieval happens only at the planning stage (planning-retrieval.ts)
+ * and on tool errors (executeMcpToolWithRetry), not on the model's say-so.
+ */
+export function isKnowledgeTool(name: string): boolean {
+  return RAG_TOOLS.has(name);
+}
+
+/**
  * Permission/ownership errors are permanent for the credential this process
  * runs under — retrying, or consulting the knowledge base for "correct
  * usage," cannot change who owns a resource. Matched against the raw error
@@ -442,8 +451,17 @@ function withRagJudgment(
   const capped = JUDGEABLE_RAG_TOOLS.has(toolName)
     ? withRetrievalHint(toolName, query, capRagResult(result))
     : capRagResult(result);
-  if (!JUDGEABLE_RAG_TOOLS.has(toolName)) return capped;
-  if (!query || !shouldJudgeLiveResult(result)) return capped;
+  if (query) trackRagJudgment(toolName, query, result, sink);
+  return capped;
+}
+
+/**
+ * Score a sample of one judgeable knowledge search off the critical path and
+ * hand the verdict to `sink` (see shouldJudgeLiveResult). No-op for tools the
+ * judge doesn't cover.
+ */
+export function trackRagJudgment(toolName: string, query: string, result: unknown, sink?: RagJudgmentSink): void {
+  if (!JUDGEABLE_RAG_TOOLS.has(toolName) || !shouldJudgeLiveResult(result)) return;
 
   // Fire-and-forget: kick off the judge on the UNCAPPED result (it has its
   // own size cap) WITHOUT awaiting, so the tool call returns to the agent
@@ -459,7 +477,6 @@ function withRagJudgment(
     judgment ? { toolName, query, judgment } : undefined
   );
   sink?.track(judged);
-  return capped;
 }
 
 export interface RetryAttemptRecord {

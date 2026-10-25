@@ -35,7 +35,7 @@
 
 import { jsonSchema, streamText, stepCountIs, tool, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from './model-registry';
-import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, toolMatchesPlatforms, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
+import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, isKnowledgeTool, toolMatchesPlatforms, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
 import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
@@ -46,6 +46,7 @@ import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-st
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
 import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
+import { retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
 import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from './launch-validation';
 import { parseLaunchBrief, type LaunchRequirements } from './launch-brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from './model-router';
@@ -546,8 +547,9 @@ async function selectLiveTools(
   launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate }
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
-  // Knowledge tools are always included — they're grounding/search tools the
-  // agent relies on for every run regardless of which platforms are selected.
+  // Knowledge tools are always kept in the catalog, whatever platforms are
+  // selected, so planning and error grounding can reach them — but they're
+  // removed from what the model sees below (planning-retrieval.ts).
   const catalog = platformFilter && platformFilter.length > 0
     ? rawCatalog.filter((t) => toolMatchesPlatforms(t.name, ['Knowledge']) || toolMatchesPlatforms(t.name, platformFilter))
     : rawCatalog;
@@ -560,7 +562,7 @@ async function selectLiveTools(
   const alwaysOnNames = launch?.enabled
     ? [...ALWAYS_ON_TOOLS, ...launchAlwaysOnTools(launch.publishEnabled === true)]
     : ALWAYS_ON_TOOLS;
-  const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name));
+  const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name) && !isKnowledgeTool(name));
   const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
     shortlistTools(shortlistQuery, {
@@ -568,7 +570,7 @@ async function selectLiveTools(
       exclude: alwaysOn,
       // Rank only tools the platform filter kept, so filtered-out tools don't
       // use up shortlist slots and leave the run with fewer usable tools.
-      include: (name) => catalogByName.has(name),
+      include: (name) => catalogByName.has(name) && !isKnowledgeTool(name),
     })
   );
 
@@ -582,6 +584,11 @@ async function selectLiveTools(
       launchGate: launch?.gate,
     })
   );
+  // Built over the whole catalog so each tool's error grounding can still
+  // reach the knowledge base, then hidden so call_tool can't run them either.
+  for (const name of Object.keys(callable)) {
+    if (isKnowledgeTool(name)) delete callable[name];
+  }
 
   const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
   const tools: ToolSet = Object.fromEntries(
@@ -861,6 +868,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
   // sink — there's nothing to drain and no judgments to persist there.
   let ragJudgmentSink: RagJudgmentSink | undefined;
+  let planningRetrieval: PlanningRetrieval | undefined;
   // Phase 4: the validation gate for a Launch-mode run (launch-validation.ts).
   // It observes tool results to build property state and BLOCKS the library
   // handoff until the structural / reference / dry-run checks pass. Non-Launch
@@ -910,9 +918,26 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         })
       : Promise.resolve(null);
 
-    const [live, facts] = await Promise.all([liveFetch, memoryFetch]);
+    // Planning-stage retrieval (planning-retrieval.ts): the run's one
+    // up-front knowledge lookup, shared by the planner and the executor.
+    const groundingQuery = launchMode ? launchShortlistQuery(userInput, requirements) : userInput;
+    const groundingFetch = stage('planning knowledge lookup', () =>
+      getMcpToolCatalog().then((catalog) =>
+        retrieveForPlanning(groundingQuery, {
+          available: new Set(catalog.map((t) => t.name)),
+          sink: ragJudgmentSink,
+          abortSignal: opts.abortSignal,
+        })
+      )
+    ).catch((err) => {
+      console.warn('[agent] Planning knowledge lookup failed; running without it:', err instanceof Error ? err.message : err);
+      return undefined;
+    });
+
+    const [live, facts, grounding] = await Promise.all([liveFetch, memoryFetch, groundingFetch]);
     tools = live.tools;
     toolsConsidered = live.toolsConsidered;
+    planningRetrieval = grounding;
 
     // Deployment memory (memory-store.ts): stored facts lead the first message,
     // and remember_fact saves new ones (not in read-only runs).
@@ -938,7 +963,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       planTracker = new PlanTracker(seedLaunchPlan(requirements, publishEnabled), (p) => opts.onPlan?.(p));
     } else {
       try {
-        const plan = await stage(`planner call (${planModel})`, () => makePlan(userInput, Object.keys(tools), planModel));
+        const plan = await stage(`planner call (${planModel})`, () =>
+          makePlan(userInput, Object.keys(tools), planModel, planningRetrieval?.context)
+        );
         planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
       } catch (err) {
         console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
@@ -966,6 +993,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userMessage}`;
     }
   }
+
+  if (planningRetrieval) userMessage = `${planningRetrieval.context}\n\n${userMessage}`;
 
   // Phase 5: few-shot grounding. The agent's only knowledge base is the
   // MCP-owned search_adobe_knowledge, which this repo can't seed, so a small

@@ -4,9 +4,10 @@
  */
 
 /**
- * Cheap, read-only, grounding tools. Always available regardless of the
- * shortlist, so the model can look things up before acting even if
- * embedding search didn't happen to rank them highly for this query.
+ * Tools always available regardless of the shortlist, because the requests
+ * that need them don't reliably embed close enough to win a slot. No
+ * knowledge-search tool belongs here: the model never gets one — retrieval
+ * runs at planning (planning-retrieval.ts) and on tool errors only.
  *
  * Only list names that are actually present in the live MCP catalog —
  * ALWAYS_ON_TOOLS is filtered against it in agent.ts, so a stale name here
@@ -15,7 +16,6 @@
  * MCP server's tools/list, Aug 2026.
  */
 export const ALWAYS_ON_TOOLS = [
-  'search_adobe_knowledge',
   // Locally-defined (lib/llm/local-tools.ts), not MCP-sourced — the only
   // read access the agent has into a GitHub repo's actual contents.
   // Always-on rather than shortlisted so a request that doesn't obviously
@@ -133,7 +133,7 @@ export function systemPrompt(
   const envCtx = getEnvironmentContext();
 
   const lines = [
-    'You are an autonomous MarTech engineering assistant with direct tool access to Adobe Experience Platform (AEP schemas/datasets/segments, CJA, Reactor/Launch) and a solutions-architecture knowledge base. You do not have dedicated AJO (journey/offer) tools — search_adobe_knowledge covers AJO documentation, but there is no tool here that creates or manages an AJO journey.',
+    'You are an autonomous MarTech engineering assistant with direct tool access to Adobe Experience Platform (AEP schemas/datasets/segments, CJA, Reactor/Launch) and a solutions-architecture knowledge base. You do not have dedicated AJO (journey/offer) tools — the knowledge base covers AJO documentation, but there is no tool here that creates or manages an AJO journey.',
   ];
 
   // TASK 5: inject deployment-specific context so the agent doesn't spend
@@ -168,8 +168,8 @@ export function systemPrompt(
           '- When you confirm a stable identifier that later runs will need (which sandbox is production, a Launch property id, the repo tags live in, a merge policy id), save it with remember_fact. Only save identifiers you verified with a tool, never credentials, personal data or one-off results. If a fact from memory turns out to be wrong, correct it with remember_fact.',
         ]
       : []),
-    '- When it would help, ground yourself first with search_adobe_knowledge before taking action. When your answer relies on knowledge-base results, name the source titles you used. If a search result carries a _retrievalHint, follow it before answering.',
-    '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach, and do not run another knowledge-base search hoping a different query surfaces something new. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
+    '- You have no knowledge-search tool. Knowledge-base excerpts, when any were found, are provided with the request; a tool error may also carry knowledge-base findings in its retry history (raggedBefore). Ground your actions in those, and when your answer relies on them, name the source titles you used.',
+    '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
     // TASK 4: destructive-scope rule. The human confirmation itself is
     // enforced in code (agent.ts toolApproval) — this keeps the model from
     // proposing calls outside what was asked.
