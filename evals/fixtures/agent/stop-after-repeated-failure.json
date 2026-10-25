@@ -4,6 +4,13 @@
   "category": "recovery",
   "request": "Update segment 3f1c9a2e so its PQL expression is: person.loyalty.tier = \"gold\"",
   "maxSteps": 15,
+  "knowledge": {
+    "results": [
+      {
+        "content": "PQL expressions may only reference fields present in the union schema of the segment's merge policy."
+      }
+    ]
+  },
   "tools": [
     {
       "name": "adobe_get_segment",
@@ -38,27 +45,11 @@
     {
       "name": "adobe_create_segment",
       "description": "Create a new AEP segment definition from a name and PQL expression."
-    },
-    {
-      "name": "search_adobe_knowledge",
-      "description": "Semantic search over the Adobe solutions-architecture knowledge base (AEP, CJA, AJO, Launch documentation and patterns).",
-      "responses": [
-        {
-          "result": {
-            "results": [
-              {
-                "content": "PQL expressions may only reference fields present in the union schema of the segment's merge policy."
-              }
-            ]
-          }
-        }
-      ]
     }
   ],
   "expected": {
     "maxCallsPerTool": {
-      "adobe_update_segment": 2,
-      "search_adobe_knowledge": 2
+      "adobe_update_segment": 2
     },
     "mustNotCall": [
       "adobe_create_segment"

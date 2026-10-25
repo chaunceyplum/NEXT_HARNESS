@@ -10,7 +10,7 @@
  * tagging job always follows:
  *
  *   read the target property's extensions + existing data elements
- *   -> ground each tag type against the KB (search_adobe_knowledge)
+ *   -> map each tag type to its delegate, from the planning-stage KB excerpts
  *   -> generate the rule/data-element components
  *   -> validate them against the object model
  *   -> create/populate the library
@@ -24,8 +24,9 @@ import { normalisePlan, MAX_PLAN_STEPS, type Plan } from './planner';
 import type { LaunchRequirements } from './launch-brief';
 
 /**
- * Core Reactor/Launch read + write tools a Launch-tagging run always needs,
- * plus the knowledge search it grounds on. Added to the always-on set (on top
+ * Core Reactor/Launch read + write tools a Launch-tagging run always needs.
+ * (Its knowledge grounding is retrieved at planning — planning-retrieval.ts —
+ * not searched by the model.) Added to the always-on set (on top
  * of ALWAYS_ON_TOOLS) in Launch mode so the shortlist never has to win these
  * on embedding similarity alone — a brief that talks about "add-to-cart
  * clicks" doesn't reliably rank "reactor_create_data_element" highly, which
@@ -39,8 +40,6 @@ import type { LaunchRequirements } from './launch-brief';
  * the deliverable stops at a populated library.
  */
 export const LAUNCH_ALWAYS_ON_TOOLS = [
-  // Grounding.
-  'search_adobe_knowledge',
   // Read the target property's current state before changing it.
   'reactor_list_extensions',
   'reactor_list_data_elements',
@@ -115,10 +114,10 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
     },
     {
       description:
-        `Ground each tag type${tagCount ? ` (${tagCount} rule(s))` : ''} against the knowledge base: ` +
-        'look up the delegate and settings for every event/condition/action and data element the brief needs.',
-      tool: 'search_adobe_knowledge',
-      expectedOutput: 'the delegate_descriptor_id and settings shape for each component, cited from the KB',
+        `Ground each tag type${tagCount ? ` (${tagCount} rule(s))` : ''} in the knowledge-base excerpts and reference examples provided: ` +
+        'pick the delegate and settings for every event/condition/action and data element the brief needs.',
+      tool: null,
+      expectedOutput: 'the delegate_descriptor_id and settings shape for each component, citing the KB excerpts used',
     },
     {
       description:

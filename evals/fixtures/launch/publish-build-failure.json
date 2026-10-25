@@ -9,6 +9,14 @@
     "environmentName": "Staging",
     "propertyId": "PR-ACME"
   },
+  "knowledge": {
+    "results": [
+      {
+        "title": "Launch click event + custom code action",
+        "content": "A click-tracking rule uses the core::events::click event and a core::actions::custom-code action whose settings.source holds the JavaScript."
+      }
+    ]
+  },
   "tools": [
     {
       "name": "reactor_list_extensions",
@@ -76,22 +84,6 @@
                 "name": "Page Name",
                 "type": "core::dataElements::javascript-variable",
                 "enabled": true
-              }
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "search_adobe_knowledge",
-      "description": "Semantic search over the Adobe solutions-architecture knowledge base.",
-      "responses": [
-        {
-          "result": {
-            "results": [
-              {
-                "title": "Launch click event + custom code action",
-                "content": "A click-tracking rule uses the core::events::click event and a core::actions::custom-code action whose settings.source holds the JavaScript."
               }
             ]
           }

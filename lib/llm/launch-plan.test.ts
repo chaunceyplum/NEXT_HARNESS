@@ -48,7 +48,7 @@ describe('seedLaunchPlan', () => {
     expect(tools).toEqual([
       'reactor_list_extensions',
       'reactor_list_data_elements',
-      'search_adobe_knowledge',
+      null, // ground in the planning-stage KB excerpts
       null, // generate components
       null, // validate
       'reactor_create_library',
@@ -113,8 +113,8 @@ describe('launchShortlistQuery', () => {
 });
 
 describe('LAUNCH_ALWAYS_ON_TOOLS', () => {
-  it('includes knowledge grounding plus Reactor read and write tools', () => {
-    expect(LAUNCH_ALWAYS_ON_TOOLS).toContain('search_adobe_knowledge');
+  it('includes Reactor read and write tools but no knowledge search', () => {
+    expect(LAUNCH_ALWAYS_ON_TOOLS).not.toContain('search_adobe_knowledge');
     expect(LAUNCH_ALWAYS_ON_TOOLS).toContain('reactor_list_extensions');
     expect(LAUNCH_ALWAYS_ON_TOOLS).toContain('reactor_list_data_elements');
     expect(LAUNCH_ALWAYS_ON_TOOLS).toContain('reactor_create_library');
