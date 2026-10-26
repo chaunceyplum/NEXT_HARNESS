@@ -24,16 +24,16 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [ ] 1.5 Run the full suite and `npm run eval:agent` / `npm run eval:launch` with no test, fixture or baseline changes
   - _Requirements: 1.5_
 
-- [ ] 2. Planner support for parallel steps
-- [ ] 2.1 Keep `dependsOn` in `PlanTracker.revise` and add optional `dependsOn` to the `revise_plan` schema (`lib/llm/planner.ts`)
+- [x] 2. Planner support for parallel steps
+- [x] 2.1 Keep `dependsOn` in `PlanTracker.revise` and add optional `dependsOn` to the `revise_plan` schema (`lib/llm/planner.ts`)
   - Remap ids to the renumbered steps; drop references to removed steps
   - Unit tests in `lib/llm/planner.test.ts`
   - _Requirements: 6.4_
-- [ ] 2.2 Reject cycles and unknown ids in `normalisePlan`
+- [x] 2.2 Reject cycles and unknown ids in `normalisePlan`
   - _Requirements: 3.6_
-- [ ] 2.3 Add `readySteps(plan)` and `parallelWidth(plan)` with tests
+- [x] 2.3 Add `readySteps(plan)` and `parallelWidth(plan)` with tests
   - _Requirements: 2.5, 3.3_
-- [ ] 2.4 Set `dependsOn` in the Launch template (`lib/llm/launch-plan.ts`): read state → data elements → rules → validate → library (→ publish)
+- [x] 2.4 Set `dependsOn` in the Launch template (`lib/llm/launch-plan.ts`): read state → data elements → rules → validate → library (→ publish)
   - Update `lib/llm/launch-plan.test.ts`
   - _Requirements: 9.2_
 

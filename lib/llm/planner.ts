@@ -73,21 +73,101 @@ export async function makePlan(request: string, toolNames: string[], modelKey: s
   return normalisePlan(object, 1);
 }
 
-/** Renumber from 1, drop dangling dependencies, and start every step pending. */
+/**
+ * Renumber from 1 and start every step pending. A dependency on a step that
+ * is dropped by the MAX_PLAN_STEPS cap is removed; a dependency on a step id
+ * the plan never declared, or a set of dependencies that forms a cycle, is a
+ * malformed plan and throws. The orchestration caller catches the throw and
+ * falls back to running the plan single-agent (Req 3.6).
+ */
 export function normalisePlan(raw: z.infer<typeof planSchema>, version: number): Plan {
-  const idMap = new Map(raw.steps.map((s, i) => [s.id, i + 1]));
-  return {
+  const steps = raw.steps.slice(0, MAX_PLAN_STEPS);
+  // Original id -> new (renumbered-from-1) id, for the steps that survive the cap.
+  const idMap = new Map(steps.map((s, i) => [s.id, i + 1]));
+  const plan: Plan = {
     goal: raw.goal,
     version,
-    steps: raw.steps.slice(0, MAX_PLAN_STEPS).map((s, i) => ({
+    steps: steps.map((s, i) => ({
       id: i + 1,
       description: s.description,
       tool: s.tool,
       expectedOutput: s.expectedOutput,
-      dependsOn: s.dependsOn.map((d) => idMap.get(d)).filter((d): d is number => d !== undefined && d < i + 1),
+      dependsOn: [
+        ...new Set(
+          s.dependsOn.map((d) => {
+            const mapped = idMap.get(d);
+            // The id was declared but trimmed by the cap: drop the dependency.
+            if (mapped === undefined && raw.steps.some((o) => o.id === d)) return undefined;
+            // The id was never declared at all: the plan is malformed.
+            if (mapped === undefined) throw new Error(`Plan step ${i + 1} depends on unknown step ${d}.`);
+            if (mapped === i + 1) throw new Error(`Plan step ${i + 1} depends on itself.`);
+            return mapped;
+          })
+        ),
+      ].filter((d): d is number => d !== undefined),
       status: 'pending' as const,
     })),
   };
+  assertAcyclic(plan.steps);
+  return plan;
+}
+
+/** Throw if the steps' dependsOn edges contain a cycle. */
+function assertAcyclic(steps: PlanStep[]): void {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const state = new Map<number, 'visiting' | 'done'>();
+  const visit = (id: number): void => {
+    const current = state.get(id);
+    if (current === 'done') return;
+    if (current === 'visiting') throw new Error(`Plan has a dependency cycle involving step ${id}.`);
+    state.set(id, 'visiting');
+    for (const dep of byId.get(id)?.dependsOn ?? []) visit(dep);
+    state.set(id, 'done');
+  };
+  for (const step of steps) visit(step.id);
+}
+
+/** Steps that are pending and whose dependencies are all done — ready to run now (Req 2.5, 3.3). */
+export function readySteps(plan: Plan): PlanStep[] {
+  const doneIds = new Set(plan.steps.filter((s) => s.status === 'done').map((s) => s.id));
+  return plan.steps.filter((s) => s.status === 'pending' && s.dependsOn.every((d) => doneIds.has(d)));
+}
+
+/**
+ * The largest number of steps that could ever run at the same time: the size
+ * of the biggest antichain in the dependency DAG (steps with no path between
+ * them). `shouldOrchestrate` uses it to decide whether orchestration can help.
+ */
+export function parallelWidth(plan: Plan): number {
+  const byId = new Map(plan.steps.map((s) => [s.id, s]));
+  // reachable(a) = every step reachable from a by following dependsOn edges,
+  // memoised. If b is reachable from a or a from b, they are ordered and can
+  // never run together.
+  const cache = new Map<number, Set<number>>();
+  const reachable = (id: number): Set<number> => {
+    const cached = cache.get(id);
+    if (cached) return cached;
+    const out = new Set<number>();
+    cache.set(id, out); // guard against cycles (normalisePlan rejects them anyway)
+    for (const dep of byId.get(id)?.dependsOn ?? []) {
+      out.add(dep);
+      for (const r of reachable(dep)) out.add(r);
+    }
+    return out;
+  };
+  const ordered = (a: number, b: number): boolean => reachable(a).has(b) || reachable(b).has(a);
+  // Greedy max antichain is exponential in general; plans are capped at
+  // MAX_PLAN_STEPS, so a simple O(2^n) scan over subsets is fine and exact.
+  const ids = plan.steps.map((s) => s.id);
+  let best = 0;
+  for (let mask = 1; mask < 1 << ids.length; mask++) {
+    const subset: number[] = [];
+    for (let i = 0; i < ids.length; i++) if (mask & (1 << i)) subset.push(ids[i]);
+    if (subset.length <= best) continue;
+    const independent = subset.every((a, i) => subset.every((b, j) => i >= j || !ordered(a, b)));
+    if (independent) best = subset.length;
+  }
+  return best;
 }
 
 export function formatPlan(plan: Plan): string {
@@ -117,17 +197,50 @@ export class PlanTracker {
     return { ok: true, message: `Step ${stepId} is now ${status}.` };
   }
 
-  /** Replace every step that isn't done; completed steps are kept as history. */
-  revise(reason: string, remaining: Array<{ description: string; tool: string | null; expectedOutput: string }>): { ok: boolean; message: string } {
+  /**
+   * Replace every step that isn't done; completed steps are kept as history.
+   *
+   * The revised plan is renumbered from 1: the kept `done` steps keep ids
+   * `1..kept.length`, and the new steps take the ids after them in order.
+   * Each new step may declare the final renumbered ids it depends on. A
+   * dependency on a kept done step or an earlier new step is kept; a
+   * dependency on a step that no longer exists, on itself, or forward on a
+   * later new step is dropped, so the plan stays acyclic (Req 6.4).
+   */
+  revise(
+    reason: string,
+    remaining: Array<{ description: string; tool: string | null; expectedOutput: string; dependsOn?: number[] }>
+  ): { ok: boolean; message: string } {
     const kept = this.plan.steps.filter((s) => s.status === 'done');
     const room = MAX_PLAN_STEPS - kept.length;
     if (remaining.length > room) return { ok: false, message: `Too many steps: at most ${room} more (the plan is capped at ${MAX_PLAN_STEPS}).` };
+    const total = kept.length + remaining.length;
     this.plan = {
       goal: this.plan.goal,
       version: this.plan.version + 1,
       steps: [
         ...kept,
-        ...remaining.map((s, i) => ({ id: kept.length + i + 1, ...s, dependsOn: [], status: 'pending' as const, note: i === 0 ? `revised: ${reason.slice(0, 200)}` : undefined })),
+        ...remaining.map((s, i) => {
+          const selfId = kept.length + i + 1;
+          const dependsOn = [
+            ...new Set(
+              (s.dependsOn ?? []).filter(
+                // Keep references to an existing earlier step; drop unknown
+                // ids, self and forward references.
+                (d) => d >= 1 && d <= total && d < selfId
+              )
+            ),
+          ];
+          return {
+            id: selfId,
+            description: s.description,
+            tool: s.tool,
+            expectedOutput: s.expectedOutput,
+            dependsOn,
+            status: 'pending' as const,
+            note: i === 0 ? `revised: ${reason.slice(0, 200)}` : undefined,
+          };
+        }),
       ],
     };
     this.onChange?.(this.plan);
@@ -156,7 +269,10 @@ export function buildPlanTools(tracker: PlanTracker): ToolSet {
     revise_plan: tool({
       description:
         'Replace the remaining (not done) steps when a step failed or its result changes what should happen next. Keep it minimal; each step names its tool and expected output.',
-      inputSchema: jsonSchema<{ reason: string; steps: Array<{ description: string; tool: string | null; expectedOutput: string }> }>({
+      inputSchema: jsonSchema<{
+        reason: string;
+        steps: Array<{ description: string; tool: string | null; expectedOutput: string; dependsOn?: number[] }>;
+      }>({
         type: 'object',
         properties: {
           reason: { type: 'string' },
@@ -168,6 +284,12 @@ export function buildPlanTools(tracker: PlanTracker): ToolSet {
                 description: { type: 'string' },
                 tool: { type: ['string', 'null'] },
                 expectedOutput: { type: 'string' },
+                dependsOn: {
+                  type: 'array',
+                  items: { type: 'integer' },
+                  description:
+                    'Ids of earlier steps whose results this step needs, numbered as in the revised plan: kept done steps first, then these new steps in order.',
+                },
               },
               required: ['description', 'tool', 'expectedOutput'],
             },
@@ -177,6 +299,7 @@ export function buildPlanTools(tracker: PlanTracker): ToolSet {
         additionalProperties: false,
       }),
       execute: async ({ reason, steps }) => tracker.revise(reason, steps),
+      // steps[].dependsOn is optional; revise() remaps it to the renumbered plan.
     }),
   };
 }

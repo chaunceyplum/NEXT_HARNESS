@@ -6,7 +6,7 @@ import {
   launchShortlistQuery,
   seedLaunchPlan,
 } from './launch-plan';
-import { MAX_PLAN_STEPS } from './planner';
+import { MAX_PLAN_STEPS, parallelWidth } from './planner';
 import type { LaunchRequirements } from './launch-brief';
 
 const requirements: LaunchRequirements = {
@@ -76,9 +76,22 @@ describe('seedLaunchPlan', () => {
     expect(JSON.stringify(plan)).toContain('the target property');
   });
 
-  it('chains each step after the previous one', () => {
+  it('encodes the backbone DAG: the two reads are independent, the rest stay ordered (Req 9.2)', () => {
     const plan = seedLaunchPlan(requirements);
-    expect(plan.steps.map((s) => s.dependsOn)).toEqual([[], [1], [2], [3], [4], [5]]);
+    // 1 read extensions, 2 read data elements (independent) -> 3 ground (both
+    // reads) -> 4 generate -> 5 validate (reads + generate) -> 6 populate.
+    expect(plan.steps.map((s) => s.dependsOn)).toEqual([[], [], [1, 2], [3], [1, 2, 4], [5]]);
+  });
+
+  it('lets the two property reads run in parallel (parallelWidth >= 2) so orchestration can help', () => {
+    expect(parallelWidth(seedLaunchPlan(requirements))).toBe(2);
+  });
+
+  it('keeps the publish backbone ordered after the populated library', () => {
+    const plan = seedLaunchPlan(requirements, true);
+    // 7 build depends on 6 (library); 8 transition depends on 7 (build).
+    expect(plan.steps[6].dependsOn).toEqual([6]);
+    expect(plan.steps[7].dependsOn).toEqual([7]);
   });
 });
 

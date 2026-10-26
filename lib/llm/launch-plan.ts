@@ -91,6 +91,14 @@ interface SeedStep {
   description: string;
   tool: string | null;
   expectedOutput: string;
+  /**
+   * 1-based positions, within this seed list, of the earlier steps this step
+   * needs. Encodes the real dependency DAG (Req 9.2) rather than a strict
+   * chain: the two property reads are independent, so a coordinator can run
+   * them in parallel, while grounding, generation, validation and library
+   * population stay ordered after them.
+   */
+  dependsOn: number[];
 }
 
 function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): SeedStep[] {
@@ -101,16 +109,23 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
   const tagCount = requirements?.rules.length;
   const dataElementCount = requirements?.dataElements.length;
 
+  // Seed ids are 1-based positions in this list. The two reads (1, 2) have no
+  // dependencies and no path between them, so they can run in parallel;
+  // grounding (3) needs both reads; generation (4) needs grounding; validation
+  // (5) needs the generated components and the reads it validates against;
+  // populating the library (6) needs the validated set.
   const base: SeedStep[] = [
     {
       description: `Read ${propertyRef}'s installed extensions.`,
       tool: 'reactor_list_extensions',
       expectedOutput: 'the installed extensions and their delegate_descriptor_ids',
+      dependsOn: [],
     },
     {
       description: `Read ${propertyRef}'s existing data elements.`,
       tool: 'reactor_list_data_elements',
       expectedOutput: 'the data elements already present (so none are recreated)',
+      dependsOn: [],
     },
     {
       description:
@@ -118,6 +133,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
         'pick the delegate and settings for every event/condition/action and data element the brief needs.',
       tool: null,
       expectedOutput: 'the delegate_descriptor_id and settings shape for each component, citing the KB excerpts used',
+      dependsOn: [1, 2],
     },
     {
       description:
@@ -125,6 +141,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
         'from the grounded delegates and the brief requirements.',
       tool: null,
       expectedOutput: 'each rule and data element expressed as delegate_descriptor_id + settings',
+      dependsOn: [3],
     },
     {
       description:
@@ -132,6 +149,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
         'installed extension, and every referenced data element exists or is created in this library.',
       tool: null,
       expectedOutput: 'a validated set with no missing extensions or data-element references',
+      dependsOn: [1, 2, 4],
     },
     {
       description: `Create/populate ${libraryRef} with the validated rules and data elements.`,
@@ -139,6 +157,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
       expectedOutput: publishEnabled
         ? 'the populated library id, ready to build and publish to dev/staging'
         : 'the populated library id (deliverable boundary — do not publish)',
+      dependsOn: [5],
     },
   ];
 
@@ -153,6 +172,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
       description: `Build ${libraryRef} and poll the build until its status is "succeeded" (fix components and rebuild if it fails).`,
       tool: 'reactor_build_library',
       expectedOutput: 'a build whose status reaches "succeeded" (no transition on a failed build)',
+      dependsOn: [6], // the populated library
     },
     {
       description:
@@ -160,6 +180,7 @@ function seedSteps(requirements?: LaunchRequirements, publishEnabled = false): S
         'development target is already live after the build. Never "approve" or "publish" — that is production.',
       tool: 'reactor_transition_library',
       expectedOutput: 'the library published to the dev/staging environment',
+      dependsOn: [7], // the successful build
     }
   );
   return base;
@@ -195,7 +216,7 @@ export function seedLaunchPlan(requirements?: LaunchRequirements, publishEnabled
         description: s.description.slice(0, 200),
         tool: s.tool,
         expectedOutput: s.expectedOutput.slice(0, 200),
-        dependsOn: i === 0 ? [] : [i], // each step builds on the previous one
+        dependsOn: s.dependsOn, // the backbone's real DAG (Req 9.2)
       })),
     },
     1
