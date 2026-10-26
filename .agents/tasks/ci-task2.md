@@ -43,14 +43,15 @@ DAG, parallel reads, publish ordering).
 
 ## CI gate — all pass
 
-Re-verified on the committed Task 2 state (HEAD `feat/orchestrator-workers`):
+Re-verified on the committed Task 2 state (HEAD `feat/orchestrator-workers`),
+run fresh inside the worktree:
 
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit -p .` | PASS (exit 0) |
 | `npm run lint` | PASS (exit 0, no warnings/errors) |
 | `npm test` | PASS — 45 files, **495 passed** |
-| `npm run build` | PASS — Next.js compiled, TypeScript checked, all routes built |
+| `npm run build` | PASS — Next.js compiled successfully, TypeScript checked, 15 static pages, all 23 routes built |
 
 ## How to reproduce
 
