@@ -15,6 +15,10 @@ import { generateObject, jsonSchema, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { resolveModel } from './model-registry';
 
+// NOTE: parallelWidth() does an exact O(2^n) antichain scan over the plan's
+// steps, which is only affordable because this cap is small (8 → ≤256 subsets).
+// If this cap ever rises, parallelWidth becomes a hot spot and needs a
+// polynomial max-antichain algorithm instead.
 export const MAX_PLAN_STEPS = 8;
 
 export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
