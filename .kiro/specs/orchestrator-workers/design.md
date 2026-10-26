@@ -324,7 +324,7 @@ export interface SharedRunState {
   `worker_start`/`worker_done`; tag `step`, `approval_request`, `restart` and
   audit events with `workerId`; on a worker `restart`, drop only that
   worker's steps from the checkpoint; checkpoint after worker start/end.
-- `resumeContextFrom` (`lib/build-run.ts:293`): for a version-2 record with
+- `resumeContextFrom` (`lib/build-run.ts:297`): for a version-2 record with
   `orchestrated: true`, return the plan and `WorkerResult`s so the resumed run
   starts the coordinator with `done` steps kept.
 - `lib/execution-store.ts`: `CHECKPOINT_SCHEMA_VERSION = 2`. Workers are
