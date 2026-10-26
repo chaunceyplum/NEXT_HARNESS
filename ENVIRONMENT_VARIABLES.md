@@ -447,7 +447,16 @@ If planning fails, the run continues without a plan.
     issues, then re-check. Hard cap of one revision. A revision that still
     fails is returned flagged (up to +3 calls).
   - `CRITIC_MODE=off`
-  - `CRITIC_MODEL`: model for the critic and the revision (default: the run's model)
+  - `CRITIC_MODEL`: model for the critic and the revision (default: the
+    strongest tier on the run model's provider, e.g. `anthropic:opus-5-5`
+    for a Sonnet run, so the critic isn't grading its own answer). A critic
+    that is the answering model is marked "checked by the model that wrote
+    it" under the answer.
+  - While the critic runs, the streamed answer is shown as a draft being
+    checked; a revised answer replaces it, with the original under "Show
+    the original answer".
+  - `npm run eval:critic` measures the critic's catch rate and false-flag
+    rate on labelled answers. Run it before switching to `revise`.
 - **Retrieval hints:** a knowledge search that returns nothing, or results
   sharing almost none of the query's key terms, gets a `_retrievalHint`
   telling the model to rewrite the query and search once more (or say

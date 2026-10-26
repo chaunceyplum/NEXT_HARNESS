@@ -36,6 +36,8 @@ interface RunState {
   finalText: string;
   /** TASK 1: assistant text accumulated from text_delta events while the run is live. */
   streamingText: string;
+  /** The streamed answer is a draft being checked against the tool results; 'done' brings the checked text. */
+  checking?: boolean;
   finishReason: string;
   usage: TokenUsage;
   stopReason?: string;
@@ -209,6 +211,8 @@ export default function Home() {
         // A fallback model is re-running from scratch — the steps so far
         // and any streamed text belong to the abandoned attempt.
         setRunState((prev) => (prev ? { ...prev, steps: [], streamingText: '' } : prev));
+      } else if (event.type === 'checking') {
+        setRunState((prev) => (prev ? { ...prev, checking: true } : prev));
       } else if (event.type === 'done') {
         setRunState((prev) =>
           prev
@@ -217,6 +221,7 @@ export default function Home() {
                 toolsConsidered: event.toolsConsidered,
                 finalText: event.finalText,
                 streamingText: '',
+                checking: false,
                 finishReason: event.finishReason,
                 usage: event.usage,
                 stopReason: event.stopReason,
@@ -564,6 +569,7 @@ export default function Home() {
               budgetUsage={runState.done ? runState.budgetUsage : undefined}
               versions={runState.done ? runState.versions : undefined}
               critique={runState.done ? runState.critique : undefined}
+              checking={!runState.done && runState.checking}
             />
           </div>
         )}
