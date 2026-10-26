@@ -44,7 +44,8 @@ import { getModelRegistry } from '@/lib/llm/model-registry';
 import { checkInput } from '@/lib/llm/guardrails';
 import { PLATFORM_GROUPS } from '@/lib/llm/tool-catalog';
 import { runsBlockedReason } from '@/lib/kill-switch';
-import { streamJob } from '@/lib/run-jobs';
+import { maxActiveRuns } from '@/lib/llm/orchestration-config';
+import { activeJobCount, streamJob } from '@/lib/run-jobs';
 import { startBuildRun } from '@/lib/build-run';
 import { ApiError, BuildRequest } from '@/lib/types';
 
@@ -279,6 +280,17 @@ export async function POST(request: Request): Promise<Response> {
   const blocked = runsBlockedReason();
   if (blocked) {
     return Response.json({ error: blocked, code: 'KILL_SWITCH' } as ApiError, { status: 503 });
+  }
+
+  // Concurrency cap (Requirement 13.3): refuse new runs once this instance is
+  // already carrying MAX_ACTIVE_RUNS (default 6). With orchestration on, each
+  // run can fan out into several worker loops (bounded separately by
+  // MAX_AGENT_LOOPS), so capping runs keeps one instance from being swamped.
+  if (activeJobCount() >= maxActiveRuns()) {
+    return Response.json(
+      { error: 'Too many runs in progress. Try again shortly.', code: 'TOO_MANY_RUNS' } as ApiError,
+      { status: 429 }
+    );
   }
 
   const validation = validateRequest(body);

@@ -890,6 +890,28 @@ comparable.
 | `TRACE_CAPTURE_CONTENT` | `false` | `true` includes (truncated, 2 000 chars) tool arguments/results and step text in spans. Off by default so payloads/PII don't leave in traces. |
 | `GIT_SHA` / `APP_VERSION` | package version, else `dev` | The `app` version fingerprint; set one in your deploy (a commit SHA or release tag). |
 
+## Orchestrator-worker mode (`lib/llm/orchestration-config.ts`, `lib/llm/agent-slots.ts`)
+
+Off by default — every run is a single agent loop, exactly as before. When
+`ORCHESTRATION` is on, a deterministic code coordinator runs independent plan
+steps (those whose dependencies are `done`) as concurrent worker agents, then
+makes one synthesis call for the final answer. Everything runs in the same
+single Node process; no new infrastructure. Each reader below falls back to
+its default when the variable is unset or malformed, so a bad value behaves
+as if unset rather than failing a run.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ORCHESTRATION` | `off` | `off` disables orchestration (the request's `orchestrate` option is ignored). `on` uses the coordinator when a request sets `orchestrate: true` and the run has a plan with parallel work. `always` uses it for any plan with parallel work unless the request sets `orchestrate: false`. |
+| `MAX_WORKERS` | `3` | Concurrent workers per run. A request's `maxWorkers` can lower this, never raise it. |
+| `WORKER_MAX_STEPS` | `6` | Tool-call step cap for each worker's loop. |
+| `WORKER_BUDGET_SHARE` | `0.5` | The most of the run ledger's remaining tokens and cost one worker may be given when it starts. Clamped to `(0, 1]`. |
+| `MAX_REPLANS` | `2` | Replanning calls allowed per run after a step fails. At the cap, remaining steps are skipped and synthesis reports them. Floor is `0`. |
+| `WORKER_MODEL` | run's model | Optional registry key the workers run on (e.g. a cheaper tier). The coordinator's synthesis always uses the run's model. |
+| `LAUNCH_PARALLEL_WRITES` | `false` | `false` runs write/destructive workers in a Launch run one at a time (parallel reactor creates are not assumed safe). `true` allows them to run concurrently — only once verified for your property. |
+| `MAX_AGENT_LOOPS` | `12` | Agent loops allowed to run at once across the whole process, counting workers and single-agent runs. Extra loops queue FIFO for a slot; minimum `1`. |
+| `MAX_ACTIVE_RUNS` | `6` | Active runs at which `POST /api/build` rejects a new run with HTTP `429` and code `TOO_MANY_RUNS`. |
+
 ## Eval Variables
 
 Only read by `npm run eval:*` (see `evals/README.md`), never by the app.

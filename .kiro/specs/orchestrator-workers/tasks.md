@@ -37,15 +37,15 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - Update `lib/llm/launch-plan.test.ts`
   - _Requirements: 9.2_
 
-- [ ] 3. Concurrency limits and configuration
-- [ ] 3.1 Add `lib/llm/agent-slots.ts` (FIFO semaphore on `globalThis`, `MAX_AGENT_LOOPS`) with `agent-slots.test.ts`
+- [x] 3. Concurrency limits and configuration
+- [x] 3.1 Add `lib/llm/agent-slots.ts` (FIFO semaphore on `globalThis`, `MAX_AGENT_LOOPS`) with `agent-slots.test.ts`
   - Release on success, error and abort; abort while queued removes the waiter
   - _Requirements: 13.1, 13.2_
-- [ ] 3.2 Acquire a slot in `executeLoop` before the first model call; release in `finally`
+- [x] 3.2 Acquire a slot in `executeLoop` before the first model call; release in `finally`
   - _Requirements: 13.1_
-- [ ] 3.3 Return 429 with code `TOO_MANY_RUNS` from `POST /api/build` when `activeJobCount() >= MAX_ACTIVE_RUNS`; test in `app/api/build/route.test.ts`
+- [x] 3.3 Return 429 with code `TOO_MANY_RUNS` from `POST /api/build` when `activeJobCount() >= MAX_ACTIVE_RUNS`; test in `app/api/build/route.test.ts`
   - _Requirements: 13.3_
-- [ ] 3.4 Add config readers for `ORCHESTRATION`, `MAX_WORKERS`, `WORKER_MAX_STEPS`, `WORKER_BUDGET_SHARE`, `MAX_REPLANS`, `WORKER_MODEL`, `LAUNCH_PARALLEL_WRITES`; document all variables in `.env.local.example` and `ENVIRONMENT_VARIABLES.md`
+- [x] 3.4 Add config readers for `ORCHESTRATION`, `MAX_WORKERS`, `WORKER_MAX_STEPS`, `WORKER_BUDGET_SHARE`, `MAX_REPLANS`, `WORKER_MODEL`, `LAUNCH_PARALLEL_WRITES`; document all variables in `.env.local.example` and `ENVIRONMENT_VARIABLES.md`
   - _Requirements: 2.1, 3.1, 4.1, 4.8, 6.1, 8.2_
 
 - [ ] 4. Shared run budget

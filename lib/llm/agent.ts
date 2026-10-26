@@ -70,6 +70,7 @@ import {
   type RunBudgetLimits,
 } from './run-budget';
 import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
+import { acquireLoopSlot } from './agent-slots';
 import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../tracing';
 import { promptVersion, toolsetVersion, appVersion } from '../version';
 
@@ -1327,74 +1328,84 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
   const tried = new Set<string>();
   let result: Awaited<ReturnType<typeof callModel>> | undefined;
 
-  for (;;) {
-    tried.add(resolvedModelKey);
-    try {
-      result = await callModel(resolvedModelKey);
-      modelHealth.recordSuccess(resolvedModelKey);
-      break;
-    } catch (err) {
-      if (abortSignal?.aborted) {
-        finishTrace({ error: 'aborted', attributes: { 'harness.aborted': true } });
-        throw err;
+  // Concurrency cap (Requirement 13.1, 13.2): take one of the process-wide
+  // agent-loop slots before the first model call and release it in `finally`,
+  // whatever ends the loop — success, a thrown provider failure, a side-effect
+  // refusal or an abort. A worker that can't get a slot queues FIFO here; an
+  // abort while queued rejects before any model call runs.
+  const releaseSlot = await acquireLoopSlot(abortSignal);
+  try {
+    for (;;) {
+      tried.add(resolvedModelKey);
+      try {
+        result = await callModel(resolvedModelKey);
+        modelHealth.recordSuccess(resolvedModelKey);
+        break;
+      } catch (err) {
+        if (abortSignal?.aborted) {
+          finishTrace({ error: 'aborted', attributes: { 'harness.aborted': true } });
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        const failureKind = classifyProviderFailure(message);
+        if (failureKind) modelHealth.recordFailure(resolvedModelKey);
+        const fallback =
+          !isPinned && failureKind ? modelHealth.pickFallback(resolvedModelKey, registry, tried) : null;
+        if (!fallback) {
+          finishTrace({ error: message });
+          throw err;
+        }
+        // A fallback restarts the whole run. If this attempt already ran a
+        // write/destructive tool, the new model would redo it — fail instead.
+        if (attemptHadSideEffects) {
+          const sideEffectErr =
+            `${message}\n(Not falling back to "${fallback}": the failed attempt on "${resolvedModelKey}" ` +
+            `already executed write/destructive tool calls, which a restarted run would repeat.)`;
+          finishTrace({ error: sideEffectErr });
+          throw new Error(sideEffectErr);
+        }
+        console.warn(
+          `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
+            `falling back to same-tier "${fallback}".`
+        );
+        ctx.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
+        resolvedModelKey = fallback;
       }
-      const message = err instanceof Error ? err.message : String(err);
-      const failureKind = classifyProviderFailure(message);
-      if (failureKind) modelHealth.recordFailure(resolvedModelKey);
-      const fallback =
-        !isPinned && failureKind ? modelHealth.pickFallback(resolvedModelKey, registry, tried) : null;
-      if (!fallback) {
-        finishTrace({ error: message });
-        throw err;
-      }
-      // A fallback restarts the whole run. If this attempt already ran a
-      // write/destructive tool, the new model would redo it — fail instead.
-      if (attemptHadSideEffects) {
-        const sideEffectErr =
-          `${message}\n(Not falling back to "${fallback}": the failed attempt on "${resolvedModelKey}" ` +
-          `already executed write/destructive tool calls, which a restarted run would repeat.)`;
-        finishTrace({ error: sideEffectErr });
-        throw new Error(sideEffectErr);
-      }
-      console.warn(
-        `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
-          `falling back to same-tier "${fallback}".`
-      );
-      ctx.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
-      resolvedModelKey = fallback;
     }
+
+    if (!result) throw new Error('unreachable: chat model call produced no result');
+
+    const steps = result.steps.map((step, i) => toStepTrace(step, i));
+
+    const budgetUsage = budget.usage();
+    // Item #8: finish the run trace with the run's totals (best-effort).
+    finishTrace({
+      attributes: {
+        'gen_ai.response.finish_reasons': result.finishReason,
+        'harness.usage.total_tokens': budgetUsage.tokens,
+        'harness.duration_ms': budgetUsage.durationMs,
+        ...(budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': budgetUsage.costUsd } : {}),
+        ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
+      },
+    });
+
+    return {
+      text: result.text,
+      steps,
+      finishReason: result.finishReason,
+      modelKey: resolvedModelKey,
+      ...(stopReason ? { stopReason } : {}),
+      budgetUsage,
+      usage: {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        totalTokens: result.usage.totalTokens,
+      },
+      hadSideEffects: attemptHadSideEffects,
+    };
+  } finally {
+    releaseSlot();
   }
-
-  if (!result) throw new Error('unreachable: chat model call produced no result');
-
-  const steps = result.steps.map((step, i) => toStepTrace(step, i));
-
-  const budgetUsage = budget.usage();
-  // Item #8: finish the run trace with the run's totals (best-effort).
-  finishTrace({
-    attributes: {
-      'gen_ai.response.finish_reasons': result.finishReason,
-      'harness.usage.total_tokens': budgetUsage.tokens,
-      'harness.duration_ms': budgetUsage.durationMs,
-      ...(budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': budgetUsage.costUsd } : {}),
-      ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
-    },
-  });
-
-  return {
-    text: result.text,
-    steps,
-    finishReason: result.finishReason,
-    modelKey: resolvedModelKey,
-    ...(stopReason ? { stopReason } : {}),
-    budgetUsage,
-    usage: {
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
-      totalTokens: result.usage.totalTokens,
-    },
-    hadSideEffects: attemptHadSideEffects,
-  };
 }
 
 /**

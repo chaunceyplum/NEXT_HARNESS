@@ -42,6 +42,14 @@ vi.mock('@/lib/audit-log', () => ({
 }));
 vi.mock('@/lib/online-judge', () => ({ shouldJudgeRun: () => false, judgeRun: async () => true }));
 
+// Controllable active-run cap so the 429 path can be exercised without
+// actually starting MAX_ACTIVE_RUNS concurrent runs. Defaults high so every
+// other test runs as before.
+let activeCapForTest = 1_000;
+vi.mock('@/lib/llm/orchestration-config', () => ({
+  maxActiveRuns: () => activeCapForTest,
+}));
+
 const { POST } = await import('./route');
 const events = await import('../runs/[id]/events/route');
 const cancel = await import('../runs/[id]/cancel/route');
@@ -100,6 +108,31 @@ describe('POST /api/build as a job', () => {
   it('404s for a run that is not live', async () => {
     expect((await events.GET(new Request('http://x'), params('nope'))).status).toBe(404);
     expect((await cancel.POST(new Request('http://x', { method: 'POST' }), params('nope'))).status).toBe(404);
+  });
+});
+
+describe('POST /api/build — concurrency cap (Requirement 13.3)', () => {
+  it('rejects with 429 TOO_MANY_RUNS once active runs reach MAX_ACTIVE_RUNS', async () => {
+    activeCapForTest = 0; // every request is at/over the cap
+    try {
+      const res = await post();
+      expect(res.status).toBe(429);
+      const body = await res.json();
+      expect(body).toMatchObject({ code: 'TOO_MANY_RUNS' });
+    } finally {
+      activeCapForTest = 1_000;
+    }
+  });
+
+  it('starts the run normally when under the cap', async () => {
+    activeCapForTest = 1_000;
+    const res = await post();
+    expect(res.status).toBe(200);
+    const [start] = await firstLines(res, 1);
+    expect(start).toMatchObject({ type: 'run_start' });
+    // Stop the run so it doesn't leak into later tests.
+    await cancel.POST(new Request('http://x', { method: 'POST' }), params(start.runId));
+    await tick();
   });
 });
 
