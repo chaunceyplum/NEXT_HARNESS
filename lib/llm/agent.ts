@@ -38,7 +38,18 @@ import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } fro
 import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, isKnowledgeTool, toolMatchesPlatforms, type RagJudgmentEntry, type RagJudgmentSink } from './tool-catalog';
 import { buildDiscoveryTools, effectiveToolCall } from './tool-discovery';
 import { shortlistTools } from './tool-retrieval';
-import { ALWAYS_ON_TOOLS, systemPrompt, stage, type AgentStepTrace } from './agent-core';
+import {
+  ALWAYS_ON_TOOLS,
+  systemPrompt,
+  stage,
+  type AgentStepTrace,
+  type TokenUsage,
+  type ToolOutcome,
+  type LoopContext,
+  type LoopResult,
+  type PreparedRun,
+  type EarlyResult,
+} from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
 import { applyActionGuards } from './guardrails';
@@ -63,24 +74,7 @@ import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../trac
 import { promptVersion, toolsetVersion, appVersion } from '../version';
 
 export { ALWAYS_ON_TOOLS };
-export type { AgentStepTrace };
-
-export interface TokenUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-}
-
-export interface ToolOutcome {
-  toolCallId: string;
-  toolName: string;
-  input: unknown;
-  level: 'read' | 'write' | 'destructive';
-  outcome: 'ok' | 'error' | 'denied';
-  error?: string;
-  /** Set when the call went through the approval gate. */
-  approvalReason?: ApprovalReason;
-}
+export type { AgentStepTrace, TokenUsage, ToolOutcome, LoopContext, LoopResult, PreparedRun, EarlyResult };
 
 export interface AgentRunResult {
   finalText: string;
@@ -820,7 +814,23 @@ function toolOutcomes(content: ReadonlyArray<{ type: string }>, reasons: Map<str
 
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
-export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
+/**
+ * Setup half of a run (Requirement 1.1): routing, Launch mode resolution,
+ * validation gate creation, Launch brief parsing, tool selection, memory
+ * loading, planning retrieval, planning, plan approval and the approval hook.
+ *
+ * Returns an {@link EarlyResult} when setup itself produced the final answer —
+ * an unclear routed request (a clarifying question) or a denied plan — so no
+ * model loop runs. Otherwise returns a {@link PreparedRun} carrying the
+ * {@link LoopContext} executeLoop() needs plus the extra fields runAgent()
+ * folds into the AgentRunResult (toolsConsidered, plan, route, versions,
+ * planning retrieval and the RAG judgment sink).
+ *
+ * This is a behaviour-preserving extraction of the first half of the old
+ * single runAgent(); nothing here changed except the two early returns now
+ * come back wrapped as EarlyResult.
+ */
+export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | EarlyResult> {
   const {
     userInput,
     maxSteps = 20,
@@ -839,15 +849,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     if (route.category === 'unclear' && route.clarifyingQuestion) {
       // Don't guess at an unclear request: ask instead of running tools.
       return {
-        finalText: route.clarifyingQuestion,
-        steps: [],
-        toolsConsidered: [],
-        finishReason: 'stop',
-        modelKey: route.modelKey,
-        budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
-        usage: {},
-        ragJudgments: [],
-        route,
+        kind: 'early',
+        result: {
+          finalText: route.clarifyingQuestion,
+          steps: [],
+          toolsConsidered: [],
+          finishReason: 'stop',
+          modelKey: route.modelKey,
+          budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+          usage: {},
+          ragJudgments: [],
+          route,
+        },
       };
     }
     modelKey = undefined;
@@ -987,15 +1000,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         const decision = await opts.approvePlan(planTracker.plan);
         if (!decision.approved) {
           return {
-            finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
-            steps: [],
-            toolsConsidered,
-            finishReason: 'stop',
-            modelKey: planModel,
-            budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
-            usage: {},
-            ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
-            plan: planTracker.plan,
+            kind: 'early',
+            result: {
+              finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
+              steps: [],
+              toolsConsidered,
+              finishReason: 'stop',
+              modelKey: planModel,
+              budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+              usage: {},
+              ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
+              plan: planTracker.plan,
+            },
           };
         }
       }
@@ -1060,29 +1076,90 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     app: appVersion(),
   };
 
-  // ── Tracing (item #8) ──────────────────────────────────────────────────────
-  // A fresh tracer per model attempt so a same-tier fallback's abandoned steps
-  // don't leak into the exported trace (they get their own tracer, never
-  // finished). `tracer` always points at the current attempt; finish() +
-  // exportSpans() run once the loop settles, on both success and error.
-  // Tracing reads only what the SDK already reports per step, so it never
-  // changes the agent's behaviour, and export is best-effort (never throws).
+  // Base attributes for the run trace span (item #8). executeLoop builds a
+  // fresh RunTracer from these per model attempt, so a same-tier fallback's
+  // abandoned steps don't leak into the exported trace.
   const baseTracerAttrs: Record<string, AttrValue> = {
     'harness.prompt.version': versions.prompt,
     'harness.toolset.version': versions.toolset,
     'harness.app.version': versions.app,
     ...(opts.runId ? { 'harness.run.id': opts.runId } : {}),
   };
+
+  return {
+    kind: 'prepared',
+    ctx: {
+      tools,
+      launchMode,
+      publishEnabled,
+      userMessage,
+      startModelKey,
+      // A pinned model (opts.modelKey, not "auto"/routed) disables same-tier fallback.
+      isPinned: Boolean(modelKey),
+      maxSteps,
+      budgetLimits: resolveBudget(opts.budget),
+      modelHealth,
+      ...(toolApproval ? { toolApproval } : {}),
+      approvalReasons,
+      baseTracerAttrs,
+      ...(opts.thinkingBudget !== undefined ? { thinkingBudget: opts.thinkingBudget } : {}),
+      ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+      ...(opts.onStep ? { onStep: opts.onStep } : {}),
+      ...(opts.onTextDelta ? { onTextDelta: opts.onTextDelta } : {}),
+      ...(opts.onToolOutcome ? { onToolOutcome: opts.onToolOutcome } : {}),
+      ...(opts.onRestart ? { onRestart: opts.onRestart } : {}),
+    },
+    toolsConsidered,
+    ...(planTracker ? { planTracker } : {}),
+    ...(route ? { route } : {}),
+    versions,
+    ...(planningRetrieval ? { planningRetrieval } : {}),
+    ...(ragJudgmentSink ? { ragJudgmentSink } : {}),
+  };
+}
+
+/**
+ * Execution half of a run (Requirement 1.2): the streaming tool loop, budget
+ * enforcement, context compression, same-tier fallback, tracing and result
+ * assembly. Every input is read from {@link LoopContext} — no enclosing
+ * closure — so a worker (Phase 2) can drive the same loop with its own ctx.
+ *
+ * This is a behaviour-preserving extraction of the second half of the old
+ * single runAgent(): the only new output is {@link LoopResult.hadSideEffects},
+ * which exposes what was the internal `attemptHadSideEffects` flag so the
+ * caller (and later a per-worker fallback) can see whether the attempt wrote.
+ */
+export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
+  const {
+    tools,
+    launchMode,
+    publishEnabled,
+    userMessage,
+    startModelKey,
+    isPinned,
+    maxSteps,
+    budgetLimits,
+    modelHealth,
+    toolApproval,
+    approvalReasons,
+    baseTracerAttrs,
+    abortSignal,
+  } = ctx;
+
+  // A fresh tracer per model attempt so a same-tier fallback's abandoned steps
+  // don't leak into the exported trace (they get their own tracer, never
+  // finished). `tracer` always points at the current attempt; finish() +
+  // exportSpans() run once the loop settles, on both success and error.
+  // Tracing reads only what the SDK already reports per step, so it never
+  // changes the agent's behaviour, and export is best-effort (never throws).
   let tracer = new RunTracer(baseTracerAttrs);
 
-  const isPinned = Boolean(modelKey);
   const registry = getModelRegistry();
 
   // TASK 8: step counter for onStepEnd → onStep mapping. Reset per model
   // attempt, since a fallback restarts the run from scratch.
   let stepIndex = 0;
   const runStartedAt = Date.now();
-  const budgetLimits = resolveBudget(opts.budget);
   // Per model attempt, like stepIndex (a fallback restarts the run).
   let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt);
   let stopReason: BudgetStopReason | undefined;
@@ -1101,7 +1178,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     let forcedAt: number | undefined;
 
     // TASK 10: resolve thinking config for this model + request combination
-    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, opts.thinkingBudget);
+    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, ctx.thinkingBudget);
     if (thinkingProviderOptions) {
       console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
@@ -1127,7 +1204,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
-        abortSignal: opts.abortSignal,
+        abortSignal,
         // Hard backstop for the time budget, which is otherwise checked
         // between steps: one step that hangs (or waits on an approval) past
         // it still gets cut off, with room left for the wrap-up step.
@@ -1191,10 +1268,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
           }
           // Item #8: record a trace span for this step from what the SDK reports.
           recordStepSpan(tracer, step, stepNumber, resolvedModelKey);
-          if (opts.onToolOutcome) {
-            for (const outcome of toolOutcomes(step.content, approvalReasons)) opts.onToolOutcome(outcome);
+          if (ctx.onToolOutcome) {
+            for (const outcome of toolOutcomes(step.content, approvalReasons)) ctx.onToolOutcome(outcome);
           }
-          opts.onStep?.(trace);
+          ctx.onStep?.(trace);
         },
       });
 
@@ -1203,9 +1280,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       // default on current models. Errors during streaming surface when the
       // terminal promises below are awaited, so they still reach the fallback
       // try/catch as a rejection rather than being swallowed here.
-      if (opts.onTextDelta) {
+      if (ctx.onTextDelta) {
         for await (const part of stream.fullStream) {
-          if (part.type === 'text-delta') opts.onTextDelta(part.text);
+          if (part.type === 'text-delta') ctx.onTextDelta(part.text);
         }
       }
 
@@ -1257,7 +1334,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       modelHealth.recordSuccess(resolvedModelKey);
       break;
     } catch (err) {
-      if (opts.abortSignal?.aborted) {
+      if (abortSignal?.aborted) {
         finishTrace({ error: 'aborted', attributes: { 'harness.aborted': true } });
         throw err;
       }
@@ -1283,7 +1360,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
           `falling back to same-tier "${fallback}".`
       );
-      opts.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
+      ctx.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
       resolvedModelKey = fallback;
     }
   }
@@ -1291,11 +1368,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   if (!result) throw new Error('unreachable: chat model call produced no result');
 
   const steps = result.steps.map((step, i) => toStepTrace(step, i));
-
-  // The judge ran concurrently with the loop; await any still in flight now
-  // (off the tool-call critical path) so the verdicts are captured with the
-  // run record. drain() never rejects.
-  const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
 
   const budgetUsage = budget.usage();
   // Item #8: finish the run trace with the run's totals (best-effort).
@@ -1310,9 +1382,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   });
 
   return {
-    finalText: result.text,
+    text: result.text,
     steps,
-    toolsConsidered,
     finishReason: result.finishReason,
     modelKey: resolvedModelKey,
     ...(stopReason ? { stopReason } : {}),
@@ -1322,6 +1393,42 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       outputTokens: result.usage.outputTokens,
       totalTokens: result.usage.totalTokens,
     },
+    hadSideEffects: attemptHadSideEffects,
+  };
+}
+
+/**
+ * The public agent entry point (Requirements 1.3, 1.4): unchanged signature
+ * and unchanged AgentRunResult shape, now implemented as prepareRun() followed
+ * by executeLoop(). When setup produced an early answer (unclear request or a
+ * denied plan), the EarlyResult is returned as-is; otherwise the LoopResult is
+ * folded back together with the setup outputs into the same AgentRunResult the
+ * single function returned before.
+ */
+export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
+  const prepared = await prepareRun(opts);
+  if (prepared.kind === 'early') {
+    return prepared.result;
+  }
+
+  const { ctx, toolsConsidered, planTracker, route, versions, ragJudgmentSink } = prepared;
+
+  const loop = await executeLoop(ctx);
+
+  // The judge ran concurrently with the loop; await any still in flight now
+  // (off the tool-call critical path) so the verdicts are captured with the
+  // run record. drain() never rejects.
+  const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+
+  return {
+    finalText: loop.text,
+    steps: loop.steps,
+    toolsConsidered,
+    finishReason: loop.finishReason,
+    modelKey: loop.modelKey,
+    ...(loop.stopReason ? { stopReason: loop.stopReason } : {}),
+    budgetUsage: loop.budgetUsage,
+    usage: loop.usage,
     ragJudgments,
     versions,
     ...(planTracker ? { plan: planTracker.plan } : {}),

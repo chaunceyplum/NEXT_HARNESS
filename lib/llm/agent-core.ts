@@ -1,7 +1,23 @@
 /**
  * Shared agent building blocks — the system prompt and tool-set invariants
  * lib/llm/agent.ts's runAgent() builds on.
+ *
+ * Phase 1 of the orchestrator-workers split also parks the data contracts the
+ * loop/setup split passes around here (LoopContext, LoopResult, PreparedRun,
+ * EarlyResult). They are types only — this module never imports the live MCP
+ * client — so a worker can reuse the loop without pulling agent.ts's live
+ * dependencies.
  */
+
+import type { ToolSet } from 'ai';
+import type { BudgetStopReason, BudgetUsage, RunBudgetLimits } from './run-budget';
+import type { ModelHealthTracker } from './model-health';
+import type { ApprovalReason } from './approval-policy';
+import type { PlanTracker, Plan } from './planner';
+import type { PlanningRetrieval } from './planning-retrieval';
+import type { RagJudgmentSink, RagJudgmentEntry } from './tool-catalog';
+import type { RouteDecision } from './model-router';
+import type { AttrValue } from '../tracing';
 
 /**
  * Tools always available regardless of the shortlist, because the requests
@@ -213,4 +229,148 @@ export interface AgentStepTrace {
   modelMs?: number;
   /** Chat-model token usage for this step alone. */
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+}
+
+/**
+ * Chat-model token totals the agent reports. Kept here (rather than in
+ * agent.ts) so the loop/setup contracts below can reference it without a
+ * circular import; re-exported from agent.ts for existing callers.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+}
+
+/** One finished, failed, or denied tool call, reported to onToolOutcome. */
+export interface ToolOutcome {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  level: 'read' | 'write' | 'destructive';
+  outcome: 'ok' | 'error' | 'denied';
+  error?: string;
+  /** Set when the call went through the approval gate. */
+  approvalReason?: ApprovalReason;
+}
+
+// ── Phase 1: loop/setup split contracts ────────────────────────────────────────
+
+/**
+ * The approval gate the streaming loop hands the AI SDK's `toolApproval`
+ * option: it inspects a pending tool call and decides whether it runs. The
+ * shape mirrors what runAgent builds today; typed structurally here so this
+ * module stays free of the SDK's generic tool types.
+ */
+export type ToolApprovalFn = (args: {
+  toolCall: { toolCallId: string; toolName: string; input: unknown };
+}) => Promise<
+  | 'not-applicable'
+  | { type: 'approved'; reason?: string }
+  | { type: 'denied'; reason?: string }
+>;
+
+/**
+ * Everything executeLoop() reads to run one agent loop. prepareRun() builds it
+ * from the request; a worker (Phase 2) builds its own. Every field is read
+ * from here instead of an enclosing closure, so the loop has no hidden inputs.
+ */
+export interface LoopContext {
+  /** The tool set handed to the model for the whole loop (already policy-filtered). */
+  tools: ToolSet;
+  /** Launch-tagging run: grounds the system prompt. */
+  launchMode: boolean;
+  /** A Launch run that may publish to dev/staging: swaps the grounding + handoff lines. */
+  publishEnabled: boolean;
+  /** First user message (memory preamble, plan preamble, knowledge and examples already folded in). */
+  userMessage: string;
+  /** Resolved start model for the first attempt. */
+  startModelKey?: string;
+  /** True when the caller pinned a model, so same-tier fallback is disabled. */
+  isPinned: boolean;
+  /** Tool-call round trips before the loop is forced to stop. */
+  maxSteps: number;
+  /** Run limits (tokens, cost, time, identical calls); a fresh tracker is built per attempt. */
+  budgetLimits: RunBudgetLimits;
+  /** Health tracker used to route around failing models. */
+  modelHealth: ModelHealthTracker;
+  /** The AI SDK approval gate, or undefined when the run bypasses gating (eval path). */
+  toolApproval?: ToolApprovalFn;
+  /** Approval reason per tool-call id, filled by toolApproval and read when reporting outcomes. */
+  approvalReasons: Map<string, ApprovalReason>;
+  /** Base attributes for the run trace span. */
+  baseTracerAttrs: Record<string, AttrValue>;
+  /** Extended-thinking token budget for this request, if any. */
+  thinkingBudget?: number;
+  /** Aborts model calls and the step loop. */
+  abortSignal?: AbortSignal;
+  onStep?: (step: AgentStepTrace) => void;
+  onTextDelta?: (delta: string) => void;
+  onToolOutcome?: (outcome: ToolOutcome) => void;
+  onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
+}
+
+/** What executeLoop() returns once the loop settles, on success. */
+export interface LoopResult {
+  text: string;
+  steps: AgentStepTrace[];
+  finishReason: string;
+  usage: TokenUsage;
+  /** Model registry key that actually produced the result (differs after a fallback). */
+  modelKey: string;
+  /** Set when a budget or loop detection cut the run short. */
+  stopReason?: BudgetStopReason;
+  /** Tokens, estimated cost and wall-clock time the successful attempt used. */
+  budgetUsage: BudgetUsage;
+  /** Whether the attempt executed a write/destructive tool call. */
+  hadSideEffects: boolean;
+}
+
+/**
+ * The result of prepareRun() when setup produced a final answer before any
+ * model loop: an unclear routed request (a clarifying question) or a denied
+ * plan. runAgent() returns the assembled AgentRunResult directly.
+ */
+export interface EarlyResult {
+  kind: 'early';
+  /** The already-complete run result (no executeLoop call needed). */
+  result: EarlyRunResult;
+}
+
+/**
+ * The AgentRunResult fields prepareRun() can fill for an early return. Kept as
+ * a structural subset so agent-core doesn't depend on agent.ts's AgentRunResult.
+ */
+export interface EarlyRunResult {
+  finalText: string;
+  steps: AgentStepTrace[];
+  toolsConsidered: string[];
+  finishReason: string;
+  modelKey: string;
+  budgetUsage: BudgetUsage;
+  usage: TokenUsage;
+  ragJudgments: RagJudgmentEntry[];
+  plan?: Plan;
+  route?: RouteDecision;
+}
+
+/**
+ * The result of prepareRun() when setup finished and the loop should run:
+ * the LoopContext for executeLoop() plus everything runAgent() needs to
+ * assemble the same AgentRunResult the single function produced before.
+ */
+export interface PreparedRun {
+  kind: 'prepared';
+  ctx: LoopContext;
+  toolsConsidered: string[];
+  planTracker?: PlanTracker;
+  route?: RouteDecision;
+  versions: {
+    prompt: string;
+    toolset: string;
+    app: string;
+  };
+  planningRetrieval?: PlanningRetrieval;
+  /** Fire-and-forget RAG judgment sink for live runs; drained by runAgent after the loop. */
+  ragJudgmentSink?: RagJudgmentSink;
 }
