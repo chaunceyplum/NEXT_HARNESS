@@ -8,5 +8,6 @@
   ],
   "toolActivity": "CALL adobe_list_datasets {\"name\":\"Web Events\"}\nRESULT adobe_list_datasets: {\"datasets\":[{\"id\":\"ds-101\",\"name\":\"Web Events\",\"profileEnabled\":true,\"identityField\":\"_id\"}]}",
   "answer": "Yes, the 'Web Events' dataset (id: ds-101) is enabled for Real-Time Customer Profile. The identity field is set to `_id`.",
-  "humanVerdict": "pass"
+  "humanVerdict": "pass",
+  "criticVerdict": "pass"
 }

@@ -7,5 +7,6 @@
   ],
   "toolActivity": "CALL adobe_list_datasets {}\nRESULT adobe_list_datasets: {\"datasets\":[{\"id\":\"ds-101\",\"name\":\"Web Events\"},{\"id\":\"ds-102\",\"name\":\"CRM Profiles\"},{\"id\":\"ds-103\",\"name\":\"Mobile App Events\"}]}",
   "answer": "Your sandbox has two datasets:\n- Web Events (ds-101)\n- CRM Profiles (ds-102)",
-  "humanVerdict": "fail"
+  "humanVerdict": "fail",
+  "criticVerdict": "fail"
 }

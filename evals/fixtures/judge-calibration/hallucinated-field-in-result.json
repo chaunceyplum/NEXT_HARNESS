@@ -8,5 +8,6 @@
   ],
   "toolActivity": "CALL adobe_get_segment {\"id\":\"seg-201\"}\nRESULT adobe_get_segment: {\"id\":\"seg-201\",\"name\":\"Test Holdout\",\"status\":\"ACTIVE\"}",
   "answer": "Segment seg-201:\n- Name: Test Holdout\n- Status: ACTIVE\n- Last modified: 2026-08-14",
-  "humanVerdict": "fail"
+  "humanVerdict": "fail",
+  "criticVerdict": "fail"
 }

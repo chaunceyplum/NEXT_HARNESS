@@ -7,6 +7,7 @@ export const EVAL_SUITE_LABELS: Record<EvalSuite, string> = {
   tool_shortlist: 'Tool shortlisting',
   rag_judge: 'RAG judge calibration',
   judge_calibration: 'Eval judge calibration',
+  critic_calibration: 'Answer critic calibration',
   routing: 'Model routing',
 };
 

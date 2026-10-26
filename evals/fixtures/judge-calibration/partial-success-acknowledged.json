@@ -9,5 +9,6 @@
   ],
   "toolActivity": "CALL adobe_update_dataset {\"id\":\"ds-101\",\"profileEnabled\":true}\nRESULT adobe_update_dataset: {\"id\":\"ds-101\",\"profileEnabled\":true}\nCALL adobe_update_dataset {\"id\":\"ds-102\",\"profileEnabled\":true}\nRESULT adobe_update_dataset: {\"id\":\"ds-102\",\"profileEnabled\":true}\nCALL adobe_update_dataset {\"id\":\"ds-103\",\"profileEnabled\":true}\nERROR adobe_update_dataset: 403: Insufficient access to dataset ds-103",
   "answer": "Partially done:\n- **ds-101**: profile enabled ✓\n- **ds-102**: profile enabled ✓\n- **ds-103**: failed — 403 Insufficient access. You may not have write permission to this dataset. Check your credential's dataset permissions and try again.",
-  "humanVerdict": "pass"
+  "humanVerdict": "pass",
+  "criticVerdict": "pass"
 }

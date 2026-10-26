@@ -186,6 +186,10 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         answer: rawResult.finalText,
         steps: rawResult.steps,
         modelKey: rawResult.modelKey,
+        onCheckStart: () => {
+          pushDelta(textRedactor.flush());
+          push({ type: 'checking' });
+        },
       });
       const checked: typeof rawResult & { critique?: Critique } = critiqued
         ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }

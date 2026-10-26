@@ -17,6 +17,8 @@ export interface AgentTraceProps {
   versions?: RunVersions;
   /** Grounding check on the final answer, when it ran. */
   critique?: CritiqueInfo;
+  /** The streamed answer is finished and being checked; the checked (possibly revised) text replaces it. */
+  checking?: boolean;
 }
 
 /** Compact ms → "820ms" / "1.4s" / "2m 05s". */
@@ -37,7 +39,7 @@ const STOP_REASON_LABEL: Record<string, string> = {
 };
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, budgetUsage, versions }: AgentTraceProps) {
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, checking, budgetUsage, versions }: AgentTraceProps) {
   // "stop" means the model decided it was done. "running" means we're still
   // streaming. Anything else (most commonly "tool-calls") means the run was
   // cut off at the step limit, and finalText is not a real conclusion.
@@ -172,9 +174,15 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
             }`}
           >
             {finalText}
-            {isRunning && finalText && (
+            {isRunning && finalText && !checking && (
               <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 align-text-bottom animate-pulse" />
             )}
+          </p>
+        )}
+        {isRunning && checking && (
+          <p className="mt-2 text-xs text-blue-700 flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+            Draft — checking it against the tool results. It may be corrected before the run finishes.
           </p>
         )}
         {!isRunning && critique && (
@@ -182,7 +190,16 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
             <p className={critique.passed ? 'text-gray-600' : 'text-amber-800 font-semibold'}>
               {critique.passed ? '✓ Checked against the tool results' : '⚠ Not fully supported by the tool results'}
               {critique.revised && ' (answer revised once by the grounding check)'}
+              {critique.selfCheck && (
+                <span className="text-gray-500 font-normal"> · checked by the model that wrote it (set CRITIC_MODEL to a different one)</span>
+              )}
             </p>
+            {critique.revised && critique.originalAnswer && (
+              <details className="mt-1 text-gray-600">
+                <summary className="cursor-pointer">Show the original answer</summary>
+                <p className="mt-1 whitespace-pre-wrap text-gray-500">{critique.originalAnswer}</p>
+              </details>
+            )}
             {!critique.passed && (
               <ul className="list-disc ml-5 mt-1 text-amber-900">
                 {[...critique.unsupportedClaims.map((c) => `Unsupported: ${c}`), ...critique.issues].map((issue, i) => (
