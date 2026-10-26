@@ -204,6 +204,8 @@ export type BuildStreamEvent =
   // still arrives on 'done'. Discard accumulated deltas on 'restart'.
   | { type: 'text_delta'; delta: string }
   | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  /** The answer has finished streaming and is being checked against the tool results (answer-critic.ts); 'done' carries the checked, possibly revised, text. */
+  | { type: 'checking' }
   /** The run's plan: sent when made (awaitingApproval while a person decides) and on every status change or revision. */
   | { type: 'plan'; plan: PlanInfo; awaitingApproval?: boolean }
   /** The request asked for model "auto": which model it was routed to, and why. */
@@ -261,6 +263,8 @@ export interface CritiqueInfo {
   revised: boolean;
   originalAnswer?: string;
   model: string;
+  /** The critic was the same model that wrote the answer. */
+  selfCheck?: boolean;
 }
 
 /** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
@@ -347,7 +351,7 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'launch' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'routing';
+export type EvalSuite = 'agent' | 'launch' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'critic_calibration' | 'routing';
 
 export interface EvalRunSummary {
   id: string;

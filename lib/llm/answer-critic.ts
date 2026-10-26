@@ -8,15 +8,18 @@
  * with a flag if it still fails. Hard cap, no loops.
  *
  *   CRITIC_MODE   off | flag (default: check and flag, never rewrite) | revise
- *   CRITIC_MODEL  model for the critic and the revision (default: the run's model)
+ *   CRITIC_MODEL  model for the critic and the revision (default: the
+ *                 strongest tier on the run model's provider — a model
+ *                 grading its own answer tends to accept its own mistakes)
  *
  * Runs only when the run used tools (there is nothing to ground otherwise)
  * and never on the eval path. A critic failure never fails the run.
+ * Calibrated against human labels by `npm run eval:critic`.
  */
 
 import { generateObject, generateText } from 'ai';
 import { z } from 'zod';
-import { resolveModel } from './model-registry';
+import { getModelEntry, getModelRegistry, resolveModel } from './model-registry';
 import { summarizeToolActivity } from '@/evals/lib/judge';
 import type { AgentStepTrace } from './agent-core';
 
@@ -25,6 +28,22 @@ export type CriticMode = 'off' | 'flag' | 'revise';
 export function criticMode(): CriticMode {
   const v = process.env.CRITIC_MODE?.trim().toLowerCase();
   return v === 'off' || v === 'revise' ? v : 'flag';
+}
+
+/**
+ * Model that checks a run's answer: CRITIC_MODEL wins; otherwise the
+ * strongest ("expensive") tier on the run model's provider, so the critic is
+ * at least as strong as what it checks and, below the top tier, not the
+ * same model. Same provider, so it needs no extra credentials.
+ */
+export function criticModelKey(runModelKey: string): string {
+  if (process.env.CRITIC_MODEL) return process.env.CRITIC_MODEL;
+  try {
+    const { provider } = getModelEntry(runModelKey);
+    return getModelRegistry().find((e) => e.provider === provider && e.tier === 'expensive')?.key ?? runModelKey;
+  } catch {
+    return runModelKey;
+  }
 }
 
 const verdictSchema = z.object({
@@ -45,6 +64,8 @@ export interface Critique {
   /** The first answer, kept when a revision replaced it. */
   originalAnswer?: string;
   model: string;
+  /** The critic was the model that wrote the answer (no stronger one on its provider, or CRITIC_MODEL set to it). */
+  selfCheck?: boolean;
 }
 
 const CRITIC_SYSTEM = [
@@ -53,7 +74,10 @@ const CRITIC_SYSTEM = [
   'Judge only grounding and whether the request was answered or a blocker stated. Do not judge tone, length or style.',
 ].join('\n');
 
-async function check(model: string, task: string, activity: string, answer: string) {
+export type CriticVerdict = z.infer<typeof verdictSchema>;
+
+/** One critic pass over an answer and the tool activity it should be grounded in. */
+export async function checkAnswer(model: string, task: string, activity: string, answer: string): Promise<CriticVerdict> {
   const { object } = await generateObject({
     model: resolveModel(model),
     schema: verdictSchema,
@@ -84,24 +108,28 @@ export async function critiqueAnswer(input: {
   steps: AgentStepTrace[];
   modelKey: string;
   mode?: CriticMode;
+  /** Called once, just before the first critic call, so a UI can say the answer is being checked. */
+  onCheckStart?: () => void;
 }): Promise<{ answer: string; critique: Critique } | undefined> {
   const mode = input.mode ?? criticMode();
   if (mode === 'off') return undefined;
   if (!input.steps.some((s) => s.toolCalls.length > 0)) return undefined;
-  const model = process.env.CRITIC_MODEL || input.modelKey;
+  const model = criticModelKey(input.modelKey);
+  const self = model === input.modelKey ? { selfCheck: true } : {};
   const activity = summarizeToolActivity(input.steps);
 
   try {
-    const first = await check(model, input.task, activity, input.answer);
+    input.onCheckStart?.();
+    const first = await checkAnswer(model, input.task, activity, input.answer);
     const firstIssues = [...first.issues, ...first.unsupportedClaims.map((c) => `Unsupported: ${c}`)];
     const passed = first.grounded && first.answersRequest;
     if (passed || mode === 'flag') {
-      return { answer: input.answer, critique: { passed, ...first, revised: false, model } };
+      return { answer: input.answer, critique: { passed, ...first, revised: false, model, ...self } };
     }
 
     const revisedAnswer = await revise(model, input.task, activity, input.answer, firstIssues);
-    if (!revisedAnswer) return { answer: input.answer, critique: { passed: false, ...first, revised: false, model } };
-    const second = await check(model, input.task, activity, revisedAnswer);
+    if (!revisedAnswer) return { answer: input.answer, critique: { passed: false, ...first, revised: false, model, ...self } };
+    const second = await checkAnswer(model, input.task, activity, revisedAnswer);
     return {
       answer: revisedAnswer,
       critique: {
@@ -110,6 +138,7 @@ export async function critiqueAnswer(input: {
         revised: true,
         originalAnswer: input.answer,
         model,
+        ...self,
       },
     };
   } catch (err) {

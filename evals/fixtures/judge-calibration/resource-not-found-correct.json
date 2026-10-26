@@ -8,5 +8,6 @@
   ],
   "toolActivity": "CALL adobe_list_segments {\"name\":\"VIP Platinum Members\"}\nRESULT adobe_list_segments: {\"segments\":[]}",
   "answer": "No segment named 'VIP Platinum Members' exists in the sandbox. The search returned no results. If you want, I can list all segments so you can find the right one, or create a new segment with that name.",
-  "humanVerdict": "pass"
+  "humanVerdict": "pass",
+  "criticVerdict": "pass"
 }

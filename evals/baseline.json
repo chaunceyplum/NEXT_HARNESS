@@ -18,5 +18,8 @@
   },
   "judge_calibration": {
     "minSuccessRate": null
+  },
+  "critic_calibration": {
+    "minSuccessRate": null
   }
 }

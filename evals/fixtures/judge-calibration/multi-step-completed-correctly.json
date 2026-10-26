@@ -9,5 +9,6 @@
   ],
   "toolActivity": "CALL adobe_create_field_group {\"title\":\"Loyalty Details\",\"description\":\"Loyalty program attributes\"}\nRESULT adobe_create_field_group: {\"$id\":\"fg-881\",\"title\":\"Loyalty Details\"}\nCALL adobe_update_schema {\"id\":\"sch-001\",\"addFieldGroups\":[\"fg-881\"]}\nRESULT adobe_update_schema: {\"id\":\"sch-001\",\"title\":\"Acme Customer Profile\",\"fieldGroups\":[\"fg-881\"]}",
   "answer": "Done:\n1. Created field group 'Loyalty Details' (id: fg-881).\n2. Added it to schema 'Acme Customer Profile' (sch-001).\n\nThe schema now includes the Loyalty Details field group.",
-  "humanVerdict": "pass"
+  "humanVerdict": "pass",
+  "criticVerdict": "pass"
 }

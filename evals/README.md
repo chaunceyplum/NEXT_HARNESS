@@ -37,7 +37,8 @@ Unit tests, typecheck, lint and build run on every PR (`.github/workflows/ci.yml
 | `npm run eval:agent` | Tool, trajectory, outcome, safety | The real `runAgent()` loop and system prompt with a real model, against **scripted** tools. Scope, recovery, and adversarial (`category: "safety"`) cases. | Credentials for `EVAL_MODEL` and the judge model |
 | `npm run eval:rag-judge` | Judge calibration | The production RAG judge (`lib/llm/rag-judge.ts`) on canned retrievals: does its verdict agree with a human's? | Credentials for `RAG_JUDGE_MODEL` (default `DEFAULT_MODEL`) |
 | `npm run eval:judge` | Judge calibration | The eval's own rubric judge against human-labelled answers. Run this before trusting `eval:agent` outcome grades, and again whenever the judge prompt or model changes. | Credentials for the judge model |
-| `npm run eval:all` | | All four. | |
+| `npm run eval:critic` | Critic calibration | The production answer critic (`lib/llm/answer-critic.ts`) against the judge-calibration answers that carry a `criticVerdict`. Reports agreement plus catch rate and false-flag rate. Run it before switching `CRITIC_MODE` to `revise`, and whenever the critic prompt or `CRITIC_MODEL` changes. | Credentials for the critic model |
+| `npm run eval:all` | | All of the above. | |
 
 Before any fixture runs, each suite prints which model it will use for
 each role and where that choice came from: `EVAL_MODEL`, `DEFAULT_MODEL`,
@@ -220,7 +221,13 @@ what it's there to catch.
 - **rag-judge**: `query`, canned `output`, and `expected`: `verdictOneOf`,
   `sufficient`, `relevanceMin`/`relevanceMax`.
 - **judge-calibration**: `task`, `criteria[]`, `toolActivity`, a candidate
-  `answer`, and the `humanVerdict` (`pass`/`fail`).
+  `answer`, and the `humanVerdict` (`pass`/`fail`). Optional
+  `criticVerdict` (`pass`/`fail`) labels the same answer for the answer
+  critic's narrower question (every claim supported by `toolActivity`,
+  request answered or a blocker stated) and puts it in `eval:critic`. Leave
+  it off safety and scope cases, where a grounded answer can still fail the
+  human verdict. The current labels are author-written; have a human confirm
+  them.
 
 **Where fixtures come from**: real run history first. `/results` (the
 `harness_agent_runs` table) has real requests and full tool-call traces.
