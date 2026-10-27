@@ -921,6 +921,7 @@ EVAL_MODEL=bedrock:cheap          # model under test for eval:agent; defaults to
 EVAL_JUDGE_MODEL=bedrock:expensive # grades rubric questions; defaults to the strongest tier of DEFAULT_MODEL's provider
 EVAL_JUDGE_FALLBACK_MODEL=anthropic:opus  # retried when the judge refuses (safety filter); defaults to next-strongest on the same provider
 EVAL_TRIALS=5                     # runs per fixture, for pass@k / pass^k (default 1, max 20)
+EVAL_ORCHESTRATE=both             # off (default) | on | both — eval:agent/eval:launch run single-agent, orchestrated, or both side by side against the rollout bar (requirements.md)
 MODEL_PRICING_JSON='{"bedrock:balanced":{"input":2,"output":10}}'
                                   # USD per 1M tokens, by registry key or model id; overrides the
                                   # Anthropic list prices in lib/llm/pricing.ts (Bedrock bills separately)

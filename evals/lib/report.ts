@@ -31,6 +31,7 @@ export interface ReportOptions {
 const pct = (x: number | undefined) => (x == null ? 'n/a' : `${Math.round(x * 100)}%`);
 const secs = (ms: number | undefined) => (ms == null ? 'n/a' : `${(ms / 1000).toFixed(1)}s`);
 const usd = (x: number | undefined) => (x == null ? 'n/a' : `$${x.toFixed(4)}`);
+const num = (x: number | undefined) => (x == null ? 'n/a' : Math.round(x).toLocaleString());
 
 export function formatMetrics(m: EvalRunMetrics): string[] {
   const lines = [
@@ -106,6 +107,90 @@ export async function report(opts: ReportOptions): Promise<void> {
         'The table above is still accurate — only the /evals history is affected.'
     );
   }
+}
+
+/**
+ * The rollout bar from requirements.md ("Decisions taken for this spec"):
+ * orchestration becomes the default only when it matches or beats single-agent
+ * pass rate, with at least this much lower median wall-clock time and no more
+ * than this much higher cost.
+ */
+export const ROLLOUT_BAR = { minWallClockReduction: 0.3, maxCostIncrease: 0.25 } as const;
+
+export interface RolloutVerdict {
+  /** Pass rate did not regress (orchestrated ≥ single-agent). */
+  passRateHeld: boolean;
+  /** Median wall-clock fell by at least the bar's minimum. */
+  wallClockMet: boolean;
+  /** Cost rose by no more than the bar's maximum. */
+  costMet: boolean;
+  /** All three — orchestration clears the rollout bar. */
+  met: boolean;
+  /** Fractional change off → on (negative = faster / cheaper). Undefined when a figure is missing. */
+  wallClockDelta?: number;
+  costDelta?: number;
+}
+
+/** Compare two modes against the rollout bar. A missing figure fails that part, conservatively. */
+export function compareToRolloutBar(off: EvalRunMetrics, on: EvalRunMetrics): RolloutVerdict {
+  const passRateHeld = on.successRate >= off.successRate;
+  const frac = (from: number | undefined, to: number | undefined): number | undefined =>
+    from == null || to == null || from === 0 ? undefined : (to - from) / from;
+  const wallClockDelta = frac(off.latencyP50Ms, on.latencyP50Ms);
+  const costDelta = frac(off.totalCostUsd, on.totalCostUsd);
+  const wallClockMet = wallClockDelta != null && wallClockDelta <= -ROLLOUT_BAR.minWallClockReduction;
+  const costMet = costDelta != null && costDelta <= ROLLOUT_BAR.maxCostIncrease;
+  return {
+    passRateHeld,
+    wallClockMet,
+    costMet,
+    met: passRateHeld && wallClockMet && costMet,
+    ...(wallClockDelta != null ? { wallClockDelta } : {}),
+    ...(costDelta != null ? { costDelta } : {}),
+  };
+}
+
+/**
+ * Side-by-side report for an EVAL_ORCHESTRATE=both run (Requirement 16.2):
+ * single-agent vs orchestrated pass rate, wall-clock, tokens and cost, then
+ * whether orchestration clears the rollout bar. Printed and returned, so a
+ * caller can also write it to a file. The per-mode `report()` calls still run;
+ * this only adds the comparison.
+ */
+export function reportComparison(label: string, off: EvalTrialRecord[], on: EvalTrialRecord[]): string {
+  const offM = computeRunMetrics(off);
+  const onM = computeRunMetrics(on);
+  const verdict = compareToRolloutBar(offM, onM);
+  const delta = (d: number | undefined) => (d == null ? 'n/a' : `${d >= 0 ? '+' : ''}${Math.round(d * 100)}%`);
+  const mark = (ok: boolean) => (ok ? '✓' : '✗');
+  const rows: Array<[string, string, string]> = [
+    ['pass rate', pct(offM.successRate), pct(onM.successRate)],
+    [`pass^${offM.k}`, pct(offM.passHatK), pct(onM.passHatK)],
+    ['median wall-clock', secs(offM.latencyP50Ms), secs(onM.latencyP50Ms)],
+    ['p95 wall-clock', secs(offM.latencyP95Ms), secs(onM.latencyP95Ms)],
+    ['total cost', usd(offM.totalCostUsd), usd(onM.totalCostUsd)],
+    ['tokens / success', num(offM.tokensPerSuccess), num(onM.tokensPerSuccess)],
+    ['safety violations', String(offM.safetyViolations), String(onM.safetyViolations)],
+  ];
+  const col1 = Math.max(...rows.map((r) => r[0].length), 'metric'.length);
+  const col2 = Math.max(...rows.map((r) => r[1].length), 'single-agent'.length);
+  const col3 = Math.max(...rows.map((r) => r[2].length), 'orchestrated'.length);
+  const line = (a: string, b: string, c: string) => `  ${a.padEnd(col1)}  ${b.padStart(col2)}  ${c.padStart(col3)}`;
+  const out: string[] = [];
+  out.push(`\n=== ${label}: single-agent vs orchestrated (EVAL_ORCHESTRATE=both) ===`);
+  out.push(line('metric', 'single-agent', 'orchestrated'));
+  for (const [name, a, b] of rows) out.push(line(name, a, b));
+  out.push('');
+  out.push('  Rollout bar (requirements.md): orchestration becomes default only when it');
+  out.push('  matches/beats pass rate, with ≥30% lower median wall-clock and ≤25% higher cost.');
+  out.push(`    ${mark(verdict.passRateHeld)} pass rate held (${pct(offM.successRate)} → ${pct(onM.successRate)})`);
+  out.push(`    ${mark(verdict.wallClockMet)} median wall-clock ${delta(verdict.wallClockDelta)} (need ≤ -30%)`);
+  out.push(`    ${mark(verdict.costMet)} cost ${delta(verdict.costDelta)} (need ≤ +25%)`);
+  out.push(`  ${verdict.met ? '✓ CLEARS the rollout bar' : '✗ does NOT clear the rollout bar — stays off by default'}`);
+  out.push('');
+  const text = out.join('\n');
+  console.log(text);
+  return text;
 }
 
 /**

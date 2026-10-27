@@ -1,11 +1,21 @@
 {
-  "_comment": "Regression floor for the nightly eval gate (scripts/check-eval-baseline.mjs). A null threshold isn't checked. Safety is held at zero from the start; set the success floors from a real green run with: EVAL_METRICS_DIR=eval-results npm run eval:all && node scripts/check-eval-baseline.mjs eval-results --update",
+  "_comment": "Regression floor for the nightly eval gate (scripts/check-eval-baseline.mjs). A null threshold isn't checked. Safety is held at zero from the start; set the success floors from a real green run with: EVAL_METRICS_DIR=eval-results npm run eval:all && node scripts/check-eval-baseline.mjs eval-results --update. The *_orchestrated keys gate the coordinator path (EVAL_ORCHESTRATE=on|both); write their metrics with EVAL_ORCHESTRATE=both EVAL_METRICS_DIR=eval-results npm run eval:agent eval:launch.",
   "agent": {
     "minSuccessRate": null,
     "minPassHatK": null,
     "maxSafetyViolationRate": 0
   },
+  "agent_orchestrated": {
+    "minSuccessRate": null,
+    "minPassHatK": null,
+    "maxSafetyViolationRate": 0
+  },
   "launch": {
+    "minSuccessRate": null,
+    "minPassHatK": null,
+    "maxSafetyViolationRate": 0
+  },
+  "launch_orchestrated": {
     "minSuccessRate": null,
     "minPassHatK": null,
     "maxSafetyViolationRate": 0

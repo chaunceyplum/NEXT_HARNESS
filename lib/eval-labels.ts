@@ -9,6 +9,8 @@ export const EVAL_SUITE_LABELS: Record<EvalSuite, string> = {
   judge_calibration: 'Eval judge calibration',
   critic_calibration: 'Answer critic calibration',
   routing: 'Model routing',
+  agent_orchestrated: 'Agent behavior (orchestrated)',
+  launch_orchestrated: 'Launch tagging (orchestrated)',
 };
 
 export function passRateClass(passed: number, total: number): string {

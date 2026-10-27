@@ -208,3 +208,43 @@ export function evalSplit(): EvalSplit {
 export function agentFixtureDirs(split: EvalSplit = evalSplit()): string[] {
   return split === 'dev' ? ['agent'] : split === 'heldout' ? ['agent-heldout'] : ['agent', 'agent-heldout'];
 }
+
+/**
+ * Which orchestration mode(s) a comparison eval runs (EVAL_ORCHESTRATE):
+ * `off` (default) runs single-agent only, exactly as before; `on` runs every
+ * fixture with the coordinator; `both` runs each fixture in both modes and the
+ * suite reports the two side by side (Requirement 16.2). The rollout bar in
+ * requirements.md is read off the `both` run: orchestration becomes the
+ * default only when it matches or beats single-agent pass rate with ≥30% lower
+ * median wall-clock and ≤25% higher cost.
+ */
+export type OrchestrateMode = 'off' | 'on' | 'both';
+
+export function orchestrateMode(): OrchestrateMode {
+  const v = process.env.EVAL_ORCHESTRATE?.trim().toLowerCase();
+  return v === 'on' || v === 'both' ? v : 'off';
+}
+
+/** The modes a run should execute, in order: just `['off']` / `['on']`, or both. */
+export function orchestrateModes(mode: OrchestrateMode = orchestrateMode()): Array<'off' | 'on'> {
+  return mode === 'both' ? ['off', 'on'] : [mode];
+}
+
+/**
+ * Run `fn` with `ORCHESTRATION` forced to `flag` for its duration, restoring
+ * the previous value afterward. The agent reads `orchestrationFlag()` from the
+ * environment inside `runAgent`, so a comparison eval that wants the
+ * coordinator for one trial sets the flag here and passes `orchestrate: true`
+ * in the run options. Restores in a `finally` so a throw can't leak the flag
+ * into the next trial.
+ */
+export async function withOrchestration<T>(flag: 'off' | 'on', fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.ORCHESTRATION;
+  process.env.ORCHESTRATION = flag;
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) delete process.env.ORCHESTRATION;
+    else process.env.ORCHESTRATION = previous;
+  }
+}

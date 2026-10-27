@@ -35,7 +35,7 @@ import { ModelHealthTracker } from '@/lib/llm/model-health';
 import { estimateCostUsd } from '@/lib/llm/pricing';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
-import { report } from './lib/report';
+import { report, reportComparison } from './lib/report';
 import { allCriteria, formatJudgeNotes, judge, JudgeError, summarizeToolActivity } from './lib/judge';
 import {
   evalModelKey,
@@ -49,6 +49,9 @@ import {
   warnSkip,
   agentFixtureDirs,
   evalSplit,
+  orchestrateMode,
+  orchestrateModes,
+  withOrchestration,
 } from './lib/env';
 import { gradeTrajectory, type TrajectoryExpectations } from './lib/grading';
 import { buildScriptedTools, type ScriptedToolDef } from './lib/scripted-tools';
@@ -95,20 +98,34 @@ if (pre.status === 'skip') warnSkip('agent eval', pre.reason);
 if (pre.status === 'ready') warnIfSelfJudging(modelKey, judgeKey);
 const preflightError = pre.status === 'fail' ? pre.reason : '';
 
-const results: EvalTrialRecord[] = [];
+// Results per orchestration mode (Requirement 16.2). EVAL_ORCHESTRATE=off (the
+// default) fills only `off`; `on` only `on`; `both` fills both and the suite
+// prints them side by side against the rollout bar in afterAll.
+const resultsByMode: Record<'off' | 'on', EvalTrialRecord[]> = { off: [], on: [] };
+const modes = orchestrateModes();
 const startedAt = new Date();
 let judgeUsed = false;
-afterAll(() =>
-  report({
-    suite: 'agent',
-    label: `Agent behavior (runAgent + scripted tools, ${evalSplit()} split)`,
-    subject: modelKey,
-    judgeModel: judgeUsed ? judgeKey : undefined,
-    promptVersion: promptVersionHash,
-    startedAt,
-    results,
-  })
-);
+afterAll(async () => {
+  for (const mode of modes) {
+    const results = resultsByMode[mode];
+    if (!results.length) continue;
+    // The orchestrated run gets its own suite key so the baseline gate tracks
+    // the coordinator path separately (Requirement 16.3).
+    await report({
+      suite: mode === 'on' ? 'agent_orchestrated' : 'agent',
+      label: `Agent behavior (runAgent + scripted tools, ${evalSplit()} split${mode === 'on' ? ', orchestrated' : ''})`,
+      subject: mode === 'on' ? `${modelKey} (orchestrated)` : modelKey,
+      judgeModel: judgeUsed ? judgeKey : undefined,
+      promptVersion: promptVersionHash,
+      startedAt,
+      results,
+    });
+  }
+  // Side-by-side comparison + rollout-bar verdict when both modes ran.
+  if (orchestrateMode() === 'both' && resultsByMode.off.length && resultsByMode.on.length) {
+    reportComparison('Agent behavior', resultsByMode.off, resultsByMode.on);
+  }
+});
 
 /** Real definitions to fill in fixture tools that leave description/inputSchema out. */
 const realDefs = new Map<string, McpToolDefinition>(LOCAL_TOOL_DEFINITIONS.map((d) => [d.name, d]));
@@ -126,7 +143,7 @@ function resolveToolDefs(fixture: AgentFixture): ScriptedToolDef[] {
   });
 }
 
-async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrialRecord> {
+async function runTrial(fixture: AgentFixture, trial: number, mode: 'off' | 'on'): Promise<EvalTrialRecord> {
   const t0 = Date.now();
   const record: EvalTrialRecord = { fixtureId: fixture.id, trial, passed: false, notes: '', category: fixture.category };
   const notes: string[] = [];
@@ -134,25 +151,31 @@ async function runTrial(fixture: AgentFixture, trial: number): Promise<EvalTrial
   try {
     // Fresh scripted tools per trial so response queues and call logs don't leak between trials.
     const { tools, calls } = buildScriptedTools(resolveToolDefs(fixture));
-    const run = await runAgent({
-      userInput: fixture.request,
-      modelKey,
-      maxSteps: fixture.maxSteps ?? 12,
-      tools,
-      knowledge: fixture.knowledge,
-      // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
-      modelHealth: new ModelHealthTracker(),
-      // When the fixture declares approveTools, wire up a scripted approver so the
-      // TASK 9 approval gate fires instead of being bypassed (the normal eval path).
-      ...(fixture.approveTools
-        ? {
-            approveTool: async ({ toolName }: { toolName: string }) => ({
-              approved: fixture.approveTools![toolName] ?? false,
-              reason: (fixture.approveTools![toolName] ?? false) ? 'approved by eval' : 'denied by eval',
-            }),
-          }
-        : {}),
-    });
+    // mode === 'on': force the flag to `on` and opt this run into the
+    // coordinator (Requirement 16.2); the same scripted tools, graded the same
+    // way, so any difference is the coordinator's.
+    const run = await withOrchestration(mode === 'on' ? 'on' : 'off', () =>
+      runAgent({
+        userInput: fixture.request,
+        modelKey,
+        maxSteps: fixture.maxSteps ?? 12,
+        tools,
+        knowledge: fixture.knowledge,
+        ...(mode === 'on' ? { orchestrate: true } : {}),
+        // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
+        modelHealth: new ModelHealthTracker(),
+        // When the fixture declares approveTools, wire up a scripted approver so the
+        // TASK 9 approval gate fires instead of being bypassed (the normal eval path).
+        ...(fixture.approveTools
+          ? {
+              approveTool: async ({ toolName }: { toolName: string }) => ({
+                approved: fixture.approveTools![toolName] ?? false,
+                reason: (fixture.approveTools![toolName] ?? false) ? 'approved by eval' : 'denied by eval',
+              }),
+            }
+          : {})
+      })
+    );
     record.totalTokens = run.usage.totalTokens;
     record.costUsd = estimateCostUsd(run.modelKey, run.usage);
     record.steps = run.steps.length;
@@ -231,13 +254,20 @@ describe.runIf(pre.status === 'ready')(`Agent behavior eval (runAgent, k=${trial
   });
 
   it.each(fixtures)('$id', async (fixture) => {
-    const fixtureTrials: EvalTrialRecord[] = [];
+    const failures: string[] = [];
+    // Each requested mode (off, on, or both) runs the fixture's k trials.
     // Sequential, not parallel: concurrent trials against one provider turn
     // rate limits into spurious failures.
-    for (let i = 1; i <= trials; i++) fixtureTrials.push(await runTrial(fixture, i));
-    results.push(...fixtureTrials);
-
-    const failed = fixtureTrials.filter((t) => !t.passed);
-    expect.soft(failed.length, failed.map((t) => `#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`).join(' | ')).toBe(0);
+    for (const mode of modes) {
+      const fixtureTrials: EvalTrialRecord[] = [];
+      for (let i = 1; i <= trials; i++) fixtureTrials.push(await runTrial(fixture, i, mode));
+      resultsByMode[mode].push(...fixtureTrials);
+      const failed = fixtureTrials.filter((t) => !t.passed);
+      if (failed.length) {
+        const tag = modes.length > 1 ? `[${mode}] ` : '';
+        failures.push(...failed.map((t) => `${tag}#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`));
+      }
+    }
+    expect.soft(failures.length, failures.join(' | ')).toBe(0);
   });
 });

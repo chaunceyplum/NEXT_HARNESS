@@ -43,7 +43,7 @@ import { ModelHealthTracker } from '@/lib/llm/model-health';
 import { estimateCostUsd } from '@/lib/llm/pricing';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
-import { report } from './lib/report';
+import { report, reportComparison } from './lib/report';
 import { allCriteria, formatJudgeNotes, judge, JudgeError, summarizeToolActivity } from './lib/judge';
 import {
   evalModelKey,
@@ -54,6 +54,9 @@ import {
   trialsPerFixture,
   warnIfSelfJudging,
   warnSkip,
+  orchestrateMode,
+  orchestrateModes,
+  withOrchestration,
 } from './lib/env';
 import { gradeTrajectory, type TrajectoryExpectations } from './lib/grading';
 import { gradeLaunchValidation, gradePublishTransition, lastResponsePerTool, type PublishExpectation } from './lib/launch-grading';
@@ -111,24 +114,40 @@ if (pre.status === 'skip') warnSkip('launch eval', pre.reason);
 if (pre.status === 'ready') warnIfSelfJudging(modelKey, judgeKey);
 const preflightError = pre.status === 'fail' ? pre.reason : '';
 
-const results: EvalTrialRecord[] = [];
+// Results per orchestration mode (Requirement 16.2). EVAL_ORCHESTRATE=off (the
+// default) fills only `off`; `on` only `on`; `both` fills both and the suite
+// prints them side by side against the rollout bar in afterAll. The rollout
+// bar is read off this suite's `both` run.
+const resultsByMode: Record<'off' | 'on', EvalTrialRecord[]> = { off: [], on: [] };
+const modes = orchestrateModes();
 const startedAt = new Date();
 let judgeUsed = false;
-afterAll(() =>
-  report({
-    // Its own suite: sharing 'agent' made the two evals overwrite each other's
-    // metrics file and latest-run row (the baseline gate and LLM-Ops read both).
-    suite: 'launch',
-    label: 'Launch tagging (runAgent launchMode + scripted Reactor tools, Phase 4 validation gate)',
-    subject: modelKey,
-    judgeModel: judgeUsed ? judgeKey : undefined,
-    promptVersion: promptVersionHash,
-    startedAt,
-    results,
-  })
-);
+afterAll(async () => {
+  for (const mode of modes) {
+    const results = resultsByMode[mode];
+    if (!results.length) continue;
+    await report({
+      // Its own suite: sharing 'agent' made the two evals overwrite each other's
+      // metrics file and latest-run row (the baseline gate and LLM-Ops read both).
+      // The orchestrated run gets its own suite key so the baseline gate tracks
+      // the coordinator path separately (Requirement 16.3).
+      suite: mode === 'on' ? 'launch_orchestrated' : 'launch',
+      label: `Launch tagging (runAgent launchMode + scripted Reactor tools, Phase 4 validation gate${mode === 'on' ? ', orchestrated' : ''})`,
+      subject: mode === 'on' ? `${modelKey} (orchestrated)` : modelKey,
+      judgeModel: judgeUsed ? judgeKey : undefined,
+      promptVersion: promptVersionHash,
+      startedAt,
+      results,
+    });
+  }
+  // Side-by-side comparison + rollout-bar verdict when both modes ran; the
+  // rollout bar in requirements.md is defined on the Launch fixtures.
+  if (orchestrateMode() === 'both' && resultsByMode.off.length && resultsByMode.on.length) {
+    reportComparison('Launch tagging', resultsByMode.off, resultsByMode.on);
+  }
+});
 
-async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTrialRecord> {
+async function runTrial(fixture: LaunchFixture, trial: number, mode: 'off' | 'on'): Promise<EvalTrialRecord> {
   const t0 = Date.now();
   const record: EvalTrialRecord = { fixtureId: fixture.id, trial, passed: false, notes: '', category: fixture.category };
   const notes: string[] = [];
@@ -136,20 +155,26 @@ async function runTrial(fixture: LaunchFixture, trial: number): Promise<EvalTria
   try {
     // Fresh scripted tools per trial so response queues and call logs don't leak between trials.
     const { tools, calls } = buildScriptedTools(fixture.tools);
-    const run = await runAgent({
-      userInput: fixture.request,
-      modelKey,
-      maxSteps: fixture.maxSteps ?? 16,
-      tools,
-      knowledge: fixture.knowledge,
-      // Launch mode: object-model grounding in the system prompt, matching a real tagging run.
-      launchMode: true,
-      // A publish fixture turns on the publish grounding (build→poll→transition
-      // to dev/staging); omit it and the run stops at a populated library.
-      ...(fixture.publishTarget ? { publishTarget: fixture.publishTarget } : {}),
-      // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
-      modelHealth: new ModelHealthTracker(),
-    });
+    // mode === 'on': force the flag and opt into the coordinator (Requirement
+    // 16.2), with the same scripted Reactor tools and the same validation gate
+    // replay, so any difference is the coordinator's.
+    const run = await withOrchestration(mode === 'on' ? 'on' : 'off', () =>
+      runAgent({
+        userInput: fixture.request,
+        modelKey,
+        maxSteps: fixture.maxSteps ?? 16,
+        tools,
+        knowledge: fixture.knowledge,
+        // Launch mode: object-model grounding in the system prompt, matching a real tagging run.
+        launchMode: true,
+        ...(mode === 'on' ? { orchestrate: true } : {}),
+        // A publish fixture turns on the publish grounding (build→poll→transition
+        // to dev/staging); omit it and the run stops at a populated library.
+        ...(fixture.publishTarget ? { publishTarget: fixture.publishTarget } : {}),
+        // Fresh tracker: one trial's provider failure must not reroute the next one to a different model.
+        modelHealth: new ModelHealthTracker(),
+      })
+    );
     record.totalTokens = run.usage.totalTokens;
     record.costUsd = estimateCostUsd(run.modelKey, run.usage);
     record.steps = run.steps.length;
@@ -215,13 +240,20 @@ describe.runIf(pre.status === 'ready')(`Launch tagging eval (runAgent launchMode
   const fixtures = loadFixtures<LaunchFixture>('launch');
 
   it.each(fixtures)('$id', async (fixture) => {
-    const fixtureTrials: EvalTrialRecord[] = [];
+    const failures: string[] = [];
+    // Each requested mode (off, on, or both) runs the fixture's k trials.
     // Sequential, not parallel: concurrent trials against one provider turn
     // rate limits into spurious failures.
-    for (let i = 1; i <= trials; i++) fixtureTrials.push(await runTrial(fixture, i));
-    results.push(...fixtureTrials);
-
-    const failed = fixtureTrials.filter((t) => !t.passed);
-    expect.soft(failed.length, failed.map((t) => `#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`).join(' | ')).toBe(0);
+    for (const mode of modes) {
+      const fixtureTrials: EvalTrialRecord[] = [];
+      for (let i = 1; i <= trials; i++) fixtureTrials.push(await runTrial(fixture, i, mode));
+      resultsByMode[mode].push(...fixtureTrials);
+      const failed = fixtureTrials.filter((t) => !t.passed);
+      if (failed.length) {
+        const tag = modes.length > 1 ? `[${mode}] ` : '';
+        failures.push(...failed.map((t) => `${tag}#${t.trial}${t.errored ? ' ERROR' : ''}: ${t.notes}`));
+      }
+    }
+    expect.soft(failures.length, failures.join(' | ')).toBe(0);
   });
 });

@@ -447,7 +447,19 @@ export class ValidationError extends Error {
 // ============================================================================
 
 /** Which eval suite a run came from — one per `npm run eval:*` file. */
-export type EvalSuite = 'agent' | 'launch' | 'tool_shortlist' | 'rag_judge' | 'judge_calibration' | 'critic_calibration' | 'routing';
+export type EvalSuite =
+  | 'agent'
+  | 'launch'
+  | 'tool_shortlist'
+  | 'rag_judge'
+  | 'judge_calibration'
+  | 'critic_calibration'
+  | 'routing'
+  // Orchestrated-mode results of the agent/launch suites (EVAL_ORCHESTRATE),
+  // kept as their own baseline keys so the regression gate tracks the
+  // coordinator path separately from single-agent (Requirement 16.3).
+  | 'agent_orchestrated'
+  | 'launch_orchestrated';
 
 export interface EvalRunSummary {
   id: string;

@@ -123,14 +123,14 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 9.4 Render stored workers in `app/results/[id]/page.tsx`
   - _Requirements: 15.4_
 
-- [ ] 10. Evals and rollout check
-- [ ] 10.1 Make `evals/lib/scripted-tools.ts` answer by tool name + input, independent of call order
+- [x] 10. Evals and rollout check
+- [x] 10.1 Make `evals/lib/scripted-tools.ts` answer by tool name + input, independent of call order
   - _Requirements: 16.1_
-- [ ] 10.2 Add `EVAL_ORCHESTRATE` (`off` | `on` | `both`) to `evals/launch.eval.ts` and `evals/agent.eval.ts`, with side-by-side reporting
+- [x] 10.2 Add `EVAL_ORCHESTRATE` (`off` | `on` | `both`) to `evals/launch.eval.ts` and `evals/agent.eval.ts`, with side-by-side reporting
   - _Requirements: 16.2_
-- [ ] 10.3 Add agent eval fixtures with independent steps and one forced worker failure
+- [x] 10.3 Add agent eval fixtures with independent steps and one forced worker failure
   - _Requirements: 16.4_
-- [ ] 10.4 Add orchestrated baseline keys to `evals/baseline.json` and `scripts/check-eval-baseline.mjs`
+- [x] 10.4 Add orchestrated baseline keys to `evals/baseline.json` and `scripts/check-eval-baseline.mjs`
   - _Requirements: 16.3_
-- [ ] 10.5 Run both modes on the Launch fixtures and record results against the rollout bar in the introduction of `requirements.md`
+- [x] 10.5 Run both modes on the Launch fixtures and record results against the rollout bar in the introduction of `requirements.md`
   - _Requirements: 16.2_
