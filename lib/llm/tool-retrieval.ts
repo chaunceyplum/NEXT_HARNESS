@@ -12,7 +12,7 @@
  * ~300-tool catalog this is a single batch of embedding calls, cheap
  * relative to actually running the agent. If you want it to survive
  * restarts or scale across instances, you already run pgvector for the
- * MCP's own knowledge base (see HARNESS_SUMMARY.md) — storing tool
+ * MCP's own knowledge base (see ARCHITECTURE.md) — storing tool
  * embeddings there instead of in-process is the natural next step.
  *
  * Embeddings require a *second* provider beyond your chat model (Anthropic
@@ -50,11 +50,6 @@ async function getToolIndex(): Promise<ToolIndexEntry[]> {
     });
   }
   return indexPromise;
-}
-
-/** Force recomputation of the tool embedding index (e.g. after the MCP catalog changes). */
-export function invalidateToolIndexCache(): void {
-  indexPromise = null;
 }
 
 /**

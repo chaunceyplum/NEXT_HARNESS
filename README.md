@@ -7,7 +7,7 @@ zone, and pause/resume), the Data Prep mapping-set API, CJA,
 Reactor/Launch, and a solutions-architecture knowledge base that also
 covers AJO — though there are no dedicated AJO journey/offer tools yet).
 The catalog is filtered to Adobe-scoped tools by default
-(`ADOBE_TOOLS_ONLY`, see below) — AWS/Databricks/Snowflake support is
+(`ADOBE_TOOLS_ONLY`, see [Tool scope](#tool-scope)) — AWS/Databricks/Snowflake support is
 defined in the harness's tool-catalog filtering code but isn't currently
 present in the connected MCP server's tool list.
 
@@ -27,27 +27,43 @@ LLM provider variables that control which models are available. See
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) for a diagram of how the harness,
 the MCP server, and the platforms behind it fit together.
 
-This project was bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## Orchestrator-worker mode
+
+When a run has a plan with independent steps, a deterministic coordinator
+(`lib/llm/coordinator.ts`) can run them as concurrent worker agents
+(`lib/llm/worker.ts`), replan once a step fails, and make one synthesis call
+for the final answer. It's off by default: set `ORCHESTRATION=on` and tick
+**Run steps in parallel** on the home page (or send `"orchestrate": true`),
+or set `ORCHESTRATION=always`. A process-wide slot pool
+(`lib/llm/agent-slots.ts`) caps how many agent loops run at once. See the
+orchestrator-worker section of `ENVIRONMENT_VARIABLES.md` for the limits.
+
+## Tool scope
+
+`ADOBE_TOOLS_ONLY` (default `true`) drops non-Adobe tools (AWS, Databricks,
+Snowflake and the like) from the catalog before the agent sees it; GitHub's
+`msb_github_*` tools are always kept. Set `ADOBE_TOOLS_ONLY=false` to bring
+the others back. `BUILD_POLICY=read-only` and `TOOL_DRY_RUN=true` restrict
+what the agent can change; see `ENVIRONMENT_VARIABLES.md`.
+
+## Access
+
+The harness has **no built-in authentication**: anyone who can reach it can
+run the agent with the MCP server's Adobe and GitHub credentials. Run it on
+a private network or behind an authenticating proxy. `HARNESS_APPROVERS` and
+`HARNESS_ADMINS` match the `x-harness-user` header, so they only restrict
+anything when that proxy sets the header.
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+cp .env.local.example .env.local   # set MCP_ENDPOINT_URL and a chat-model provider
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Open [http://localhost:3000](http://localhost:3000), describe what you want,
+and watch the agent trace.
 
 ## Docker
 
@@ -92,21 +108,25 @@ npm run test        # run the suite once (vitest)
 npm run test:watch  # re-run on file changes
 ```
 
-Covers the pure logic that's cheap to get wrong silently: the tool-scoping
-filter (`isAdobeScoped`), the non-retryable-error classifier and RAG-query
-summarizer in `lib/llm/tool-catalog.ts`, `cosineSimilarity`, the
-pre-commit syntax checker (`validateCommitFiles`), the model registry, and
-the RAG judge's enable/disable gate. Deliberately doesn't hit the live MCP
-server, a real chat model, or a real embedding provider — those need
-credentials this suite shouldn't require just to run.
+Unit tests sit next to the code as `*.test.ts` (in `lib/`, `app/api/` and
+`evals/lib/`): the agent loop and its budgets, tool catalog filtering and
+retries, tool policy and approvals, guardrails, the planner, the
+orchestration coordinator and workers, Launch validation, run jobs and
+storage, tracing, and the eval graders. They stub the model, the MCP server
+and the embedding provider, so they need no credentials. CI
+(`.github/workflows/ci.yml`) runs them with typecheck, lint and build on
+every PR.
 
 ## Evals
 
 ```bash
 npm run eval:shortlist   # does tool shortlisting surface the right tools? (live MCP catalog)
 npm run eval:agent       # does the real agent loop behave? (real model, scripted tools)
+npm run eval:launch      # does Launch mode produce rules/data elements that validate?
+npm run eval:routing     # does "auto" model routing pick the right tier?
 npm run eval:rag-judge   # does the RAG judge agree with a human?
 npm run eval:judge       # does the eval's own rubric judge agree with a human?
+npm run eval:critic      # does the answer critic agree with a human?
 npm run eval:all
 EVAL_TRIALS=5 npm run eval:agent   # repeat each case to measure pass@k / pass^k
 ```
@@ -122,17 +142,12 @@ database, browsable at `/evals`. See
 [`evals/README.md`](./evals/README.md) for what each suite checks and how to
 add fixtures.
 
-## Learn More
+## Documentation
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md): how the harness, the MCP server and the platforms fit together
+- [`ENVIRONMENT_VARIABLES.md`](./ENVIRONMENT_VARIABLES.md): every setting the app reads
+- [`DEPLOYMENT_GUIDE.md`](./DEPLOYMENT_GUIDE.md): EC2, Docker and other deployments, plus known gotchas
+- [`OPERATIONS.md`](./OPERATIONS.md): the weekly habits that keep the agent good in production
+- [`evals/README.md`](./evals/README.md): the eval suites and how to add fixtures
+- [`docs/reactor-tools-context.md`](./docs/reactor-tools-context.md): full reference for the Reactor/Launch tools (a compact version is injected in Launch mode)
+- `.kiro/`: product/tech steering and the orchestrator-workers spec

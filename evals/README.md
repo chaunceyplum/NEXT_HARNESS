@@ -38,6 +38,8 @@ Unit tests, typecheck, lint and build run on every PR (`.github/workflows/ci.yml
 | `npm run eval:rag-judge` | Judge calibration | The production RAG judge (`lib/llm/rag-judge.ts`) on canned retrievals: does its verdict agree with a human's? | Credentials for `RAG_JUDGE_MODEL` (default `DEFAULT_MODEL`) |
 | `npm run eval:judge` | Judge calibration | The eval's own rubric judge against human-labelled answers. Run this before trusting `eval:agent` outcome grades, and again whenever the judge prompt or model changes. | Credentials for the judge model |
 | `npm run eval:critic` | Critic calibration | The production answer critic (`lib/llm/answer-critic.ts`) against the judge-calibration answers that carry a `criticVerdict`. Reports agreement plus catch rate and false-flag rate. Run it before switching `CRITIC_MODE` to `revise`, and whenever the critic prompt or `CRITIC_MODEL` changes. | Credentials for the critic model |
+| `npm run eval:launch` | Trajectory, outcome, safety | The real agent loop in Launch mode against **scripted** Reactor tools. Beyond the agent suite's trajectory checks, it replays the run's rule components and data elements through the Launch validation gate (`lib/llm/launch-validation.ts`): they must validate and every reference must resolve. Also checks that publishing to production is refused. | Credentials for `EVAL_MODEL` and the judge model |
+| `npm run eval:routing` | Routing accuracy | `lib/llm/model-router.ts` on labelled requests in `fixtures/routing/`: is each sent to the right category (lookup/change/build), and do ambiguous ones come back "unclear"? | Credentials for the cheap-tier router model |
 | `npm run eval:all` | | All of the above. | |
 
 Before any fixture runs, each suite prints which model it will use for

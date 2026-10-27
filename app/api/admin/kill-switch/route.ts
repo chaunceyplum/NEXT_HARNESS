@@ -5,7 +5,8 @@
  *      runtime switch (AGENT_DISABLED=true can only be lifted in the env).
  *
  * HARNESS_ADMINS="alice,bob" limits POST to those users (the name comes
- * from the x-harness-user header set by the auth proxy). Unset: any caller.
+ * from the x-harness-user header, which only means something when a proxy
+ * in front of the app sets it; the app has no auth of its own). Unset: any caller.
  */
 
 import { engageKillSwitch, killSwitchStatus, releaseKillSwitch } from '@/lib/kill-switch';

@@ -1,8 +1,0 @@
-{
-  "verdict": "APPROVED",
-  "findings": [
-    "Live attempt badge missing after fallback — worker_done updates status/budget/error but not attempt; a worker that restarted may show no \"attempt N\" after completing live. Cosmetic: the restart event precedes worker_done and leaves attempt untouched, and the results page reads attempt from the stored WorkerRecord. Carry attempt on worker_done to close the gap, or accept the asymmetry.",
-    "No automated tests for the UI change — lane grouping, the restart-by-worker filter, and mergeWorkerSteps are covered only by tsc/lint/build (545 tests still green). Add a render test over AgentTrace with mixed coordinator+worker steps and a mergeWorkerSteps unit test to lock the grouping behavior."
-  ],
-  "reviewDoc": "/Users/chauncey/Desktop/PROJECTS/next_harness/NEXT_HARNESS/.worktrees/orchestrator-workers/.agents/tasks/review-task9.md"
-}
