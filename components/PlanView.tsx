@@ -32,7 +32,19 @@ export default function PlanView({
       <ol className="mt-3 space-y-2">
         {plan.steps.map((s) => (
           <li key={s.id} className="flex gap-3 text-sm">
-            <span className={`shrink-0 h-fit px-2 py-0.5 rounded text-xs font-semibold ${STATUS[s.status].cls}`}>{STATUS[s.status].label}</span>
+            {/* Several steps can be `running` at once in an orchestrated run; when a
+                step has a worker, its badge links to that worker's lane (Req 15.2). */}
+            {s.workerId ? (
+              <a
+                href={`#worker-${s.workerId}`}
+                title="Jump to this step's worker lane"
+                className={`shrink-0 h-fit px-2 py-0.5 rounded text-xs font-semibold underline decoration-dotted ${STATUS[s.status].cls}`}
+              >
+                {STATUS[s.status].label}
+              </a>
+            ) : (
+              <span className={`shrink-0 h-fit px-2 py-0.5 rounded text-xs font-semibold ${STATUS[s.status].cls}`}>{STATUS[s.status].label}</span>
+            )}
             <span className="text-gray-900">
               {s.id}. {s.description}
               {s.tool && <code className="ml-1 text-xs bg-gray-100 px-1 rounded">{s.tool}</code>}

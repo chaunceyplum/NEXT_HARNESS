@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { ApiError, BuildResponse, ExecutionRecord } from '@/lib/types';
-import AgentTrace from '@/components/AgentTrace';
+import { AgentStepDTO, ApiError, BuildResponse, ExecutionRecord, WorkerRecord } from '@/lib/types';
+import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
 import AuditTrail from '@/components/AuditTrail';
@@ -16,6 +16,32 @@ const STATUS_BADGE: Record<string, string> = {
   running: 'bg-blue-100 text-blue-800',
   interrupted: 'bg-amber-100 text-amber-800',
 };
+
+/** One lane per stored worker attempt, in the order they ran (Requirement 15.4). */
+function buildWorkerLanes(workers: WorkerRecord[]): WorkerLane[] {
+  return workers.map((w) => ({
+    workerId: w.workerId,
+    stepId: w.stepId,
+    modelKey: w.modelKey,
+    status: w.status,
+    attempt: w.attempt,
+    budgetUsage: w.budgetUsage,
+    error: w.error,
+  }));
+}
+
+/**
+ * Steps for the orchestrated trace: the coordinator / synthesis steps (no
+ * workerId) from the merged result, plus each worker's own recorded steps
+ * tagged with its workerId so AgentTrace can file them under the right lane.
+ * Taking worker steps from the WorkerRecords keeps lanes populated regardless
+ * of how the stored `result.steps` was merged.
+ */
+function mergeWorkerSteps(resultSteps: AgentStepDTO[], workers: WorkerRecord[]): AgentStepDTO[] {
+  const coordinatorSteps = resultSteps.filter((s) => !s.workerId);
+  const workerSteps = workers.flatMap((w) => w.steps.map((s) => ({ ...s, workerId: s.workerId ?? w.workerId })));
+  return [...coordinatorSteps, ...workerSteps];
+}
 
 export default function RunDetailPage() {
   const params = useParams();
@@ -199,19 +225,27 @@ export default function RunDetailPage() {
 
             {record.result?.plan && <PlanView plan={record.result.plan} />}
 
-            {record.result && (
-              <AgentTrace
-                steps={record.result.steps}
-                toolsConsidered={record.result.toolsConsidered}
-                finishReason={record.result.finishReason}
-                finalText={record.result.finalText}
-                usage={record.result.usage}
-                stopReason={record.result.stopReason}
-                budgetUsage={record.result.budgetUsage}
-                versions={record.result.versions}
-                critique={record.result.critique}
-              />
-            )}
+            {record.result && (() => {
+              const workers = record.result.workers ?? [];
+              const orchestrated = Boolean(record.result.orchestrated) && workers.length > 0;
+              // Lanes and their steps for a stored orchestrated run (Req 15.4).
+              const lanes = orchestrated ? buildWorkerLanes(workers) : undefined;
+              const steps = orchestrated ? mergeWorkerSteps(record.result.steps, workers) : record.result.steps;
+              return (
+                <AgentTrace
+                  steps={steps}
+                  toolsConsidered={record.result.toolsConsidered}
+                  finishReason={record.result.finishReason}
+                  finalText={record.result.finalText}
+                  usage={record.result.usage}
+                  stopReason={record.result.stopReason}
+                  budgetUsage={record.result.budgetUsage}
+                  versions={record.result.versions}
+                  critique={record.result.critique}
+                  workers={lanes}
+                />
+              );
+            })()}
 
             {record.status === 'completed' && <RunFeedback runId={record.id} />}
 

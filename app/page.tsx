@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, RunVersions, TokenUsage } from '@/lib/types';
-import AgentTrace from '@/components/AgentTrace';
+import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
 
@@ -45,8 +45,15 @@ interface RunState {
   versions?: RunVersions;
   done: boolean;
   error?: string;
-  /** Tool calls the run is paused on, waiting for Approve/Deny. */
+  /** Tool calls the run is paused on, waiting for Approve/Deny. Several can be
+      pending at once in an orchestrated run, each from its own worker (req 9.5). */
   pendingApprovals: PendingApproval[];
+  /**
+   * Orchestrated runs: the worker lanes, in the order they started, keyed in a
+   * map for O(1) update on `worker_start` / `worker_done`. Empty for single-agent
+   * runs, so their trace renders as a flat step list (Requirement 15.1).
+   */
+  workers: WorkerLane[];
 }
 
 interface PendingApproval {
@@ -55,8 +62,16 @@ interface PendingApproval {
   input: unknown;
   /** Why the call needs a person, e.g. "sends data or code outside the platform". */
   reasonText: string;
+  /** Set when the call came from an orchestrated worker, so the card can name it (req 15.3). */
+  workerId?: string;
   /** Set while the decision POST is in flight. */
   submitting?: boolean;
+}
+
+/** The worker's plan-step id, parsed from a `${runId}:w${stepId}:${attempt}` workerId. */
+function workerStepId(workerId: string): number | undefined {
+  const m = /:w(\d+):(\d+)$/.exec(workerId);
+  return m ? Number(m[1]) : undefined;
 }
 
 /** Reconnect attempts after a dropped stream before giving up. */
@@ -168,6 +183,7 @@ export default function Home() {
           usage: {},
           done: false,
           pendingApprovals: [],
+          workers: [],
         });
       } else if (event.type === 'step') {
         setRunState((prev) =>
@@ -186,8 +202,46 @@ export default function Home() {
                 ...prev,
                 pendingApprovals: [
                   ...prev.pendingApprovals,
-                  { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, reasonText: event.reasonText },
+                  { toolCallId: event.toolCallId, toolName: event.toolName, input: event.input, reasonText: event.reasonText, workerId: event.workerId },
                 ],
+              }
+            : prev
+        );
+      } else if (event.type === 'worker_start') {
+        // Open a lane for the worker and mark its plan step `running`, linked
+        // to the lane by workerId (Requirements 11.4, 15.1, 15.2).
+        setRunState((prev) => {
+          if (!prev) return prev;
+          const lane: WorkerLane = {
+            workerId: event.workerId,
+            stepId: event.stepId,
+            modelKey: event.modelKey,
+            status: 'running',
+          };
+          const workers = prev.workers.some((w) => w.workerId === event.workerId)
+            ? prev.workers.map((w) => (w.workerId === event.workerId ? { ...w, ...lane } : w))
+            : [...prev.workers, lane];
+          const plan = prev.plan
+            ? {
+                ...prev.plan,
+                steps: prev.plan.steps.map((s) =>
+                  s.id === event.stepId ? { ...s, status: 'running' as const, workerId: event.workerId } : s
+                ),
+              }
+            : prev.plan;
+          return { ...prev, workers, plan };
+        });
+      } else if (event.type === 'worker_done') {
+        // Record the worker's final status, result and spend on its lane.
+        setRunState((prev) =>
+          prev
+            ? {
+                ...prev,
+                workers: prev.workers.map((w) =>
+                  w.workerId === event.workerId
+                    ? { ...w, status: event.status, budgetUsage: event.budgetUsage, error: event.error }
+                    : w
+                ),
               }
             : prev
         );
@@ -208,9 +262,25 @@ export default function Home() {
       } else if (event.type === 'route') {
         setRunState((prev) => (prev ? { ...prev, route: event.route } : prev));
       } else if (event.type === 'restart') {
-        // A fallback model is re-running from scratch — the steps so far
-        // and any streamed text belong to the abandoned attempt.
-        setRunState((prev) => (prev ? { ...prev, steps: [], streamingText: '' } : prev));
+        // A fallback model is re-running from scratch. With a workerId only
+        // that worker's steps belong to the abandoned attempt, so discard
+        // just those and bump its lane's attempt (Requirement 11.4). Without
+        // one it's a single-agent restart: reset the whole trace.
+        setRunState((prev) => {
+          if (!prev) return prev;
+          if (event.workerId) {
+            return {
+              ...prev,
+              steps: prev.steps.filter((s) => s.workerId !== event.workerId),
+              workers: prev.workers.map((w) =>
+                w.workerId === event.workerId
+                  ? { ...w, status: 'running', modelKey: event.toModelKey, attempt: (w.attempt ?? 1) + 1 }
+                  : w
+              ),
+            };
+          }
+          return { ...prev, steps: [], streamingText: '' };
+        });
       } else if (event.type === 'checking') {
         setRunState((prev) => (prev ? { ...prev, checking: true } : prev));
       } else if (event.type === 'done') {
@@ -530,7 +600,17 @@ export default function Home() {
             )}
             {runState.pendingApprovals.map((p) => (
               <div key={p.toolCallId} className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded mb-3">
-                <p className="text-amber-900 font-semibold">Approval needed: {p.reasonText}</p>
+                <p className="text-amber-900 font-semibold">
+                  Approval needed: {p.reasonText}
+                  {p.workerId && (
+                    <a
+                      href={`#worker-${p.workerId}`}
+                      className="ml-2 text-xs font-normal text-amber-700 underline decoration-dotted"
+                    >
+                      worker{workerStepId(p.workerId) != null ? ` · step ${workerStepId(p.workerId)}` : ''}
+                    </a>
+                  )}
+                </p>
                 <p className="text-amber-800 text-sm mt-1">
                   The agent wants to run <code className="bg-white px-1.5 py-0.5 rounded">{p.toolName}</code> with:
                 </p>
@@ -570,6 +650,7 @@ export default function Home() {
               versions={runState.done ? runState.versions : undefined}
               critique={runState.done ? runState.critique : undefined}
               checking={!runState.done && runState.checking}
+              workers={runState.workers.length > 0 ? runState.workers : undefined}
             />
           </div>
         )}

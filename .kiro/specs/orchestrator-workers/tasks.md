@@ -113,14 +113,14 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 8.8 Tests in `lib/build-run.test.ts` and `app/api/build/route.test.ts`
   - _Requirements: 11.1, 11.3, 12.2, 12.4_
 
-- [ ] 9. User interface
-- [ ] 9.1 Handle `worker_start`, `worker_done` and per-worker `restart` in `app/page.tsx`; keep a map of pending approvals
+- [x] 9. User interface
+- [x] 9.1 Handle `worker_start`, `worker_done` and per-worker `restart` in `app/page.tsx`; keep a map of pending approvals
   - _Requirements: 11.4, 15.3_
-- [ ] 9.2 Group steps into worker lanes in `components/AgentTrace.tsx`
+- [x] 9.2 Group steps into worker lanes in `components/AgentTrace.tsx`
   - _Requirements: 15.1_
-- [ ] 9.3 Show concurrent `running` steps linked to lanes in `components/PlanView.tsx`
+- [x] 9.3 Show concurrent `running` steps linked to lanes in `components/PlanView.tsx`
   - _Requirements: 15.2_
-- [ ] 9.4 Render stored workers in `app/results/[id]/page.tsx`
+- [x] 9.4 Render stored workers in `app/results/[id]/page.tsx`
   - _Requirements: 15.4_
 
 - [ ] 10. Evals and rollout check

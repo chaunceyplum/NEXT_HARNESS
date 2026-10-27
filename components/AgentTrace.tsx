@@ -1,6 +1,23 @@
 'use client';
 
-import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage } from '@/lib/types';
+import { useState } from 'react';
+import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage, WorkerStatus } from '@/lib/types';
+
+/**
+ * One worker lane in an orchestrated run (Requirement 15.1). Built from the
+ * live `worker_start` / `worker_done` events on the home page, or from the
+ * stored `WorkerRecord`s on a results page. Its steps are taken from the
+ * trace's `steps`, matched by `workerId`.
+ */
+export interface WorkerLane {
+  workerId: string;
+  stepId: number;
+  modelKey: string;
+  status: WorkerStatus;
+  attempt?: number;
+  budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
+  error?: string;
+}
 
 export interface AgentTraceProps {
   steps: AgentStepDTO[];
@@ -19,7 +36,22 @@ export interface AgentTraceProps {
   critique?: CritiqueInfo;
   /** The streamed answer is finished and being checked; the checked (possibly revised) text replaces it. */
   checking?: boolean;
+  /**
+   * Orchestrated runs only (Requirement 15.1): one lane per worker. When set,
+   * steps carrying a `workerId` are grouped under their lane instead of the
+   * flat list; steps without one (the coordinator / synthesis) stay on top.
+   * Absent on single-agent runs, so their trace is unchanged.
+   */
+  workers?: WorkerLane[];
 }
+
+const WORKER_STATUS: Record<WorkerStatus, { label: string; cls: string }> = {
+  queued: { label: 'queued', cls: 'bg-gray-100 text-gray-600' },
+  running: { label: 'running', cls: 'bg-blue-100 text-blue-800' },
+  done: { label: 'done', cls: 'bg-green-100 text-green-800' },
+  failed: { label: 'failed', cls: 'bg-red-100 text-red-800' },
+  cancelled: { label: 'cancelled', cls: 'bg-amber-100 text-amber-800' },
+};
 
 /** Compact ms → "820ms" / "1.4s" / "2m 05s". */
 function formatMs(ms: number | undefined): string | null {
@@ -39,7 +71,98 @@ const STOP_REASON_LABEL: Record<string, string> = {
 };
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, checking, budgetUsage, versions }: AgentTraceProps) {
+/** One step card in the trace. Shared by the flat list and the worker lanes. */
+function StepCard({ step }: { step: AgentStepDTO }) {
+  const stepTime = formatMs(step.durationMs);
+  const modelTime = formatMs(step.modelMs);
+  const stepTokens = step.usage?.totalTokens;
+  return (
+    <div className="border border-gray-200 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-gray-500">Step {step.stepNumber + 1}</p>
+        {(stepTime || stepTokens != null) && (
+          <p className="text-[11px] text-gray-400 font-mono">
+            {stepTime && <span title="total step time">{stepTime}</span>}
+            {stepTime && modelTime && <span className="text-gray-300"> · </span>}
+            {modelTime && <span title="model response time">model {modelTime}</span>}
+            {(stepTime || modelTime) && stepTokens != null && <span className="text-gray-300"> · </span>}
+            {stepTokens != null && <span title="tokens this step">{stepTokens.toLocaleString()} tok</span>}
+          </p>
+        )}
+      </div>
+      {step.text && <p className="text-sm text-gray-800 mb-2 whitespace-pre-wrap">{step.text}</p>}
+      {step.toolCalls.map((call, i) => (
+        <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2 font-mono text-xs text-green-400 overflow-x-auto">
+          <div className="text-blue-300">→ {call.toolName}</div>
+          <pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(call.input, null, 2)}</pre>
+        </div>
+      ))}
+      {step.toolResults.map((res, i) => {
+        const toolTime = formatMs(res.durationMs);
+        return (
+          <div
+            key={i}
+            className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${
+              res.error ? 'bg-red-950 text-red-300' : 'bg-gray-800 text-gray-300'
+            }`}
+          >
+            <div className={`flex items-center justify-between ${res.error ? 'text-red-300' : 'text-yellow-300'}`}>
+              <span>← {res.toolName} {res.error ? 'error' : 'result'}</span>
+              {toolTime && <span className="text-gray-400" title="tool execution time">{toolTime}</span>}
+            </div>
+            <pre className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto">
+              {res.error ?? JSON.stringify(res.output, null, 2)}
+            </pre>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A collapsible lane for one worker: its status, model, tokens and steps (Requirement 15.1). */
+function WorkerLaneCard({ lane, steps }: { lane: WorkerLane; steps: AgentStepDTO[] }) {
+  const [open, setOpen] = useState(lane.status === 'running' || lane.status === 'failed');
+  const status = WORKER_STATUS[lane.status] ?? WORKER_STATUS.queued;
+  const tokens = lane.budgetUsage?.tokens;
+  const duration = formatMs(lane.budgetUsage?.durationMs);
+  return (
+    <div id={`worker-${lane.workerId}`} className="border border-indigo-200 rounded-lg overflow-hidden scroll-mt-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-2 px-4 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-left transition-colors"
+      >
+        <span className="text-gray-400 text-xs w-3">{open ? '▾' : '▸'}</span>
+        <span className="text-sm font-semibold text-indigo-900">Worker · step {lane.stepId}</span>
+        <span className={`px-2 py-0.5 rounded text-xs font-semibold ${status.cls}`}>{status.label}</span>
+        {lane.attempt != null && lane.attempt > 1 && (
+          <span className="text-xs text-gray-500">attempt {lane.attempt}</span>
+        )}
+        <span className="text-xs text-gray-500 ml-auto flex items-center gap-2 font-mono">
+          <code className="bg-white px-1 rounded not-italic">{lane.modelKey}</code>
+          {tokens != null && <span title="tokens this worker">{tokens.toLocaleString()} tok</span>}
+          {duration && <span title="worker duration">{duration}</span>}
+        </span>
+      </button>
+      {open && (
+        <div className="p-3 space-y-3 bg-white">
+          {lane.error && (
+            <p className="text-xs text-red-700 bg-red-50 border-l-4 border-red-400 px-3 py-2 rounded">{lane.error}</p>
+          )}
+          {steps.length > 0 ? (
+            steps.map((step) => <StepCard key={step.stepNumber} step={step} />)
+          ) : (
+            <p className="text-xs text-gray-400 italic">No steps recorded for this worker yet.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function AgentTrace({ steps, toolsConsidered, finishReason, finalText, usage, stopReason, critique, checking, budgetUsage, versions, workers }: AgentTraceProps) {
   // "stop" means the model decided it was done. "running" means we're still
   // streaming. Anything else (most commonly "tool-calls") means the run was
   // cut off at the step limit, and finalText is not a real conclusion.
@@ -95,55 +218,26 @@ export default function AgentTrace({ steps, toolsConsidered, finishReason, final
 
       <div className="text-xs text-gray-500">Tools available this run: {toolsConsidered.join(', ') || 'none'}</div>
 
-      <div className="space-y-3">
-        {steps.map((step) => {
-          const stepTime = formatMs(step.durationMs);
-          const modelTime = formatMs(step.modelMs);
-          const stepTokens = step.usage?.totalTokens;
-          return (
-          <div key={step.stepNumber} className="border border-gray-200 rounded-lg p-4">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-semibold text-gray-500">Step {step.stepNumber + 1}</p>
-              {(stepTime || stepTokens != null) && (
-                <p className="text-[11px] text-gray-400 font-mono">
-                  {stepTime && <span title="total step time">{stepTime}</span>}
-                  {stepTime && modelTime && <span className="text-gray-300"> · </span>}
-                  {modelTime && <span title="model response time">model {modelTime}</span>}
-                  {(stepTime || modelTime) && stepTokens != null && <span className="text-gray-300"> · </span>}
-                  {stepTokens != null && <span title="tokens this step">{stepTokens.toLocaleString()} tok</span>}
-                </p>
-              )}
-            </div>
-            {step.text && <p className="text-sm text-gray-800 mb-2 whitespace-pre-wrap">{step.text}</p>}
-            {step.toolCalls.map((call, i) => (
-              <div key={i} className="bg-gray-900 rounded-lg p-3 mb-2 font-mono text-xs text-green-400 overflow-x-auto">
-                <div className="text-blue-300">→ {call.toolName}</div>
-                <pre className="whitespace-pre-wrap break-words mt-1">{JSON.stringify(call.input, null, 2)}</pre>
-              </div>
+      {workers && workers.length > 0 ? (
+        // Orchestrated run: coordinator / synthesis steps (no workerId) on top,
+        // then one collapsible lane per worker with its own steps (Req 15.1).
+        <div className="space-y-3">
+          {steps.filter((s) => !s.workerId).map((step) => (
+            <StepCard key={step.stepNumber} step={step} />
+          ))}
+          <div className="space-y-2">
+            {workers.map((lane) => (
+              <WorkerLaneCard key={lane.workerId} lane={lane} steps={steps.filter((s) => s.workerId === lane.workerId)} />
             ))}
-            {step.toolResults.map((res, i) => {
-              const toolTime = formatMs(res.durationMs);
-              return (
-              <div
-                key={i}
-                className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${
-                  res.error ? 'bg-red-950 text-red-300' : 'bg-gray-800 text-gray-300'
-                }`}
-              >
-                <div className={`flex items-center justify-between ${res.error ? 'text-red-300' : 'text-yellow-300'}`}>
-                  <span>← {res.toolName} {res.error ? 'error' : 'result'}</span>
-                  {toolTime && <span className="text-gray-400" title="tool execution time">{toolTime}</span>}
-                </div>
-                <pre className="whitespace-pre-wrap break-words mt-1 max-h-48 overflow-y-auto">
-                  {res.error ?? JSON.stringify(res.output, null, 2)}
-                </pre>
-              </div>
-              );
-            })}
           </div>
-          );
-        })}
-      </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {steps.map((step) => (
+            <StepCard key={step.stepNumber} step={step} />
+          ))}
+        </div>
+      )}
 
       <div className={`p-4 rounded-lg border-l-4 ${isIncomplete ? 'bg-amber-50 border-amber-500' : isRunning ? 'bg-blue-50 border-blue-400' : 'bg-green-50 border-green-500'}`}>
         <p className={`font-medium ${isIncomplete ? 'text-amber-800' : isRunning ? 'text-blue-700' : 'text-green-800'}`}>
