@@ -1507,7 +1507,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   // the single-agent loop with `orchestrated: false` (Requirement 2.5).
   if (planTracker && shouldOrchestrate(orchestrationFlag(), opts.orchestrate, planTracker.plan)) {
     const config = orchestrationConfig({ ...(opts.maxWorkers !== undefined ? { maxWorkers: opts.maxWorkers } : {}) }, ctx.launchMode);
-    const catalog = opts.tools ? [] : await getMcpToolCatalog();
+    // workerTools reads the catalog only for tool names (to find platform-group
+    // siblings). The eval path's injected tools stand in for the MCP catalog,
+    // so eval workers get the same sibling expansion as live ones.
+    const catalog = opts.tools
+      ? Object.entries(opts.tools).map(([name, t]) => ({
+          name,
+          description: (t as { description?: string }).description ?? '',
+          inputSchema: { type: 'object' },
+        }))
+      : await getMcpToolCatalog();
     const runModelKey = ctx.startModelKey ?? getDefaultModelKey();
     // Requirement 14.1: one run span, with the coordinator span under it and
     // each worker under that — run → coordinator → worker → step. A
