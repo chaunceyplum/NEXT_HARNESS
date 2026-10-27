@@ -411,10 +411,12 @@ function isClaudeModelId(modelId: string): boolean {
  * conversation — system prompt, tools array, and every earlier message must
  * be byte-identical when the blocks are replayed, or the API returns a 400
  * (enforced by default for accounts created on or after 2026-08-31). These
- * always think, so on them the loop must be append-only: no rewriting old
- * tool results, no dropping the tools array for a text-only last step.
+ * think by default, so on them the loop must be append-only: no rewriting old
+ * tool results, no dropping the tools array for a text-only last step, and no
+ * forced tool_choice (Sonnet 5.5 and Opus 5.5 reject it, and the provider's
+ * workaround sends only the forced tool, which changes the tools array).
  */
-const HISTORY_BOUND_MODEL_RE = /claude-(?:opus-5-5|fable-5-1|mythos-5-1)/i;
+const HISTORY_BOUND_MODEL_RE = /claude-(?:opus-5-5|sonnet-5-5|haiku-5-5|fable-5-1|mythos-5-1)/i;
 
 function isHistoryBound(modelKey: string): boolean {
   const entry = tryGetModelEntry(modelKey);

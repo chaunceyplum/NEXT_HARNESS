@@ -19,6 +19,7 @@ vi.mock('./model-registry', () => {
   const entries = [
     { key: 'test:bound', label: 'bound', provider: 'anthropic', modelId: 'claude-opus-5-5', tier: 'expensive' },
     { key: 'test:plain', label: 'plain', provider: 'anthropic', modelId: 'claude-sonnet-5', tier: 'balanced' },
+    { key: 'test:sonnet55', label: 'sonnet 5.5', provider: 'anthropic', modelId: 'claude-sonnet-5-5', tier: 'balanced' },
   ];
   return {
     getModelRegistry: () => entries,
@@ -287,6 +288,17 @@ describe('runAgent loop shape', () => {
       expect(calls[i].toolChoice?.type).not.toBe('none');
     }
     expect(JSON.stringify(calls.at(-1)!.prompt.at(-1))).toContain('This is your last step');
+    expect(calls[0].providerOptions?.anthropic).toMatchObject({
+      contextManagement: { edits: [expect.objectContaining({ type: 'clear_tool_uses_20250919' })] },
+    });
+  });
+
+  it('treats Sonnet 5.5 as history-bound: no forced or dropped tools, server-side context editing', async () => {
+    script = [listCall, listCall, { text: 'final' }];
+    await runAgent({ userInput: 'list segments twice', modelKey: 'test:sonnet55', maxSteps: 3 });
+
+    expect(calls.at(-1)!.toolChoice?.type).not.toBe('none');
+    expect(toolNames(calls.at(-1)!)).toEqual(toolNames(calls[0]));
     expect(calls[0].providerOptions?.anthropic).toMatchObject({
       contextManagement: { edits: [expect.objectContaining({ type: 'clear_tool_uses_20250919' })] },
     });
