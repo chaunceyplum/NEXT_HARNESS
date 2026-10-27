@@ -123,11 +123,21 @@ async function shortlistToolsLexical(
 
 let warnedAboutLexicalFallback = false;
 
+/**
+ * After the embedding provider fails, runs go straight to lexical ranking for
+ * this long instead of each retrying the whole catalog embed (up to ~300
+ * calls, 8 at a time) before falling back.
+ */
+const EMBEDDING_RETRY_COOLDOWN_MS = 5 * 60_000;
+let embeddingsDownUntil = 0;
+
 /** Return the top-K MCP tool names most relevant to `query` (semantic if an embedding provider is configured, lexical otherwise). */
 export async function shortlistTools(query: string, opts: ShortlistOptions = {}): Promise<string[]> {
   const k = opts.k ?? 12;
   const exclude = new Set(opts.exclude ?? []);
   const include = opts.include ?? (() => true);
+
+  if (Date.now() < embeddingsDownUntil) return shortlistToolsLexical(query, k, exclude, include);
 
   try {
     const [index, [queryEmbedding]] = await Promise.all([getToolIndex(), embedTexts([query])]);
@@ -138,6 +148,7 @@ export async function shortlistTools(query: string, opts: ShortlistOptions = {})
       .slice(0, k)
       .map((s) => s.name);
   } catch (err) {
+    embeddingsDownUntil = Date.now() + EMBEDDING_RETRY_COOLDOWN_MS;
     if (!warnedAboutLexicalFallback) {
       warnedAboutLexicalFallback = true;
       const message = err instanceof Error ? err.message : String(err);
