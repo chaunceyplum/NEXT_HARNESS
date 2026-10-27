@@ -18,7 +18,15 @@ export interface ModelPrice {
   input: number;
   /** USD per 1M output tokens. */
   output: number;
+  /** USD per 1M tokens read from the prompt cache. Defaults to CACHE_READ_RATE × input. */
+  cacheRead?: number;
+  /** USD per 1M tokens written to the prompt cache. Defaults to CACHE_WRITE_RATE × input. */
+  cacheWrite?: number;
 }
+
+/** Anthropic's cache pricing relative to the input price: reads 0.1×, 5-minute writes 1.25×. */
+const CACHE_READ_RATE = 0.1;
+const CACHE_WRITE_RATE = 1.25;
 
 /** Matched as a substring of the model id, so Bedrock's "anthropic.…-v1:0" forms resolve too. */
 const DEFAULT_PRICES: Array<[string, ModelPrice]> = [
@@ -54,9 +62,44 @@ export function getModelPrice(modelKey: string): ModelPrice | undefined {
   return DEFAULT_PRICES.find(([id]) => modelId.includes(id))?.[1];
 }
 
-/** Estimated USD cost of one run's usage, or undefined if the price or token counts are unknown. */
+/**
+ * Estimated USD cost of one run's usage, or undefined if the price or token
+ * counts are unknown. Cached input is priced at the cache rates, so a run
+ * that mostly reads its prompt from cache isn't billed as if it didn't.
+ */
 export function estimateCostUsd(modelKey: string, usage: TokenUsage): number | undefined {
   const price = getModelPrice(modelKey);
   if (!price || usage.inputTokens == null || usage.outputTokens == null) return undefined;
-  return (usage.inputTokens * price.input + usage.outputTokens * price.output) / 1_000_000;
+  const cacheRead = usage.cacheReadTokens ?? 0;
+  const cacheWrite = usage.cacheWriteTokens ?? 0;
+  const uncached = Math.max(0, usage.inputTokens - cacheRead - cacheWrite);
+  return (
+    (uncached * price.input +
+      cacheRead * (price.cacheRead ?? price.input * CACHE_READ_RATE) +
+      cacheWrite * (price.cacheWrite ?? price.input * CACHE_WRITE_RATE) +
+      usage.outputTokens * price.output) /
+    1_000_000
+  );
+}
+
+/** The AI SDK's usage shape, as far as pricing reads it. */
+export interface SdkUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+}
+
+/** An AI SDK usage object as a TokenUsage, keeping the cache split. */
+export function toTokenUsage(usage: SdkUsage | undefined): TokenUsage {
+  if (!usage) return {};
+  const read = usage.inputTokenDetails?.cacheReadTokens;
+  const write = usage.inputTokenDetails?.cacheWriteTokens;
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    ...(read ? { cacheReadTokens: read } : {}),
+    ...(write ? { cacheWriteTokens: write } : {}),
+  };
 }

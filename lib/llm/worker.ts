@@ -402,7 +402,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     const inputTokens = s.usage?.inputTokens ?? 0;
     const outputTokens = s.usage?.outputTokens ?? 0;
     spentTokens += inputTokens + outputTokens;
-    const cost = estimateCostUsd(currentModelKey, { inputTokens, outputTokens });
+    const cost = estimateCostUsd(currentModelKey, { ...s.usage, inputTokens, outputTokens });
     spentCost = spentCost === undefined || cost === undefined ? undefined : spentCost + cost;
     input.onStep?.(s);
   };

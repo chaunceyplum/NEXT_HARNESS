@@ -19,7 +19,7 @@
  * repeating does the run stop.
  */
 
-import { estimateCostUsd } from './pricing';
+import { estimateCostUsd, toTokenUsage, type SdkUsage } from './pricing';
 
 export type BudgetStopReason = 'token-budget' | 'cost-budget' | 'time-budget' | 'loop-detected';
 
@@ -118,11 +118,11 @@ export class RunBudgetTracker {
   }
 
   /** Record one finished step's usage and tool calls (effective calls — call_tool already unwrapped). */
-  recordStep(usage: { inputTokens?: number; outputTokens?: number }, calls: Array<{ toolName: string; input: unknown }>): void {
+  recordStep(usage: SdkUsage, calls: Array<{ toolName: string; input: unknown }>): void {
     const input = usage.inputTokens ?? 0;
     const output = usage.outputTokens ?? 0;
     this.tokens += input + output;
-    const stepCost = estimateCostUsd(this.modelKey, { inputTokens: input, outputTokens: output });
+    const stepCost = estimateCostUsd(this.modelKey, { ...toTokenUsage(usage), inputTokens: input, outputTokens: output });
     this.costUsd = this.costUsd === undefined || stepCost === undefined ? undefined : this.costUsd + stepCost;
     // A worker step charges the run ledger too, so the run's limits hold no
     // matter how many workers run. Cost is charged at the child's model price.

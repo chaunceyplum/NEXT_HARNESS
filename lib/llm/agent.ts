@@ -75,6 +75,7 @@ import { acquireLoopSlot } from './agent-slots';
 import { orchestrationConfig, orchestrationRequested, runOrchestrated, shouldOrchestrate } from './coordinator';
 import { orchestrationFlag } from './orchestration-config';
 import type { ResumePlan } from '../types';
+import { toTokenUsage, type SdkUsage } from './pricing';
 import type { WorkerRecord } from './worker';
 import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../tracing';
 import { promptVersion, toolsetVersion, appVersion } from '../version';
@@ -714,7 +715,7 @@ interface StepForTrace {
   text: string;
   content: ReadonlyArray<{ type: string }>;
   /** step.usage — chat-model tokens for this step. */
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  usage?: SdkUsage;
   /** step.performance — timing the SDK measured for this step (streaming steps only for some fields). */
   performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
 }
@@ -774,9 +775,7 @@ function toStepTrace(step: StepForTrace, stepNumber: number): AgentStepTrace {
     toolResults,
     ...(perf?.stepTimeMs !== undefined ? { durationMs: perf.stepTimeMs } : {}),
     ...(perf?.responseTimeMs !== undefined ? { modelMs: perf.responseTimeMs } : {}),
-    ...(step.usage
-      ? { usage: { inputTokens: step.usage.inputTokens, outputTokens: step.usage.outputTokens, totalTokens: step.usage.totalTokens } }
-      : {}),
+    ...(step.usage ? { usage: toTokenUsage(step.usage) } : {}),
   };
 }
 
@@ -1472,11 +1471,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       modelKey: resolvedModelKey,
       ...(stopReason ? { stopReason } : {}),
       budgetUsage,
-      usage: {
-        inputTokens: result.usage.inputTokens,
-        outputTokens: result.usage.outputTokens,
-        totalTokens: result.usage.totalTokens,
-      },
+      usage: toTokenUsage(result.usage),
       hadSideEffects: attemptHadSideEffects,
     };
   } finally {

@@ -39,7 +39,7 @@ import type { ModelHealthTracker } from './model-health';
 import { RunTracer, exportSpans, type AttrValue, type Span, type SpanRef } from '../tracing';
 import { resolveModel } from './model-registry';
 import { acquireLoopSlot } from './agent-slots';
-import { estimateCostUsd } from './pricing';
+import { estimateCostUsd, toTokenUsage, type SdkUsage } from './pricing';
 import {
   readySteps,
   parallelWidth,
@@ -281,7 +281,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     const outputTokens = usage.outputTokens ?? 0;
     const tokens = usage.totalTokens ?? inputTokens + outputTokens;
     if (!tokens) return;
-    ledger.charge(tokens, estimateCostUsd(modelKey, { inputTokens, outputTokens }), { inputTokens, outputTokens });
+    ledger.charge(tokens, estimateCostUsd(modelKey, { ...toTokenUsage(usage), inputTokens, outputTokens }), { inputTokens, outputTokens });
   };
 
   /** Mark a step and notify the plan listener (Requirement 3.5). */
@@ -608,11 +608,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
 }
 
 /** Token usage reported by one model call. */
-interface CallUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-}
+type CallUsage = SdkUsage;
 
 // ── Replanning ──────────────────────────────────────────────────────────────────
 

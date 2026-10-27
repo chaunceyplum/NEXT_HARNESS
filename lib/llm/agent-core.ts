@@ -229,7 +229,7 @@ export interface AgentStepTrace {
   /** Time spent waiting on the model response, in ms (step.performance.responseTimeMs). */
   modelMs?: number;
   /** Chat-model token usage for this step alone. */
-  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  usage?: TokenUsage;
 }
 
 /**
@@ -238,9 +238,14 @@ export interface AgentStepTrace {
  * circular import; re-exported from agent.ts for existing callers.
  */
 export interface TokenUsage {
+  /** Every input token, cached or not. */
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** The part of inputTokens read from the prompt cache. */
+  cacheReadTokens?: number;
+  /** The part of inputTokens written to the prompt cache. */
+  cacheWriteTokens?: number;
 }
 
 /** One finished, failed, or denied tool call, reported to onToolOutcome. */

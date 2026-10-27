@@ -26,6 +26,9 @@ export interface ProductionRunRow {
   stopReason?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** The part of inputTokens read from / written to the prompt cache, priced at the cache rates. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   steps?: number;
   /** Tool calls a person (or the approval timeout) denied. */
   denied: number;
@@ -115,7 +118,12 @@ export function isSuccess(r: ProductionRunRow): boolean {
 
 function runCost(r: ProductionRunRow): number | undefined {
   if (r.orchestrated && r.ledgerCostUsd !== undefined) return r.ledgerCostUsd;
-  return estimateCostUsd(r.model, { inputTokens: r.inputTokens, outputTokens: r.outputTokens });
+  return estimateCostUsd(r.model, {
+    inputTokens: r.inputTokens,
+    outputTokens: r.outputTokens,
+    cacheReadTokens: r.cacheReadTokens,
+    cacheWriteTokens: r.cacheWriteTokens,
+  });
 }
 
 function sum(values: number[]): number {
@@ -198,6 +206,8 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
             r.result->>'stopReason' AS stop_reason,
             (r.result->'usage'->>'inputTokens')::bigint AS input_tokens,
             (r.result->'usage'->>'outputTokens')::bigint AS output_tokens,
+            (r.result->'usage'->>'cacheReadTokens')::bigint AS cache_read_tokens,
+            (r.result->'usage'->>'cacheWriteTokens')::bigint AS cache_write_tokens,
             jsonb_array_length(COALESCE(r.result->'steps', '[]'::jsonb)) AS steps,
             (SELECT count(*) FROM jsonb_array_elements(COALESCE(r.result->'steps', '[]'::jsonb)) s,
                     jsonb_array_elements(COALESCE(s->'toolResults', '[]'::jsonb)) t
@@ -225,6 +235,8 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
     stopReason: (row.stop_reason as string | null) ?? undefined,
     inputTokens: num(row.input_tokens),
     outputTokens: num(row.output_tokens),
+    cacheReadTokens: num(row.cache_read_tokens),
+    cacheWriteTokens: num(row.cache_write_tokens),
     steps: row.status === 'completed' ? num(row.steps) : undefined,
     denied: Number(row.denied ?? 0),
     orchestrated: (row.orchestrated as boolean | null) ?? undefined,

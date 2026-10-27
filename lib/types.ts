@@ -105,9 +105,14 @@ export interface RunVersions {
  * `undefined` if the provider didn't report it.
  */
 export interface TokenUsage {
+  /** Every input token, cached or not. */
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** The part of inputTokens read from the prompt cache (billed at a fraction of the input price). */
+  cacheReadTokens?: number;
+  /** The part of inputTokens written to the prompt cache (billed above the input price). */
+  cacheWriteTokens?: number;
 }
 
 export interface BuildRequest {

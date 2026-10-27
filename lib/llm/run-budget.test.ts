@@ -58,6 +58,15 @@ describe('RunBudgetTracker', () => {
     expect(t.usage().costUsd).toBe(5);
   });
 
+  it('charges cache reads at the cache rate, so a cached prompt does not trip the ceiling', () => {
+    process.env.MODEL_PRICING_JSON = JSON.stringify({ priced: { input: 1_000_000, output: 0, cacheRead: 100_000 } });
+    const t = new RunBudgetTracker({ ...limits, maxTokens: undefined, maxCostUsd: 5 }, 'priced', 0, () => 0);
+    // 10 input tokens, 9 of them read from cache: 1 × $1 + 9 × $0.1 = $1.9.
+    t.recordStep({ inputTokens: 10, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 9 } }, []);
+    expect(t.usage().costUsd).toBeCloseTo(1.9);
+    expect(t.exceeded()).toBeUndefined();
+  });
+
   it('ignores the cost ceiling when the model has no price', () => {
     const t = new RunBudgetTracker({ ...limits, maxTokens: undefined, maxCostUsd: 0.000001 }, 'unknown', 0, () => 0);
     t.recordStep({ inputTokens: 1_000, outputTokens: 1_000 }, []);
