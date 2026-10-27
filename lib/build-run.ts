@@ -213,8 +213,16 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           : {}),
         onRoute: (route) => push({ type: 'route', route }),
         // TASK 9: flagged calls wait here for the user's decision
-        approveTool: async ({ toolCallId, toolName, input, reason }) => {
-          push({ type: 'approval_request', toolCallId, toolName, input: redactOutput(input), reason, reasonText: APPROVAL_REASON_TEXT[reason] });
+        approveTool: async ({ toolCallId, toolName, input, reason, workerId }) => {
+          push({
+            type: 'approval_request',
+            toolCallId,
+            toolName,
+            input: redactOutput(input),
+            reason,
+            reasonText: APPROVAL_REASON_TEXT[reason],
+            ...(workerId ? { workerId } : {}),
+          });
           const decision = await waitForApproval(runId, toolCallId, abort.signal);
           push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
           void recordAudit([
@@ -228,6 +236,7 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
               input,
               outcome: decision.approved ? 'approved' : 'denied',
               error: decision.approved ? undefined : decision.reason,
+              ...(workerId ? { workerId } : {}),
             },
           ]);
           return decision;

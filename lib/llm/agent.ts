@@ -49,6 +49,7 @@ import {
   type LoopResult,
   type PreparedRun,
   type EarlyResult,
+  type ToolApprovalFn,
 } from './agent-core';
 import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from './model-health';
 import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from './tool-policy';
@@ -284,6 +285,8 @@ export interface RunAgentOptions {
     toolName: string;
     input: unknown;
     reason: ApprovalReason;
+    /** Set when an orchestrated worker made the call (Requirements 11.3, 15.3). */
+    workerId?: string;
   }) => Promise<{ approved: boolean; reason?: string }>;
   /**
    * Orchestrator-worker mode (lib/llm/coordinator.ts). When ORCHESTRATION is
@@ -1078,7 +1081,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
   const toolApproval = (opts.tools && !opts.approveTool)
     ? undefined
-    : async ({ toolCall }: { toolCall: { toolCallId: string; toolName: string; input: unknown } }) => {
+    : async ({ toolCall, workerId }: Parameters<ToolApprovalFn>[0]) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
         // A publish transition's exemption from the outbound gate is decided
         // from the gate's server-truth stage (launch-validation.ts): a verified
@@ -1097,7 +1100,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
             reason: `This call needs a human approver (${APPROVAL_REASON_TEXT[reason]}), and none is attached to this run.`,
           };
         }
-        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason });
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason, ...(workerId ? { workerId } : {}) });
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 

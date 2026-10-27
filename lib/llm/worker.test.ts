@@ -260,6 +260,18 @@ describe('runWorker', () => {
     expect(rec.error).toBe('extension missing');
   });
 
+  it('tags its approval requests with its workerId (Req 11.3, 15.3)', async () => {
+    const toolApproval = vi.fn(async () => 'not-applicable' as const);
+    script = [
+      { toolCall: { toolName: 'reactor_create_data_element', input: { id: 'x' } } },
+      report({ status: 'done', summary: 'ok' }),
+    ];
+    await runWorker(baseInput({ shared: makeShared({ toolApproval }) }));
+    expect(toolApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ workerId: 'run1:w2:1', toolCall: expect.objectContaining({ toolName: 'reactor_create_data_element' }) })
+    );
+  });
+
   it('fails with "worker ended without a result" when none is reported (Req 4.7)', async () => {
     // The model only ever writes text, never calls report_result.
     script = [{ text: 'I looked around' }, { text: 'still nothing' }, { text: 'done' }];

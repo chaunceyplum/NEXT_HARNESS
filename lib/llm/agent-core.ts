@@ -265,6 +265,8 @@ export interface ToolOutcome {
  */
 export type ToolApprovalFn = (args: {
   toolCall: { toolCallId: string; toolName: string; input: unknown };
+  /** The orchestrated worker asking, so the approval can name it (Requirements 11.3, 15.3). */
+  workerId?: string;
 }) => Promise<
   | 'not-applicable'
   | { type: 'approved'; reason?: string }

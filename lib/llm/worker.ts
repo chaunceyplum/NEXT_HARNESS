@@ -340,7 +340,10 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     // Requirement 14.1: nest the worker's trace under the coordinator span.
     ...(shared.tracerParent ? { tracerParent: shared.tracerParent } : {}),
     ...(shared.launchGate ? { launchGate: shared.launchGate } : {}),
-    ...(shared.toolApproval ? { toolApproval: shared.toolApproval } : {}),
+    // Tag each approval with this worker so the request names it (Requirements 11.3, 15.3).
+    ...(shared.toolApproval
+      ? { toolApproval: ((approval) => shared.toolApproval!({ ...approval, workerId })) as ToolApprovalFn }
+      : {}),
     ...(input.thinkingBudget !== undefined ? { thinkingBudget: input.thinkingBudget } : {}),
     abortSignal: controller.signal,
     ...(input.onStep ? { onStep: input.onStep } : {}),
