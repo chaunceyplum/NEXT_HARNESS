@@ -83,7 +83,9 @@ const CATALOG = ['adobe_list_segments', 'adobe_delete_segment', 'adobe_create_se
   inputSchema: { type: 'object', properties: { id: { type: 'string' }, sql: { type: 'string' } } },
 }));
 
-vi.mock('./tool-catalog', () => ({
+vi.mock('./tool-catalog', async (importOriginal) => ({
+  // The platform groups, for orchestrated workers' tool narrowing.
+  ...(await importOriginal<typeof import('./tool-catalog')>()),
   getMcpToolCatalog: async () => CATALOG,
   // runAgent creates a sink on the live path and drains it at the end; the
   // scripted tools here never judge, so an empty-draining stub is enough.
@@ -126,6 +128,15 @@ vi.mock('../memory-store', () => ({
   memoryPreamble: (facts: Array<{ key: string; value: string }>) =>
     facts.length ? `Known facts:\n${facts.map((f) => `- ${f.key}: ${f.value}`).join('\n')}\n` : '',
   saveFact: async (f: { key: string; value: string }) => (savedFacts.push(f), f),
+}));
+
+// Every span batch the run exports, for checking how the traces nest.
+const exported: Array<Array<{ spanId: string; parentSpanId?: string; traceId: string; name: string; attributes: Record<string, unknown> }>> = [];
+vi.mock('../tracing', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../tracing')>()),
+  exportSpans: async (spans: (typeof exported)[number]) => {
+    exported.push(spans);
+  },
 }));
 
 const { runAgent, resolveLaunchMode } = await import('./agent');
@@ -547,6 +558,40 @@ describe('runAgent plan-first with model "auto"', () => {
     const result = await runAgent({ userInput: 'Create a segment for gold members', modelKey: 'auto', planFirst: true });
     expect(result.route?.modelKey).toBe('test:plain');
     expect(result.plan?.goal).toBe('g');
+  });
+});
+
+describe('runAgent orchestrated tracing', () => {
+  it('nests run → coordinator → worker in one trace', async () => {
+    process.env.ORCHESTRATION = 'on';
+    exported.length = 0;
+    const plan = {
+      goal: 'List segments and datasets',
+      steps: [
+        { id: 1, description: 'List the segments', tool: 'adobe_list_segments', expectedOutput: 'segments', dependsOn: [] },
+        { id: 2, description: 'List the segments again', tool: 'adobe_list_segments', expectedOutput: 'segments', dependsOn: [] },
+      ],
+    };
+    // The plan, one text answer per worker, then the synthesis.
+    script = [{ text: JSON.stringify(plan) }, { text: 'two segments' }, { text: 'two segments' }, { text: 'There are 2 segments.' }];
+    try {
+      const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', planFirst: true, orchestrate: true });
+      expect(result.orchestrated).toBe(true);
+    } finally {
+      delete process.env.ORCHESTRATION;
+    }
+
+    const spans = exported.flat();
+    const run = spans.find((s) => s.attributes['harness.orchestrated'] === true && s.name === 'invoke_agent harness');
+    const coordinator = spans.find((s) => s.attributes['harness.orchestration'] === true && s.name === 'invoke_agent harness');
+    expect(run).toBeDefined();
+    expect(run?.parentSpanId).toBeUndefined();
+    expect(coordinator?.parentSpanId).toBe(run?.spanId);
+    // Each worker's own root span sits under the coordinator span.
+    const workerRoots = spans.filter((s) => s.name === 'invoke_agent harness' && s !== run && s !== coordinator);
+    expect(workerRoots.length).toBeGreaterThanOrEqual(2);
+    for (const w of workerRoots) expect(w.parentSpanId).toBe(coordinator?.spanId);
+    expect(new Set(spans.map((s) => s.traceId))).toEqual(new Set([run?.traceId]));
   });
 });
 
