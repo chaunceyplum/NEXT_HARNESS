@@ -36,6 +36,7 @@ import type { PlanStep } from './planner';
 import type { RunLedger } from './run-budget';
 import { workerBudgetShare } from './orchestration-config';
 import { classifyTool } from './tool-policy';
+import { estimateCostUsd } from './pricing';
 import { effectiveToolCall } from './tool-discovery';
 
 // ── Worker result / record types ───────────────────────────────────────────────
@@ -374,8 +375,34 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     'harness.worker.step_id': step.id,
     'harness.worker.attempt': attempt,
   };
+  // This worker's own steps and spend. The run ledger is shared with the
+  // other workers, so it can't say what this one spent; and a worker that
+  // throws gets no LoopResult. Spend counts every attempt (a restarted
+  // attempt's tokens were still paid for); steps keep only the current
+  // attempt, matching what the stream keeps after a restart.
+  let attemptSteps: AgentStepTrace[] = [];
+  let currentModelKey = input.modelKey || getDefaultModelKey();
+  let spentTokens = 0;
+  let spentCost: number | undefined = 0;
+  const onStep = (s: AgentStepTrace): void => {
+    attemptSteps.push(s);
+    const inputTokens = s.usage?.inputTokens ?? 0;
+    const outputTokens = s.usage?.outputTokens ?? 0;
+    spentTokens += inputTokens + outputTokens;
+    const cost = estimateCostUsd(currentModelKey, { inputTokens, outputTokens });
+    spentCost = spentCost === undefined || cost === undefined ? undefined : spentCost + cost;
+    input.onStep?.(s);
+  };
+  const spend = (): WorkerRecord['budgetUsage'] => ({
+    tokens: spentTokens,
+    ...(spentCost !== undefined ? { costUsd: spentCost } : {}),
+    durationMs: Date.now() - startedAtMs,
+  });
+
   const onRestart = (info: { fromModelKey: string; toModelKey: string }): void => {
     currentAttempt += 1;
+    attemptSteps = [];
+    currentModelKey = info.toModelKey;
     // executeLoop builds the next attempt's tracer from this same object.
     tracerAttrs['harness.worker.attempt'] = currentAttempt;
     input.onRestart?.(info);
@@ -412,7 +439,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       : {}),
     ...(input.thinkingBudget !== undefined ? { thinkingBudget: input.thinkingBudget } : {}),
     abortSignal: controller.signal,
-    ...(input.onStep ? { onStep: input.onStep } : {}),
+    onStep,
     ...(input.onToolOutcome ? { onToolOutcome: input.onToolOutcome } : {}),
     onRestart,
   };
@@ -430,7 +457,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
         modelKey: loop.modelKey,
         status: 'failed',
         steps: loop.steps,
-        budgetUsage: loop.budgetUsage,
+        budgetUsage: spend(),
         startedAt,
         durationMs: Date.now() - startedAtMs,
         error: 'worker ended without a result',
@@ -447,7 +474,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       status,
       steps: loop.steps,
       result: reported,
-      budgetUsage: loop.budgetUsage,
+      budgetUsage: spend(),
       startedAt,
       durationMs: Date.now() - startedAtMs,
       ...(status === 'failed' ? { error: reported.summary } : {}),
@@ -463,12 +490,12 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       workerId,
       stepId: step.id,
       attempt: currentAttempt,
-      modelKey: input.modelKey,
+      modelKey: currentModelKey,
       status: controller.signal.aborted ? 'cancelled' : 'failed',
-      steps: [],
-      // The ledger has been charged for whatever the attempt(s) spent; report
-      // the run-level usage so a failed worker's spend is still accounted for.
-      budgetUsage: shared.ledger.usage(),
+      // The steps that ran before the throw, so the critic, the judge and the
+      // record still see this worker's tool calls.
+      steps: attemptSteps,
+      budgetUsage: spend(),
       startedAt,
       durationMs: Date.now() - startedAtMs,
       error: message,

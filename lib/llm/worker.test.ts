@@ -348,6 +348,20 @@ describe('runWorker', () => {
     expect(rec.error).toMatch(/already executed write/i);
     // The write ran exactly once — no restart replayed it.
     expect(executed.map((e) => e.name)).toEqual(['reactor_create_data_element']);
+    // The failed record keeps the step that ran and this worker's own spend
+    // (one 10-in / 5-out step), not the run ledger's total.
+    expect(rec.steps.flatMap((st) => st.toolCalls.map((c) => c.toolName))).toEqual(['reactor_create_data_element']);
+    expect(rec.budgetUsage.tokens).toBe(15);
+  });
+
+  it("reports only its own spend when the ledger also carries other workers' (Req 14.2)", async () => {
+    const ledger = new RunLedger(resolveBudget(), 0, () => 0);
+    ledger.charge(1_000, 0); // another worker's spend
+    script = [report({ status: 'done', summary: 'ok' })];
+    const rec = await runWorker(baseInput({ shared: makeShared({ ledger }) }));
+    // Two 15-token model steps (the report_result call, then the closing
+    // turn), and none of the other worker's 1,000.
+    expect(rec.budgetUsage.tokens).toBe(30);
   });
 
   it('is cancelled when the run is already aborted (Req 9.3)', async () => {
