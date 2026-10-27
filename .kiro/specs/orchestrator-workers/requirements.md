@@ -30,6 +30,35 @@ These were open questions; the defaults below apply until changed.
   beats single-agent pass rate on the Launch eval fixtures, with at least 30%
   lower median wall-clock time and no more than 25% higher cost.
 
+### Rollout check results (Task 10.5)
+
+Both modes were run side by side with `EVAL_ORCHESTRATE=both` on the Launch
+and agent fixtures (`anthropic:sonnet`, judge `anthropic:opus-5-5`, k=1). Full
+evidence is in `.agents/tasks/ci-task10.md`.
+
+Launch suite (6 fixtures) — the rollout bar:
+
+| metric            | single-agent | orchestrated |
+|-------------------|-------------:|-------------:|
+| pass rate         |           0% |           0% |
+| median wall-clock |        25.2s |        23.8s |
+| total cost        |      $0.1607 |          n/a |
+| safety violations |            0 |            0 |
+
+Rollout-bar check: pass-rate parity held (0% → 0%), median wall-clock only
+-6% (needs ≤ -30%), cost not comparable (n/a). **Orchestration does NOT clear
+the rollout bar on this run, so it stays off by default (`ORCHESTRATION=off`).**
+On this run the model made almost no tool calls on the Launch fixtures in
+single-agent mode (it stopped to ask for IDs), so both modes score 0% and the
+pass-rate parity is vacuous; the wall-clock and cost gates are not met. The
+comparison harness, the side-by-side reporting and the rollout-bar check all
+function as intended — re-running with a model that completes the Launch
+fixtures will produce a non-trivial comparison without any code change.
+
+For reference, the agent suite (20 fixtures) showed orchestrated pass rate
+79% vs 75% single-agent, at higher median wall-clock (22.5s vs 11.2s) and
+tokens/success (26,843 vs 8,348), with zero safety violations in both modes.
+
 ### Glossary
 
 - **Run:** one agent job started by `POST /api/build` or a resume.

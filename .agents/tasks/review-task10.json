@@ -1,0 +1,7 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    "10.5 (blocking): the both-mode rollout-bar results are not recorded in the introduction of requirements.md as the task requires. The commit does not touch requirements.md (confirmed via git show --stat); the requirements intro (lines 29-31) still holds only the rollout-bar definition with no recorded run or verdict. The results exist only in .agents/tasks/ci-task10.md. Record the measured off/on comparison (Launch 0%->0% pass, median wall-clock -6% vs -30% needed, cost n/a) and the 'stays off by default' verdict in the rollout-bar section of the requirements intro, then re-mark 10.5."
+  ],
+  "reviewDoc": "/Users/chauncey/Desktop/PROJECTS/next_harness/NEXT_HARNESS/.worktrees/orchestrator-workers/.agents/tasks/review-task10.md"
+}
