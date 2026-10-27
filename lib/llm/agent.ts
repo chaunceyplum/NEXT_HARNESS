@@ -1510,42 +1510,74 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
   if (planTracker && shouldOrchestrate(orchestrationFlag(), opts.orchestrate, planTracker.plan)) {
     const config = orchestrationConfig({ ...(opts.maxWorkers !== undefined ? { maxWorkers: opts.maxWorkers } : {}) }, ctx.launchMode);
     const catalog = opts.tools ? [] : await getMcpToolCatalog();
-    const orchestrated = await runOrchestrated({
-      tracker: planTracker,
-      config,
-      ...(opts.resumePlan ? { seedResults: opts.resumePlan.results } : {}),
-      tools: ctx.tools,
-      catalog,
-      ...(planningRetrieval?.context ? { knowledge: planningRetrieval.context } : {}),
-      runModelKey: ctx.startModelKey ?? getDefaultModelKey(),
-      isPinned: ctx.isPinned,
-      budgetLimits: ctx.budgetLimits,
-      modelHealth: ctx.modelHealth,
-      // Requirement 9.1: the run's single LaunchValidationGate, shared by every
-      // worker. It is already embedded in `ctx.tools` (so a worker's narrowed
-      // tool set calls through the same instance); passing it here also tells
-      // each worker it is in a gated Launch run (worker launchMode grounding).
-      ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
-      ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
-      ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
-      approvalReasons: ctx.approvalReasons,
-      baseTracerAttrs: ctx.baseTracerAttrs,
-      ...(opts.runId ? { runId: opts.runId } : {}),
-      toolsConsidered,
-      ...(ctx.thinkingBudget !== undefined ? { thinkingBudget: ctx.thinkingBudget } : {}),
-      ...(opts.onWorkerStart ? { onWorkerStart: opts.onWorkerStart } : {}),
-      ...(opts.onWorker ? { onWorker: opts.onWorker } : {}),
-      // Requirement 11.3: forward the worker-tagged step straight through so the
-      // route can attach the workerId to the step event and checkpoint. The
-      // coordinator supplies the workerId (executeLoop's own ctx.onStep never
-      // has one), so forward opts.onStep, which carries the optional arg.
-      ...(opts.onStep ? { onStep: (step, workerId) => opts.onStep?.(step, workerId) } : {}),
-      ...(ctx.onTextDelta ? { onTextDelta: ctx.onTextDelta } : {}),
-      // Requirement 9.6: forward the worker-tagged outcome so its audit entry
-      // carries the workerId. opts.onToolOutcome accepts the optional arg.
-      ...(opts.onToolOutcome ? { onToolOutcome: (outcome, workerId) => opts.onToolOutcome?.(outcome, workerId) } : {}),
-      ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey, workerId }) => opts.onRestart?.({ fromModelKey, toModelKey, workerId }) } : {}),
-      ...(opts.onPlan ? { onPlan: opts.onPlan } : {}),
+    const runModelKey = ctx.startModelKey ?? getDefaultModelKey();
+    // Requirement 14.1: one run span, with the coordinator span under it and
+    // each worker under that — run → coordinator → worker → step. A
+    // single-agent run's loop span is its run span; here the coordinator and
+    // workers each open their own, so the run needs one of its own.
+    const runTracer = new RunTracer({ ...ctx.baseTracerAttrs, 'gen_ai.request.model': runModelKey, 'harness.orchestrated': true });
+    const finishRunTrace = (extra: { attributes?: Record<string, AttrValue>; error?: string }): void => {
+      try {
+        void exportSpans(runTracer.finish(extra));
+      } catch (err) {
+        console.error('[tracing] failed to finish/export run trace:', err instanceof Error ? err.message : err);
+      }
+    };
+    let orchestrated: AgentRunResult;
+    try {
+      orchestrated = await runOrchestrated({
+        tracker: planTracker,
+        config,
+        ...(opts.resumePlan ? { seedResults: opts.resumePlan.results } : {}),
+        tools: ctx.tools,
+        catalog,
+        ...(planningRetrieval?.context ? { knowledge: planningRetrieval.context } : {}),
+        runModelKey,
+        isPinned: ctx.isPinned,
+        budgetLimits: ctx.budgetLimits,
+        modelHealth: ctx.modelHealth,
+        // Requirement 9.1: the run's single LaunchValidationGate, shared by every
+        // worker. It is already embedded in `ctx.tools` (so a worker's narrowed
+        // tool set calls through the same instance); passing it here also tells
+        // each worker it is in a gated Launch run (worker launchMode grounding).
+        ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
+        ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+        ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
+        approvalReasons: ctx.approvalReasons,
+        baseTracerAttrs: ctx.baseTracerAttrs,
+        tracerParent: runTracer.ref(),
+        ...(opts.runId ? { runId: opts.runId } : {}),
+        toolsConsidered,
+        ...(ctx.thinkingBudget !== undefined ? { thinkingBudget: ctx.thinkingBudget } : {}),
+        ...(opts.onWorkerStart ? { onWorkerStart: opts.onWorkerStart } : {}),
+        ...(opts.onWorker ? { onWorker: opts.onWorker } : {}),
+        // Requirement 11.3: forward the worker-tagged step straight through so the
+        // route can attach the workerId to the step event and checkpoint. The
+        // coordinator supplies the workerId (executeLoop's own ctx.onStep never
+        // has one), so forward opts.onStep, which carries the optional arg.
+        ...(opts.onStep ? { onStep: (step, workerId) => opts.onStep?.(step, workerId) } : {}),
+        ...(ctx.onTextDelta ? { onTextDelta: ctx.onTextDelta } : {}),
+        // Requirement 9.6: forward the worker-tagged outcome so its audit entry
+        // carries the workerId. opts.onToolOutcome accepts the optional arg.
+        ...(opts.onToolOutcome ? { onToolOutcome: (outcome, workerId) => opts.onToolOutcome?.(outcome, workerId) } : {}),
+        ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey, workerId }) => opts.onRestart?.({ fromModelKey, toModelKey, workerId }) } : {}),
+        ...(opts.onPlan ? { onPlan: opts.onPlan } : {}),
+      });
+    } catch (err) {
+      finishRunTrace(
+        ctx.abortSignal?.aborted
+          ? { error: 'aborted', attributes: { 'harness.aborted': true } }
+          : { error: err instanceof Error ? err.message : String(err) }
+      );
+      throw err;
+    }
+    finishRunTrace({
+      attributes: {
+        'harness.usage.total_tokens': orchestrated.budgetUsage.tokens,
+        'harness.duration_ms': orchestrated.budgetUsage.durationMs,
+        ...(orchestrated.budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': orchestrated.budgetUsage.costUsd } : {}),
+        ...(orchestrated.stopReason ? { 'harness.stop_reason': orchestrated.stopReason } : {}),
+      },
     });
     const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
     return { ...orchestrated, ragJudgments, versions, ...(route ? { route } : {}) };
