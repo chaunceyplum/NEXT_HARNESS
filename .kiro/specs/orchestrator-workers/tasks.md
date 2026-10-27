@@ -8,20 +8,20 @@ Each top-level task is one PR. Do them in order. Every PR must pass
 eval fixture or `evals/baseline.json` entry has to change for it to pass,
 stop. That means behaviour changed, and it must be fixed before going on.
 
-- [ ] 1. Split `runAgent` into `prepareRun` and `executeLoop` (no behaviour change)
-- [ ] 1.1 Add `LoopContext`, `LoopResult`, `PreparedRun` and `EarlyResult` types to `lib/llm/agent-core.ts`
+- [x] 1. Split `runAgent` into `prepareRun` and `executeLoop` (no behaviour change)
+- [x] 1.1 Add `LoopContext`, `LoopResult`, `PreparedRun` and `EarlyResult` types to `lib/llm/agent-core.ts`
   - Types only; no imports of the live MCP client
   - _Requirements: 1.1, 1.2_
-- [ ] 1.2 Extract `executeLoop(ctx)` from `runAgent` (`lib/llm/agent.ts` lines ~1062–1330)
+- [x] 1.2 Extract `executeLoop(ctx)` from `runAgent` (`lib/llm/agent.ts` lines ~1062–1330)
   - Move tracer setup, budget, `callModel`, the fallback loop and result assembly
   - Replace every closure read with a `ctx` field; return `hadSideEffects`
   - _Requirements: 1.2_
-- [ ] 1.3 Extract `prepareRun(opts)` from `runAgent` (lines ~823–1060)
+- [x] 1.3 Extract `prepareRun(opts)` from `runAgent` (lines ~823–1060)
   - Return `EarlyResult` for the unclear-route and denied-plan cases
   - _Requirements: 1.1_
-- [ ] 1.4 Re-implement `runAgent` as `prepareRun` then `executeLoop`, assembling the same `AgentRunResult`
+- [x] 1.4 Re-implement `runAgent` as `prepareRun` then `executeLoop`, assembling the same `AgentRunResult`
   - _Requirements: 1.3, 1.4_
-- [ ] 1.5 Run the full suite and `npm run eval:agent` / `npm run eval:launch` with no test, fixture or baseline changes
+- [x] 1.5 Run the full suite and `npm run eval:agent` / `npm run eval:launch` with no test, fixture or baseline changes
   - _Requirements: 1.5_
 
 - [x] 2. Planner support for parallel steps
