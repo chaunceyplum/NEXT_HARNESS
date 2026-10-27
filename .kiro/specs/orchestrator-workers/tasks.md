@@ -69,20 +69,20 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 5.6 Write `lib/llm/worker.test.ts` with scripted tools
   - _Requirements: 4.2, 4.6, 4.7, 10.1, 10.2_
 
-- [ ] 6. Coordinator
-- [ ] 6.1 Create `lib/llm/coordinator.ts` with `orchestrationConfig` and `shouldOrchestrate`
+- [x] 6. Coordinator
+- [x] 6.1 Create `lib/llm/coordinator.ts` with `orchestrationConfig` and `shouldOrchestrate`
   - _Requirements: 2.2, 2.3, 2.4, 2.5_
-- [ ] 6.2 Implement the scheduler loop: ready steps up to `maxWorkers`, serial write workers in Launch runs, step status and `workerId`, results to dependants
+- [x] 6.2 Implement the scheduler loop: ready steps up to `maxWorkers`, serial write workers in Launch runs, step status and `workerId`, results to dependants
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.7, 5.3, 5.4_
-- [ ] 6.3 Implement replanning after failures (wait for running workers; `MAX_REPLANS`; skip remaining on cap or failure)
+- [x] 6.3 Implement replanning after failures (wait for running workers; `MAX_REPLANS`; skip remaining on cap or failure)
   - _Requirements: 6.1, 6.2, 6.3_
-- [ ] 6.4 Implement synthesis (streamed; plain list fallback on failure)
+- [x] 6.4 Implement synthesis (streamed; plain list fallback on failure)
   - _Requirements: 7.1, 7.2_
-- [ ] 6.5 Stop on ledger exhaustion and on abort
+- [x] 6.5 Stop on ledger exhaustion and on abort
   - _Requirements: 8.4, 9.4_
-- [ ] 6.6 Write `lib/llm/coordinator.test.ts` using controlled-delay scripted tools to assert overlap and ordering
+- [x] 6.6 Write `lib/llm/coordinator.test.ts` using controlled-delay scripted tools to assert overlap and ordering
   - _Requirements: 3.1, 3.3, 3.4, 6.1, 6.3, 7.1_
-- [ ] 6.7 Call `runOrchestrated` from `runAgent` when `shouldOrchestrate` is true; force planning when orchestration is requested
+- [x] 6.7 Call `runOrchestrated` from `runAgent` when `shouldOrchestrate` is true; force planning when orchestration is requested
   - _Requirements: 2.3, 2.4, 2.6_
 
 - [ ] 7. Shared safety state and observability

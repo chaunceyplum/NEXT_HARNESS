@@ -32,6 +32,13 @@ export interface PlanStep {
   dependsOn: number[];
   status: PlanStepStatus;
   note?: string;
+  /**
+   * The id of the worker that ran (or is running) this step in an
+   * orchestrated run (lib/llm/coordinator.ts). Unset for single-agent runs and
+   * for steps kept for synthesis. Set by the coordinator when it starts the
+   * worker (Requirement 3.5).
+   */
+  workerId?: string;
 }
 
 export interface Plan {

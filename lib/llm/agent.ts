@@ -71,6 +71,9 @@ import {
 } from './run-budget';
 import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
 import { acquireLoopSlot } from './agent-slots';
+import { orchestrationConfig, runOrchestrated, shouldOrchestrate } from './coordinator';
+import { orchestrationFlag } from './orchestration-config';
+import type { WorkerRecord } from './worker';
 import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../tracing';
 import { promptVersion, toolsetVersion, appVersion } from '../version';
 
@@ -117,6 +120,16 @@ export interface AgentRunResult {
   plan?: Plan;
   /** Set when the request asked for model "auto": how the model was chosen. */
   route?: RouteDecision;
+  /**
+   * Orchestrator-worker fields (lib/llm/coordinator.ts). `orchestrated` is
+   * true when the coordinator ran the plan as concurrent workers instead of a
+   * single agent loop; `workers` are those workers' records and `replans`
+   * counts the replanning calls made. Absent / false for single-agent runs, so
+   * their result shape is unchanged. (Re-homed to lib/types.ts in Task 8.1.)
+   */
+  orchestrated?: boolean;
+  replans?: number;
+  workers?: WorkerRecord[];
 }
 
 export interface RunAgentOptions {
@@ -272,6 +285,19 @@ export interface RunAgentOptions {
     input: unknown;
     reason: ApprovalReason;
   }) => Promise<{ approved: boolean; reason?: string }>;
+  /**
+   * Orchestrator-worker mode (lib/llm/coordinator.ts). When ORCHESTRATION is
+   * `on`, `orchestrate: true` opts this run into the coordinator; when
+   * ORCHESTRATION is `always`, `orchestrate: false` opts out. Ignored when
+   * ORCHESTRATION is `off`, or when the plan has fewer than two steps that
+   * could run at the same time (Requirements 2.2–2.5). Requesting
+   * orchestration forces planning as if `planFirst` were set (Requirement 2.6).
+   */
+  orchestrate?: boolean;
+  /** Cap on concurrent workers for this run; the smaller of it and MAX_WORKERS is used (Requirement 3.2). */
+  maxWorkers?: number;
+  /** Called when a worker starts and ends, so the route can stream worker events (Requirement 11). */
+  onWorker?: (worker: WorkerRecord) => void;
 }
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
@@ -975,8 +1001,15 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
 
   // Plan-and-execute (planner.ts): plan first, optionally have a person
   // approve it, then execute with update_plan / revise_plan available.
+  // Requirement 2.6: a run that asks for orchestration needs a plan for the
+  // coordinator to schedule, so planning is forced on (as if planFirst) when
+  // orchestration could actually run — unless the flag is off, where the
+  // request's orchestrate option is ignored entirely (Requirement 2.2).
+  const orchestrationRequested =
+    orchestrationFlag() !== 'off' && (orchestrationFlag() === 'always' ? opts.orchestrate !== false : opts.orchestrate === true);
+  const planFirst = opts.planFirst || orchestrationRequested;
   let planTracker: PlanTracker | undefined;
-  if (opts.planFirst) {
+  if (planFirst) {
     const planModel = startModelKey || getDefaultModelKey();
     if (launchMode) {
       // Launch-tagging runs follow a fixed grounding backbone (read property
@@ -1442,7 +1475,46 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     return prepared.result;
   }
 
-  const { ctx, toolsConsidered, planTracker, route, versions, ragJudgmentSink } = prepared;
+  const { ctx, toolsConsidered, planTracker, route, versions, ragJudgmentSink, planningRetrieval } = prepared;
+
+  // Requirements 2.3–2.5: use the coordinator when orchestration is enabled
+  // for this run and the plan has two or more steps that could run at the same
+  // time. A plan with a cycle / unknown dependency never reaches here (the
+  // planner rejects it), and a plan too serial to parallelise falls through to
+  // the single-agent loop with `orchestrated: false` (Requirement 2.5).
+  if (planTracker && shouldOrchestrate(orchestrationFlag(), opts.orchestrate, planTracker.plan)) {
+    const config = orchestrationConfig({ ...(opts.maxWorkers !== undefined ? { maxWorkers: opts.maxWorkers } : {}) }, ctx.launchMode);
+    const catalog = opts.tools ? [] : await getMcpToolCatalog();
+    const orchestrated = await runOrchestrated({
+      tracker: planTracker,
+      config,
+      tools: ctx.tools,
+      catalog,
+      ...(planningRetrieval?.context ? { knowledge: planningRetrieval.context } : {}),
+      runModelKey: ctx.startModelKey ?? getDefaultModelKey(),
+      isPinned: ctx.isPinned,
+      budgetLimits: ctx.budgetLimits,
+      modelHealth: ctx.modelHealth,
+      // The shared LaunchValidationGate is wired through in Task 7.1; Task 6
+      // only needs launchMode (carried in `config.serialWrites`) to keep write
+      // workers serial.
+      ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+      ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
+      approvalReasons: ctx.approvalReasons,
+      baseTracerAttrs: ctx.baseTracerAttrs,
+      ...(opts.runId ? { runId: opts.runId } : {}),
+      toolsConsidered,
+      ...(ctx.thinkingBudget !== undefined ? { thinkingBudget: ctx.thinkingBudget } : {}),
+      ...(opts.onWorker ? { onWorker: opts.onWorker } : {}),
+      ...(ctx.onStep ? { onStep: ctx.onStep } : {}),
+      ...(ctx.onTextDelta ? { onTextDelta: ctx.onTextDelta } : {}),
+      ...(ctx.onToolOutcome ? { onToolOutcome: ctx.onToolOutcome } : {}),
+      ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey }) => opts.onRestart?.({ fromModelKey, toModelKey }) } : {}),
+      ...(opts.onPlan ? { onPlan: opts.onPlan } : {}),
+    });
+    const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+    return { ...orchestrated, ragJudgments, versions, ...(route ? { route } : {}) };
+  }
 
   const loop = await executeLoop(ctx);
 
