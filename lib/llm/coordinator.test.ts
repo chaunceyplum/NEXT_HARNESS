@@ -361,6 +361,22 @@ describe('runOrchestrated replanning (Req 6.1, 6.3)', () => {
     expect(result.replans).toBe(1);
   });
 
+  it('starts no new worker while a failure waits on the replan', async () => {
+    const plan = makePlan([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    replanObject = { reason: 'retry', steps: [] };
+    const run = runOrchestrated(baseInput(plan, { config: { maxWorkers: 2, maxReplans: 2, workerMaxSteps: 6, serialWrites: false } }));
+    await tick();
+    expect([...pending.keys()].sort()).toEqual([1, 2]);
+    finishFailed(2);
+    await tick();
+    // A slot is free and step 3 is ready, but nothing new starts after a failure.
+    expect([...pending.keys()]).toEqual([1]);
+    finishDone(1);
+    await run;
+    expect(startOrder.sort()).toEqual([1, 2]);
+    expect(generateObjectCalls).toBe(1);
+  });
+
   it('carries results across the renumbering and gives replanned workers new ids', async () => {
     // 1 fails; 2 and 3 are done; the replan adds one step needing kept step 2 (old id 3).
     const plan = makePlan([{ id: 1 }, { id: 2 }, { id: 3 }]);

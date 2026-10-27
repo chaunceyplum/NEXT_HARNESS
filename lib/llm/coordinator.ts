@@ -397,7 +397,10 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     // Requirements 8.4 / 9.4: stop scheduling on abort or a spent ledger. Keep
     // draining the workers already running so their spend is recorded.
     const haltNew = aborted() || Boolean(ledger.exhausted());
-    if (!haltNew) {
+    // Requirement 6.1: once a step has failed, start nothing new — let the
+    // running workers finish, then replan. Work started now might be thrown
+    // away by the replan, or skipped anyway if no replan is left (6.3).
+    if (!haltNew && !needReplan) {
       completeFoldedSteps();
       for (const step of readySteps(tracker.plan)) {
         if (running.size >= config.maxWorkers) break;
