@@ -85,6 +85,7 @@ export default function Home() {
   const [maxSteps, setMaxSteps] = useState(20);
   const [planFirst, setPlanFirst] = useState(false);
   const [requirePlanApproval, setRequirePlanApproval] = useState(false);
+  const [orchestrate, setOrchestrate] = useState(false);
   const [enabledPlatforms, setEnabledPlatforms] = useState<Set<string>>(new Set(PLATFORM_GROUPS));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -364,6 +365,8 @@ export default function Home() {
           toolShortlistSize,
           maxSteps,
           ...(planFirst ? { planFirst: true, requirePlanApproval } : {}),
+          // Unchecked sends nothing, so the server's ORCHESTRATION default applies.
+          ...(orchestrate ? { orchestrate: true } : {}),
           ...(!allEnabled ? { platformFilter: [...enabledPlatforms] } : {}),
         }),
         signal,
@@ -473,6 +476,13 @@ export default function Home() {
                   Ask me to approve the plan before anything runs
                 </label>
               )}
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={orchestrate} onChange={(e) => setOrchestrate(e.target.checked)} disabled={loading} />
+                <span className="font-semibold">Run steps in parallel</span>
+                <span className="text-xs text-gray-500">
+                  — plan, then run independent steps as parallel workers (needs ORCHESTRATION=on on the server)
+                </span>
+              </label>
             </div>
 
             <div>
