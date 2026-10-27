@@ -15,7 +15,7 @@ interface Deferred {
   resolve: (r: Partial<WorkerRecord> & { status: WorkerRecord['status'] }) => void;
   promise: Promise<WorkerRecord>;
   started: boolean;
-  input: { step: PlanStep; deps: WorkerResult[]; modelKey: string };
+  input: { step: PlanStep; deps: WorkerResult[]; folded?: PlanStep[]; modelKey: string };
 }
 let pending: Map<number, Deferred>;
 /** Steps that were ever started, in start order. */
@@ -48,7 +48,7 @@ vi.mock('./worker', async (importOriginal) => {
     runWorker: vi.fn((input: Parameters<typeof import('./worker').runWorker>[0]) => {
       const stepId = input.step.id;
       startOrder.push(stepId);
-      const d = makeDeferred(stepId, { step: input.step, deps: input.deps, modelKey: input.modelKey });
+      const d = makeDeferred(stepId, { step: input.step, deps: input.deps, folded: input.folded, modelKey: input.modelKey });
       d.started = true;
       pending.set(stepId, d);
       return d.promise;
@@ -265,6 +265,37 @@ describe('runOrchestrated scheduling', () => {
     finishDone(second);
     const result = await run;
     expect(result.workers).toHaveLength(2);
+  });
+});
+
+describe('runOrchestrated reasoning steps (Req 3.7)', () => {
+  it('folds tool:null steps into their dependant so a Launch-shaped plan reaches its write step', async () => {
+    // The Launch backbone: two reads, three reasoning steps, then the write.
+    const plan = makePlan([
+      { id: 1 },
+      { id: 2 },
+      { id: 3, tool: null, dependsOn: [1, 2] },
+      { id: 4, tool: null, dependsOn: [3] },
+      { id: 5, tool: null, dependsOn: [1, 2, 4] },
+      { id: 6, tool: 'reactor_create_library', dependsOn: [5] },
+    ]);
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    expect([...pending.keys()].sort()).toEqual([1, 2]);
+    finishDone(1, { ids: { ext: 'EX1' } });
+    finishDone(2, { ids: { de: 'DE1' } });
+    await tick();
+
+    // The write step starts once the reads are done; reasoning steps get no worker.
+    expect([...pending.keys()]).toEqual([6]);
+    const d = pending.get(6)!;
+    expect(d.input.folded?.map((s) => s.id)).toEqual([3, 4, 5]);
+    expect(d.input.deps.map((r) => r.stepId).sort()).toEqual([1, 2]);
+
+    finishDone(6);
+    const result = await run;
+    expect(startOrder.sort()).toEqual([1, 2, 6]);
+    expect(result.plan?.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'done', 'done', 'done']);
   });
 });
 

@@ -203,6 +203,17 @@ describe('reportResultTool', () => {
 });
 
 describe('buildWorkerBrief', () => {
+  it('lists folded reasoning steps so the worker does them first', () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'g',
+      step: { id: 6, description: 'populate library', tool: 'reactor_create_library', expectedOutput: 'library id', dependsOn: [5], status: 'pending' },
+      deps: [],
+      folded: [{ id: 3, description: 'ground delegates', tool: null, expectedOutput: 'delegate ids', dependsOn: [], status: 'done' }],
+    });
+    expect(brief).toContain('do this reasoning yourself');
+    expect(brief).toContain('Step 3: ground delegates → delegate ids');
+  });
+
   it('includes the goal, step and dependency results but no transcripts (Req 4.4, 4.5)', () => {
     const brief = buildWorkerBrief({
       runGoal: 'Build the tags',

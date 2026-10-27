@@ -201,6 +201,12 @@ export interface WorkerInput {
   step: PlanStep;
   /** The WorkerResults of the steps this step depends on (Requirement 4.4). */
   deps: WorkerResult[];
+  /**
+   * Reasoning steps (`tool: null`) this step depends on, directly or through
+   * other reasoning steps. They get no worker of their own; their work is
+   * folded into this step's brief so it is done here.
+   */
+  folded?: PlanStep[];
   /** Planning knowledge excerpts (planningRetrieval.context), if any. */
   knowledge?: string;
   /** The run's policy-filtered tool set, narrowed per step by workerTools. */
@@ -228,8 +234,8 @@ export interface WorkerInput {
  * this step, the results of the steps it depends on, and the planning
  * knowledge. No other worker's transcript appears here.
  */
-export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'step' | 'deps' | 'knowledge'>): string {
-  const { runGoal, step, deps, knowledge } = input;
+export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'step' | 'deps' | 'knowledge' | 'folded'>): string {
+  const { runGoal, step, deps, knowledge, folded } = input;
   const lines = [
     'You are carrying out ONE step of a larger plan. Do only this step.',
     '',
@@ -238,6 +244,11 @@ export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'step' | '
     `Tool to use: ${step.tool ?? '(none — reason and report)'}`,
     `Done when: ${step.expectedOutput}`,
   ];
+
+  if (folded?.length) {
+    lines.push('', 'Before your step, do this reasoning yourself (these steps have no worker of their own):');
+    for (const f of folded) lines.push(`- Step ${f.id}: ${f.description} → ${f.expectedOutput}`);
+  }
 
   if (deps.length) {
     lines.push('', 'Results from earlier steps:');

@@ -264,6 +264,51 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     input.onPlan?.(tracker.plan);
   };
 
+  const stepById = (id: number): PlanStep | undefined => tracker.plan.steps.find((s) => s.id === id);
+  const hasDependants = (step: PlanStep): boolean => tracker.plan.steps.some((s) => s.dependsOn.includes(step.id));
+
+  /**
+   * What a worker's brief carries from its dependencies (Requirement 4.4).
+   * A reasoning step (`tool: null`) has no worker and no result, so it is
+   * walked through: its description is folded into this step's brief and its
+   * own dependencies' results are handed on. Folded steps come out in
+   * dependency order (deepest first).
+   */
+  const gatherInputs = (step: PlanStep): { deps: WorkerResult[]; folded: PlanStep[] } => {
+    const deps: WorkerResult[] = [];
+    const folded: PlanStep[] = [];
+    const seen = new Set<number>();
+    const visit = (id: number): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const dep = stepById(id);
+      if (dep && dep.tool === null) {
+        for (const d of dep.dependsOn) visit(d);
+        folded.push(dep);
+        return;
+      }
+      const r = results.get(id);
+      if (r) deps.push(r);
+    };
+    for (const id of step.dependsOn) visit(id);
+    return { deps, folded };
+  };
+
+  /**
+   * Reasoning steps (`tool: null`) never get a worker (Requirement 3.7). One
+   * that other steps depend on is marked done as soon as its own dependencies
+   * are, so its dependants become ready; its work is folded into their briefs
+   * (gatherInputs). One with no dependants stays pending for synthesis.
+   */
+  const completeFoldedSteps = (): void => {
+    for (;;) {
+      const next = readySteps(tracker.plan).find((s) => s.tool === null && hasDependants(s));
+      if (!next) return;
+      tracker.update(next.id, 'done', 'folded into the steps that depend on it');
+      input.onPlan?.(tracker.plan);
+    }
+  };
+
   /** Start one worker for a ready step; records its workerId on the step (Requirement 3.5). */
   const startWorker = (step: PlanStep): Promise<WorkerOutcome> => {
     const attempt = attempts.get(step.id) ?? 1;
@@ -271,7 +316,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     const workerId = `${input.runId ?? 'run'}:w${step.id}:${attempt}`;
     step.workerId = workerId;
     setStatus(step, 'running');
-    const deps = step.dependsOn.map((id) => results.get(id)).filter((r): r is WorkerResult => r !== undefined);
+    const { deps, folded } = gatherInputs(step);
 
     // Requirement 11.1: announce the worker before it runs, with the model and
     // the names of its narrowed tool set so the client can label the lane.
@@ -282,6 +327,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
       runGoal: tracker.plan.goal,
       step,
       deps,
+      ...(folded.length ? { folded } : {}),
       ...(input.knowledge ? { knowledge: input.knowledge } : {}),
       tools: input.tools,
       catalog: input.catalog,
@@ -332,6 +378,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     // draining the workers already running so their spend is recorded.
     const haltNew = aborted() || Boolean(ledger.exhausted());
     if (!haltNew) {
+      completeFoldedSteps();
       for (const step of readySteps(tracker.plan)) {
         if (running.size >= config.maxWorkers) break;
         if (running.has(step.id)) continue;
