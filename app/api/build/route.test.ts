@@ -114,8 +114,10 @@ describe('POST /api/build as a job', () => {
     expect(step).toMatchObject({ type: 'step', seq: 2 });
 
     await tick();
-    expect(saved.map((s) => s.status)).toEqual(['running', 'running']);
-    expect(saved[1].steps).toBe(1);
+    // The run_start checkpoint was superseded by the step's before its turn,
+    // so only the newer one was written.
+    expect(saved.map((s) => s.status)).toEqual(['running']);
+    expect(saved[0].steps).toBe(1);
 
     finishRun();
     await tick();
@@ -255,6 +257,23 @@ describe('POST /api/build — orchestrated runs (Requirements 11.1, 11.3, 12.2)'
 
     expect(lines.find((l) => l.type === 'approval_request')).toMatchObject({ toolCallId: 'tc-1', reason: 'destructive', workerId: 'r:w2:1' });
     expect(audited).toContainEqual(expect.objectContaining({ type: 'approval', actor: 'alice', workerId: 'r:w2:1' }));
+  });
+});
+
+describe('POST /api/build — checkpoint writes', () => {
+  it('writes only the newest waiting checkpoint, then the final record', async () => {
+    saved.length = 0;
+    // Five steps land before the first save gets its turn.
+    orchestratedScript = (opts) => {
+      for (let i = 0; i < 5; i++) opts.onStep?.({ stepNumber: i, text: '', toolCalls: [], toolResults: [] }, 'r:w1:1');
+    };
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'build data elements please', orchestrate: true }) })
+    );
+    await res.text();
+    await tick();
+    expect(saved.map((s) => s.status)).toEqual(['running', 'completed']);
+    expect(saved[0].steps).toBe(5);
   });
 });
 

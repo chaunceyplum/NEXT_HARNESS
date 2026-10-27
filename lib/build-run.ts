@@ -70,11 +70,21 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
     const pushDelta = (delta: string) => {
       if (delta) push({ type: 'text_delta', delta });
     };
+    // Each record holds the whole run so far, so only the newest one waiting
+    // needs writing: a checkpoint superseded before its turn is dropped
+    // rather than sent. Without this, a slow store queued one full-record
+    // write per step and fell further behind as the run went on.
     let saving: Promise<void> = Promise.resolve();
+    let queued: ExecutionRecord | undefined;
     const save = (record: ExecutionRecord) => {
-      saving = saving
-        .then(() => saveExecution(record))
-        .catch((err) => console.error(`[BUILD] Failed to save run ${runId} (${record.status}):`, err));
+      const waiting = queued !== undefined;
+      queued = record;
+      if (waiting) return;
+      saving = saving.then(async () => {
+        const next = queued!;
+        queued = undefined;
+        await saveExecution(next).catch((err) => console.error(`[BUILD] Failed to save run ${runId} (${next.status}):`, err));
+      });
     };
     const checkpoint = () =>
       save({
