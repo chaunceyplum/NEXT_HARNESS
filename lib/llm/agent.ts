@@ -1161,8 +1161,11 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
   // attempt, since a fallback restarts the run from scratch.
   let stepIndex = 0;
   const runStartedAt = Date.now();
-  // Per model attempt, like stepIndex (a fallback restarts the run).
-  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt);
+  // Per model attempt, like stepIndex (a fallback restarts the run). A worker
+  // passes ctx.budgetParent so each step charges the run ledger too
+  // (Requirements 8.1, 8.3); single-agent runs leave it undefined, so the
+  // tracker has no parent and behaves exactly as before.
+  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt, Date.now, ctx.budgetParent);
   let stopReason: BudgetStopReason | undefined;
   // Whether the current attempt has executed a write/destructive tool call —
   // if so, falling back would re-run those side effects on the next model.
@@ -1171,7 +1174,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
   const callModel = (resolvedModelKey: string) => {
     stepIndex = 0;
     attemptHadSideEffects = false;
-    budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt);
+    budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt, Date.now, ctx.budgetParent);
     stopReason = undefined;
     // Fresh tracer for this attempt (a fallback restarts the run from scratch).
     tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey });
@@ -1226,7 +1229,16 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           const isLastStep = steps.length >= maxSteps - 1 || forcedAt !== undefined;
           const notes = budget.takeWarnings();
           if (exceeded) notes.push(budgetFinalNote(exceeded));
-          else if (historyBound && isLastStep) notes.push(FINAL_STEP_NOTE);
+          // Phase 2: a worker loop ends on its forced tool (report_result)
+          // rather than on free text, so on the last step a history-bound
+          // model is told to call that tool instead of the generic
+          // "write your final answer" note (Requirement 4.6). A budget
+          // wrap-up (`exceeded`) still gets budgetFinalNote above so the run
+          // stops cleanly rather than making one more tool call it can't pay
+          // for.
+          else if (historyBound && isLastStep) {
+            notes.push(ctx.forceFinalTool ? `Call ${ctx.forceFinalTool} now.` : FINAL_STEP_NOTE);
+          }
           const withNotes = (base: ModelMessage[]): ModelMessage[] =>
             notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
 
@@ -1247,10 +1259,18 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // stay at full fidelity.
           const compressedMessages = compressOldToolMessages(messages, steps.length);
 
-          // TASK 3: force text-only on the final allowed step
+          // TASK 3: force text-only on the final allowed step. Phase 2: a
+          // worker instead forces its wrap-up tool (report_result) on that
+          // step so the loop always ends with a structured result rather than
+          // free text (Requirement 4.6). Single-agent runs leave
+          // forceFinalTool unset, so they keep forcing 'none' exactly as
+          // before.
+          const lastStepToolChoice = ctx.forceFinalTool
+            ? ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
+            : ('none' as const);
           const nextMessages = notes.length ? withNotes(compressedMessages ?? messages) : compressedMessages;
           return {
-            toolChoice: isLastStep ? 'none' : 'auto',
+            toolChoice: isLastStep ? lastStepToolChoice : 'auto',
             ...(nextMessages ? { messages: nextMessages } : {}),
           };
         },

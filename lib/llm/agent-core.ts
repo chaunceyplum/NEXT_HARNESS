@@ -10,7 +10,7 @@
  */
 
 import type { ToolSet } from 'ai';
-import type { BudgetStopReason, BudgetUsage, RunBudgetLimits } from './run-budget';
+import type { BudgetStopReason, BudgetUsage, RunBudgetLimits, RunLedger } from './run-budget';
 import type { ModelHealthTracker } from './model-health';
 import type { ApprovalReason } from './approval-policy';
 import type { PlanTracker, Plan } from './planner';
@@ -290,8 +290,26 @@ export interface LoopContext {
   isPinned: boolean;
   /** Tool-call round trips before the loop is forced to stop. */
   maxSteps: number;
+  /**
+   * Phase 2 (workers): the tool the loop must end on. When set, the last
+   * allowed step (or a budget wrap-up step) forces this tool via toolChoice
+   * instead of forcing text with toolChoice 'none'; history-bound models,
+   * which must not have their tool choice changed mid-run, get an appended
+   * "Call <tool> now." instruction instead. Unset for single-agent runs, so
+   * their last-step behaviour is unchanged (Requirement 4.6).
+   */
+  forceFinalTool?: string;
   /** Run limits (tokens, cost, time, identical calls); a fresh tracker is built per attempt. */
   budgetLimits: RunBudgetLimits;
+  /**
+   * Phase 2 (workers): the run ledger a worker's per-attempt tracker also
+   * charges, so the run's token/cost/time limits hold across every worker
+   * (Requirements 8.1, 8.3). The per-attempt tracker is rebuilt on a fallback
+   * (so budgetLimits already encode the worker's child slice), but it keeps
+   * charging the same ledger. Unset for single-agent runs, so their tracker
+   * has no parent and behaves exactly as before.
+   */
+  budgetParent?: RunLedger;
   /** Health tracker used to route around failing models. */
   modelHealth: ModelHealthTracker;
   /** The AI SDK approval gate, or undefined when the run bypasses gating (eval path). */

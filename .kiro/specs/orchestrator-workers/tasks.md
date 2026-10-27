@@ -55,18 +55,18 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - Tests in `lib/llm/run-budget.test.ts`
   - _Requirements: 8.1, 8.2, 8.3, 8.5_
 
-- [ ] 5. Workers
-- [ ] 5.1 Add `forceFinalTool` to `executeLoop`: last or wrap-up step forces that tool; history-bound models get an appended instruction instead
+- [x] 5. Workers
+- [x] 5.1 Add `forceFinalTool` to `executeLoop`: last or wrap-up step forces that tool; history-bound models get an appended instruction instead
   - _Requirements: 4.6_
-- [ ] 5.2 Create `lib/llm/worker.ts` with `reportResultTool` (truncate summary to 1,000 and notes to 500 characters)
+- [x] 5.2 Create `lib/llm/worker.ts` with `reportResultTool` (truncate summary to 1,000 and notes to 500 characters)
   - _Requirements: 5.1, 5.2_
-- [ ] 5.3 Implement `workerTools(all, step, catalog)`: step tool + same `PLATFORM_GROUPS` group + `find_tools` + `call_tool` + `report_result`; exclude `remember_fact`, `update_plan`, `revise_plan`
+- [x] 5.3 Implement `workerTools(all, step, catalog)`: step tool + same `PLATFORM_GROUPS` group + `find_tools` + `call_tool` + `report_result`; exclude `remember_fact`, `update_plan`, `revise_plan`
   - _Requirements: 4.2, 4.3_
-- [ ] 5.4 Implement the worker brief builder (goal, step, dependency `WorkerResult`s, knowledge; no transcripts)
+- [x] 5.4 Implement the worker brief builder (goal, step, dependency `WorkerResult`s, knowledge; no transcripts)
   - _Requirements: 4.4, 4.5_
-- [ ] 5.5 Implement `runWorker`: child abort controller, child budget, `executeLoop`, missing-result handling, per-worker fallback and no restart after a write
+- [x] 5.5 Implement `runWorker`: child abort controller, child budget, `executeLoop`, missing-result handling, per-worker fallback and no restart after a write
   - _Requirements: 4.1, 4.7, 4.8, 5.4, 9.3, 10.1, 10.2, 10.3_
-- [ ] 5.6 Write `lib/llm/worker.test.ts` with scripted tools
+- [x] 5.6 Write `lib/llm/worker.test.ts` with scripted tools
   - _Requirements: 4.2, 4.6, 4.7, 10.1, 10.2_
 
 - [ ] 6. Coordinator

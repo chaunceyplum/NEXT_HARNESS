@@ -208,14 +208,24 @@ export class RunLedger {
    * `now`) and charges this ledger on every recorded step.
    */
   child(modelKey: string, share: number): RunBudgetTracker {
+    return new RunBudgetTracker(this.childLimits(share), modelKey, this.startedAt, this.now, this);
+  }
+
+  /**
+   * The sliced limits a child worker should get now — `share` of the run's
+   * remaining tokens and cost, with the run's clock and repeat limit copied
+   * through. Exposed so a caller (a worker) can hand these to executeLoop,
+   * which rebuilds its own tracker per model attempt (pointing back at this
+   * ledger) rather than reusing a single child() tracker across a fallback.
+   */
+  childLimits(share: number): RunBudgetLimits {
     const clamped = Math.min(1, Math.max(0, share));
-    const childLimits: RunBudgetLimits = {
+    return {
       maxTokens: scaleRemaining(this.limits.maxTokens, this.tokens, clamped),
       maxCostUsd: scaleRemaining(this.limits.maxCostUsd, this.costUsd ?? 0, clamped),
       maxDurationMs: this.limits.maxDurationMs,
       maxIdenticalCalls: this.limits.maxIdenticalCalls,
     };
-    return new RunBudgetTracker(childLimits, modelKey, this.startedAt, this.now, this);
   }
 
   /** Add a worker step's tokens and cost to the run totals. Called by child trackers. */
