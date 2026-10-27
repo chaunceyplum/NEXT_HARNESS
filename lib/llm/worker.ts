@@ -310,6 +310,23 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
   // report_result records the last result it sees; the coordinator reads it
   // after the loop (Requirement 4.7 handles the no-result case).
   let reported: WorkerResult | undefined;
+  // Requirement 10.3: a same-tier restart is a new attempt. The workerId stays
+  // the same (it names the lane), but the record and the restarted attempt's
+  // trace carry the bumped attempt number.
+  let currentAttempt = attempt;
+  const tracerAttrs: Record<string, import('../tracing').AttrValue> = {
+    ...(shared.baseTracerAttrs ?? {}),
+    'harness.worker.id': workerId,
+    'harness.worker.step_id': step.id,
+    'harness.worker.attempt': attempt,
+  };
+  const onRestart = (info: { fromModelKey: string; toModelKey: string }): void => {
+    currentAttempt += 1;
+    // executeLoop builds the next attempt's tracer from this same object.
+    tracerAttrs['harness.worker.attempt'] = currentAttempt;
+    input.onRestart?.(info);
+  };
+
   const narrowed = workerTools(input.tools, step, input.catalog);
   const tools: ToolSet = {
     ...narrowed,
@@ -331,12 +348,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     modelHealth: shared.modelHealth,
     forceFinalTool: REPORT_RESULT_TOOL,
     approvalReasons: shared.approvalReasons ?? new Map<string, ApprovalReason>(),
-    baseTracerAttrs: {
-      ...(shared.baseTracerAttrs ?? {}),
-      'harness.worker.id': workerId,
-      'harness.worker.step_id': step.id,
-      'harness.worker.attempt': attempt,
-    },
+    baseTracerAttrs: tracerAttrs,
     // Requirement 14.1: nest the worker's trace under the coordinator span.
     ...(shared.tracerParent ? { tracerParent: shared.tracerParent } : {}),
     ...(shared.launchGate ? { launchGate: shared.launchGate } : {}),
@@ -348,7 +360,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     abortSignal: controller.signal,
     ...(input.onStep ? { onStep: input.onStep } : {}),
     ...(input.onToolOutcome ? { onToolOutcome: input.onToolOutcome } : {}),
-    ...(input.onRestart ? { onRestart: input.onRestart } : {}),
+    onRestart,
   };
 
   try {
@@ -360,7 +372,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       return {
         workerId,
         stepId: step.id,
-        attempt,
+        attempt: currentAttempt,
         modelKey: loop.modelKey,
         status: 'failed',
         steps: loop.steps,
@@ -376,7 +388,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     return {
       workerId,
       stepId: step.id,
-      attempt,
+      attempt: currentAttempt,
       modelKey: loop.modelKey,
       status,
       steps: loop.steps,
@@ -396,7 +408,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     return {
       workerId,
       stepId: step.id,
-      attempt,
+      attempt: currentAttempt,
       modelKey: input.modelKey,
       status: controller.signal.aborted ? 'cancelled' : 'failed',
       steps: [],

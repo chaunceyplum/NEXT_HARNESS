@@ -291,6 +291,9 @@ describe('runWorker', () => {
     expect(onRestart).toHaveBeenCalledWith({ fromModelKey: 'test:a', toModelKey: 'test:b' });
     expect(rec.status).toBe('done');
     expect(rec.modelKey).toBe('test:b');
+    // A restart is a new attempt on the same lane (Req 10.3).
+    expect(rec.attempt).toBe(2);
+    expect(rec.workerId).toBe('run1:w2:1');
   });
 
   it('fails the step instead of restarting when the model fails after a write (Req 10.2)', async () => {
