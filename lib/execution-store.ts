@@ -58,8 +58,20 @@ function ensureTable(): Promise<void> {
   return ensureTablePromise;
 }
 
-/** Version of the checkpoint shape saved mid-run (BuildResponse.checkpoint); bump when it changes. */
-export const CHECKPOINT_SCHEMA_VERSION = 1;
+/**
+ * Version of the checkpoint shape saved mid-run (BuildResponse.checkpoint);
+ * bump when it changes.
+ *
+ * v2 (orchestrator-workers): the result JSONB may carry `orchestrated`,
+ * `replans` and `workers` (Requirement 12.1). v1 records never do, so a record
+ * whose checkpoint schemaVersion is 1 (or absent) is read as single-agent —
+ * `orchestrated` is treated as false and `workers` as empty (Requirement 12.3).
+ * No table schema change: the fields live inside the existing `result` column.
+ */
+export const CHECKPOINT_SCHEMA_VERSION = 2;
+
+/** The first checkpoint schema version that could store orchestrated runs. */
+const ORCHESTRATION_SCHEMA_VERSION = 2;
 
 /**
  * Mark runs left 'running' by a previous server process as 'interrupted'.
@@ -81,7 +93,7 @@ export function newRunId(): string {
 // ── Row <-> ExecutionRecord mapping ───────────────────────────────────────
 
 function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
-  const result = (row.result as ExecutionRecord['result'] | null) ?? undefined;
+  const result = normaliseResult((row.result as ExecutionRecord['result'] | null) ?? undefined);
   return {
     id: row.id as string,
     createdAt: new Date(row.created_at as string).toISOString(),
@@ -98,6 +110,27 @@ function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
     result,
     error: (row.error as string | null) ?? undefined,
   };
+}
+
+/**
+ * Read a stored result in a version-aware way (Requirement 12.3). A record
+ * saved under checkpoint schema v1 predates orchestration, so it is always a
+ * single-agent run: any orchestration fields that somehow appear on it are
+ * dropped so it is never mistaken for an orchestrated run on resume or render.
+ * v2+ records are returned as-is (they may carry orchestrated/replans/workers).
+ */
+function normaliseResult(result: ExecutionRecord['result'] | undefined): ExecutionRecord['result'] | undefined {
+  if (!result) return result;
+  const version = result.checkpoint?.schemaVersion ?? 1;
+  if (version >= ORCHESTRATION_SCHEMA_VERSION) return result;
+  if (result.orchestrated === undefined && result.workers === undefined && result.replans === undefined) {
+    return result;
+  }
+  const { orchestrated: _o, replans: _r, workers: _w, ...rest } = result;
+  void _o;
+  void _r;
+  void _w;
+  return rest;
 }
 
 // ── Public API (same shape as the old file-based store) ──────────────────

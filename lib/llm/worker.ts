@@ -33,41 +33,17 @@ import { executeLoop } from './agent';
 import { getDefaultModelKey } from './model-registry';
 import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from './tool-catalog';
 import type { PlanStep } from './planner';
-import type { BudgetUsage, RunLedger } from './run-budget';
+import type { RunLedger } from './run-budget';
 import { workerBudgetShare } from './orchestration-config';
 
 // ── Worker result / record types ───────────────────────────────────────────────
-// These move to lib/types.ts in Task 8.1 (the record/resume phase); defined
-// here for now so the worker is self-contained and Task 8 can re-home them.
-
-export type WorkerStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
-
-/** The structured result a worker hands back with report_result. */
-export interface WorkerResult {
-  stepId: number;
-  status: 'done' | 'failed';
-  /** ≤ 1,000 chars (truncated by report_result). */
-  summary: string;
-  /** Ids a dependent step needs, e.g. { dataElementId: 'DE123' }. */
-  ids: Record<string, string>;
-  /** ≤ 500 chars (truncated by report_result). */
-  notes?: string;
-}
-
-/** One worker attempt, as stored on the run record and emitted on worker_done. */
-export interface WorkerRecord {
-  workerId: string; // `${runId}:w${stepId}:${attempt}`
-  stepId: number;
-  attempt: number;
-  modelKey: string;
-  status: WorkerStatus;
-  steps: AgentStepTrace[];
-  result?: WorkerResult;
-  budgetUsage: BudgetUsage;
-  startedAt: string;
-  durationMs?: number;
-  error?: string;
-}
+// Re-homed to lib/types.ts in Task 8.1 (the record/resume phase) so the run
+// record, stream events and resume path share one definition. Re-exported here
+// so existing importers (coordinator, tests) keep importing them from worker.ts.
+// WorkerRecord.steps is typed AgentStepDTO[] there; AgentStepTrace is
+// structurally identical, so the runtime steps assign without a cast.
+export type { WorkerStatus, WorkerResult, WorkerRecord } from '../types';
+import type { WorkerResult, WorkerRecord, WorkerStatus } from '../types';
 
 /** Caps from Requirement 5.2. report_result truncates to these before reporting. */
 export const MAX_SUMMARY_CHARS = 1_000;

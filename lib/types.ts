@@ -31,6 +31,58 @@ export interface AgentStepDTO {
   modelMs?: number;
   /** Chat-model tokens for this step alone. */
   usage?: TokenUsage;
+  /**
+   * Orchestrator-worker mode (lib/llm/coordinator.ts): the id of the worker
+   * that produced this step, when the run was orchestrated. Absent on
+   * single-agent runs, so their step shape is unchanged (Requirement 11.3).
+   */
+  workerId?: string;
+}
+
+// ============================================================================
+// Orchestrator-worker types (lib/llm/coordinator.ts, lib/llm/worker.ts)
+// ============================================================================
+
+/**
+ * Lifecycle of one worker (one plan step carried out by its own bounded agent
+ * loop). `done` / `failed` mirror the report_result status; `cancelled` is a
+ * worker aborted by the run's kill switch / cancel (Requirement 9.4).
+ */
+export type WorkerStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+
+/**
+ * The structured result a worker hands back with the report_result tool
+ * (Requirement 5.1). `summary` is capped at 1,000 and `notes` at 500 chars by
+ * the tool before it reaches here (Requirement 5.2).
+ */
+export interface WorkerResult {
+  stepId: number;
+  status: 'done' | 'failed';
+  /** ≤ 1,000 chars. */
+  summary: string;
+  /** Ids a dependent step needs, e.g. { dataElementId: 'DE123' }. */
+  ids: Record<string, string>;
+  /** ≤ 500 chars. */
+  notes?: string;
+}
+
+/**
+ * One worker attempt, stored inside the run record's `result` JSONB
+ * (Requirement 12.1) and emitted on the `worker_done` stream event
+ * (Requirement 11.2). `workerId` is `${runId}:w${stepId}:${attempt}`.
+ */
+export interface WorkerRecord {
+  workerId: string;
+  stepId: number;
+  attempt: number;
+  modelKey: string;
+  status: WorkerStatus;
+  steps: AgentStepDTO[];
+  result?: WorkerResult;
+  budgetUsage: { tokens: number; costUsd?: number; durationMs: number };
+  startedAt: string;
+  durationMs?: number;
+  error?: string;
 }
 
 /**
@@ -143,6 +195,17 @@ export interface BuildRequest {
    * but does not drive the stage decision.
    */
   publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
+  /**
+   * Orchestrator-worker mode (lib/llm/coordinator.ts). Opts this run into the
+   * coordinator when ORCHESTRATION=on; opts out when ORCHESTRATION=always.
+   * Ignored when ORCHESTRATION=off (Requirements 2.2–2.4).
+   */
+  orchestrate?: boolean;
+  /**
+   * Cap on concurrent workers for this run; the smaller of it and MAX_WORKERS
+   * is used (Requirement 3.2).
+   */
+  maxWorkers?: number;
 }
 
 /**
@@ -187,6 +250,17 @@ export interface BuildResponse {
   ragJudgments?: RagJudgmentDTO[];
   /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
   versions?: RunVersions;
+  /**
+   * Orchestrator-worker fields (lib/llm/coordinator.ts), stored inside the
+   * existing `result` JSONB — no table schema change (Requirement 12.1).
+   * `orchestrated` is true when the coordinator ran the plan as concurrent
+   * workers; `workers` are those workers' records and `replans` counts the
+   * replanning calls made. Absent / false on single-agent runs, so their
+   * stored shape is unchanged.
+   */
+  orchestrated?: boolean;
+  replans?: number;
+  workers?: WorkerRecord[];
 }
 
 // ── TASK 8: Streaming event types ─────────────────────────────────────────────
@@ -198,18 +272,36 @@ export interface BuildResponse {
 
 export type BuildStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
-  | { type: 'step'; step: AgentStepDTO }
+  // `workerId` is set when the step came from an orchestrated worker, so the
+  // client can file it under that worker's lane (Requirement 11.3); absent on
+  // single-agent runs, keeping their event shape unchanged (Requirement 11.5).
+  | { type: 'step'; step: AgentStepDTO; workerId?: string }
   // TASK 1 (token streaming): a chunk of assistant text as it's generated.
   // The client appends these for a live view; the authoritative final text
   // still arrives on 'done'. Discard accumulated deltas on 'restart'.
   | { type: 'text_delta'; delta: string }
-  | { type: 'restart'; fromModelKey: string; toModelKey: string }
+  // `workerId` present: only that worker's steps are discarded, not the whole
+  // run's (Requirement 11.3, 11.4). Absent: a single-agent same-tier restart.
+  | { type: 'restart'; fromModelKey: string; toModelKey: string; workerId?: string }
   /** The answer has finished streaming and is being checked against the tool results (answer-critic.ts); 'done' carries the checked, possibly revised, text. */
   | { type: 'checking' }
   /** The run's plan: sent when made (awaitingApproval while a person decides) and on every status change or revision. */
   | { type: 'plan'; plan: PlanInfo; awaitingApproval?: boolean }
   /** The request asked for model "auto": which model it was routed to, and why. */
   | { type: 'route'; route: RouteInfo }
+  // ── Orchestrator-worker events (Requirements 11.1, 11.2) ──────────────────
+  /** A worker started: the client opens a lane for it. */
+  | { type: 'worker_start'; workerId: string; stepId: number; modelKey: string; tools: string[] }
+  /** A worker ended: its final status, result (if any) and token spend. */
+  | {
+      type: 'worker_done';
+      workerId: string;
+      stepId: number;
+      status: WorkerStatus;
+      result?: WorkerResult;
+      budgetUsage: { tokens: number; costUsd?: number; durationMs: number };
+      error?: string;
+    }
   | {
       type: 'approval_request';
       toolCallId: string;
@@ -219,6 +311,8 @@ export type BuildStreamEvent =
       reason: string;
       /** Human-readable form of `reason`. */
       reasonText: string;
+      /** Set when the call came from an orchestrated worker (Requirement 11.3). */
+      workerId?: string;
     }
   | { type: 'approval_resolved'; toolCallId: string; approved: boolean; reason: string }
   | {
@@ -250,6 +344,8 @@ export interface PlanInfo {
     dependsOn: number[];
     status: 'pending' | 'running' | 'done' | 'failed' | 'skipped';
     note?: string;
+    /** The worker running this step, when the run is orchestrated (Requirement 15.2). */
+    workerId?: string;
   }>;
 }
 

@@ -95,22 +95,22 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 7.4 Verify a kill-switch trip aborts every worker (`lib/kill-switch.test.ts`)
   - _Requirements: 9.4_
 
-- [ ] 8. Types, events, record and resume
-- [ ] 8.1 Add `WorkerStatus`, `WorkerResult`, `WorkerRecord` and the changed fields to `lib/types.ts`
+- [x] 8. Types, events, record and resume
+- [x] 8.1 Add `WorkerStatus`, `WorkerResult`, `WorkerRecord` and the changed fields to `lib/types.ts`
   - _Requirements: 5.1, 11.1, 11.2, 11.3, 12.1_
-- [ ] 8.2 Accept and validate `orchestrate` and `maxWorkers` in `app/api/build/route.ts`
+- [x] 8.2 Accept and validate `orchestrate` and `maxWorkers` in `app/api/build/route.ts`
   - _Requirements: 2.3, 2.4, 3.2_
-- [ ] 8.3 In `lib/build-run.ts`: forward `worker_start` / `worker_done`; tag events and audit entries with `workerId`; per-worker restart in checkpoints; checkpoint on worker start and end
+- [x] 8.3 In `lib/build-run.ts`: forward `worker_start` / `worker_done`; tag events and audit entries with `workerId`; per-worker restart in checkpoints; checkpoint on worker start and end
   - _Requirements: 9.6, 11.1, 11.2, 11.3, 11.5, 12.2_
-- [ ] 8.4 Bump `CHECKPOINT_SCHEMA_VERSION` to 2 in `lib/execution-store.ts`; store workers in `result` JSONB; load version 1 records as single-agent
+- [x] 8.4 Bump `CHECKPOINT_SCHEMA_VERSION` to 2 in `lib/execution-store.ts`; store workers in `result` JSONB; load version 1 records as single-agent
   - _Requirements: 12.1, 12.3_
-- [ ] 8.5 Resume orchestrated runs from `done` steps in `resumeContextFrom`
+- [x] 8.5 Resume orchestrated runs from `done` steps in `resumeContextFrom`
   - _Requirements: 12.4_
-- [ ] 8.6 Run critic and judge on the synthesized answer with merged worker steps
+- [x] 8.6 Run critic and judge on the synthesized answer with merged worker steps
   - _Requirements: 7.3_
-- [ ] 8.7 Add orchestration fields to the run record and `/api/metrics`
+- [x] 8.7 Add orchestration fields to the run record and `/api/metrics`
   - _Requirements: 14.2_
-- [ ] 8.8 Tests in `lib/build-run.test.ts` and `app/api/build/route.test.ts`
+- [x] 8.8 Tests in `lib/build-run.test.ts` and `app/api/build/route.test.ts`
   - _Requirements: 11.1, 11.3, 12.2, 12.4_
 
 - [ ] 9. User interface

@@ -40,6 +40,11 @@ export interface AuditEvent {
   input?: unknown;
   outcome?: AuditOutcome;
   error?: string;
+  /**
+   * The worker that made this call, when the run was orchestrated
+   * (Requirement 9.6). Absent on single-agent runs.
+   */
+  workerId?: string;
   /** Epoch ms; defaults to when the event is recorded. */
   at?: number;
 }
@@ -66,9 +71,13 @@ function ensureTable(): Promise<void> {
           reason TEXT,
           input JSONB,
           outcome TEXT,
-          error TEXT
+          error TEXT,
+          worker_id TEXT
         )`.replace(/\s+/g, ' ')
       );
+      // Additive, nullable column (Requirement 9.6) for tables created before
+      // orchestration: IF NOT EXISTS makes it idempotent and safe to re-run.
+      await execSql(`ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS worker_id TEXT`);
       await execSql(`CREATE INDEX IF NOT EXISTS ${TABLE}_at_idx ON ${TABLE} (at DESC)`);
       await execSql(`CREATE INDEX IF NOT EXISTS ${TABLE}_run_idx ON ${TABLE} (run_id)`);
     })().catch((err) => {
@@ -104,6 +113,7 @@ function valuesRow(e: AuditEvent): string {
     sqlJsonOrNull(auditInput(e.input)),
     sqlStrOrNull(e.outcome),
     sqlStrOrNull(e.error ? redactOutput(e.error).slice(0, 2_000) : undefined),
+    sqlStrOrNull(e.workerId),
   ].join(', ')})`;
 }
 
@@ -113,7 +123,7 @@ export async function recordAudit(events: AuditEvent[]): Promise<void> {
   try {
     await ensureTable();
     await execSql(
-      `INSERT INTO ${TABLE} (id, at, type, run_id, actor, tool, level, reason, input, outcome, error) VALUES ${events
+      `INSERT INTO ${TABLE} (id, at, type, run_id, actor, tool, level, reason, input, outcome, error, worker_id) VALUES ${events
         .map(valuesRow)
         .join(', ')}`
     );
@@ -155,5 +165,6 @@ export async function listAudit(q: AuditQuery = {}): Promise<AuditRow[]> {
     input: row.input ?? undefined,
     outcome: (row.outcome as AuditOutcome | null) ?? undefined,
     error: (row.error as string | null) ?? undefined,
+    workerId: (row.worker_id as string | null) ?? undefined,
   }));
 }

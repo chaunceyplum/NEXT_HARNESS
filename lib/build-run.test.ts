@@ -48,4 +48,63 @@ describe('resumeContextFrom', () => {
     }));
     expect(resumeContextFrom(record(many))).toContain('… (truncated)');
   });
+
+  // Requirement 12.4: an orchestrated run resumes from its DONE steps — the
+  // context keeps the done steps and their WorkerResults (summary + ids) and
+  // lists the steps that still have to run.
+  it('resumes an orchestrated run from its done steps and their worker results', () => {
+    const orchestratedRecord: ExecutionRecord = {
+      id: 'run-2',
+      createdAt: '2026-09-29T00:00:00Z',
+      description: 'build two data elements and a rule',
+      model: 'm',
+      allowFullBuild: false,
+      status: 'interrupted',
+      durationMs: 1,
+      request: { description: 'build two data elements and a rule' },
+      result: {
+        runId: 'run-2',
+        finalText: '',
+        steps: [],
+        toolsConsidered: [],
+        finishReason: 'running',
+        usage: {},
+        orchestrated: true,
+        replans: 0,
+        plan: {
+          goal: 'build two data elements and a rule',
+          version: 1,
+          steps: [
+            { id: 1, description: 'read property', tool: 'reactor_get_property', expectedOutput: 'property', dependsOn: [], status: 'done' },
+            { id: 2, description: 'create data element A', tool: 'reactor_create_data_element', expectedOutput: 'DE', dependsOn: [1], status: 'done' },
+            { id: 3, description: 'create rule', tool: 'reactor_create_rule', expectedOutput: 'rule', dependsOn: [2], status: 'pending' },
+          ],
+        },
+        workers: [
+          {
+            workerId: 'run-2:w1:1', stepId: 1, attempt: 1, modelKey: 'm', status: 'done',
+            steps: [], startedAt: '2026-09-29T00:00:00Z',
+            budgetUsage: { tokens: 10, durationMs: 1 },
+            result: { stepId: 1, status: 'done', summary: 'read property PR1', ids: { propertyId: 'PR1' } },
+          },
+          {
+            workerId: 'run-2:w2:1', stepId: 2, attempt: 1, modelKey: 'm', status: 'done',
+            steps: [], startedAt: '2026-09-29T00:00:00Z',
+            budgetUsage: { tokens: 20, durationMs: 1 },
+            result: { stepId: 2, status: 'done', summary: 'created data element', ids: { dataElementId: 'DE9' } },
+          },
+        ],
+      },
+    };
+
+    const text = resumeContextFrom(orchestratedRecord);
+    expect(text).toContain('orchestrated run');
+    expect(text).toContain('2 step(s) done');
+    // Done steps and their ids are carried so the resumed run reuses them.
+    expect(text).toContain('Step 1 (read property): read property PR1 ids={"propertyId":"PR1"}');
+    expect(text).toContain('Step 2 (create data element A): created data element ids={"dataElementId":"DE9"}');
+    // The not-done step is listed as still to do.
+    expect(text).toMatch(/Steps still to do:[\s\S]*Step 3 \(create rule\)/);
+    expect(text).toMatch(/do not redo these/);
+  });
 });

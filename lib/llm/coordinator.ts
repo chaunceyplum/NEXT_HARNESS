@@ -48,7 +48,7 @@ import {
 import { classifyTool } from './tool-policy';
 import { RunLedger, type BudgetStopReason, type BudgetUsage, type RunBudgetLimits } from './run-budget';
 import type { McpToolDefinition } from './tool-catalog';
-import { runWorker, type SharedRunState, type WorkerRecord, type WorkerResult } from './worker';
+import { runWorker, workerTools, type SharedRunState, type WorkerRecord, type WorkerResult } from './worker';
 import {
   launchParallelWrites,
   maxReplans as envMaxReplans,
@@ -156,10 +156,15 @@ export interface OrchestratorInput {
   /** Extended thinking / wall-clock hook: a stable clock for the ledger (tests inject one). */
   now?: () => number;
   // Hooks — forwarded to the run's event stream (Requirement 11).
+  /** A worker is starting (Requirement 11.1): workerId, step, model and its narrowed tool names. */
+  onWorkerStart?: (info: { workerId: string; stepId: number; modelKey: string; tools: string[] }) => void;
+  /** A worker finished (Requirement 11.2): its full record. */
   onWorker?: (worker: WorkerRecord) => void;
-  onStep?: (step: AgentStepTrace) => void;
+  /** A worker step finished; `workerId` tags it so the stream files it under that worker (Requirement 11.3). */
+  onStep?: (step: AgentStepTrace, workerId?: string) => void;
   onTextDelta?: (delta: string) => void;
-  onToolOutcome?: (outcome: ToolOutcome) => void;
+  /** A tool call finished; `workerId` tags it so its audit entry carries the worker (Requirement 9.6). */
+  onToolOutcome?: (outcome: ToolOutcome, workerId?: string) => void;
   onRestart?: (info: { fromModelKey: string; toModelKey: string; workerId: string }) => void;
   onPlan?: (plan: Plan) => void;
 }
@@ -268,6 +273,11 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     setStatus(step, 'running');
     const deps = step.dependsOn.map((id) => results.get(id)).filter((r): r is WorkerResult => r !== undefined);
 
+    // Requirement 11.1: announce the worker before it runs, with the model and
+    // the names of its narrowed tool set so the client can label the lane.
+    const narrowed = Object.keys(workerTools(input.tools, step, input.catalog));
+    input.onWorkerStart?.({ workerId, stepId: step.id, modelKey: workerModelKey, tools: narrowed });
+
     return runWorker({
       runGoal: tracker.plan.goal,
       step,
@@ -281,8 +291,10 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
       shared,
       attempt,
       ...(input.thinkingBudget !== undefined ? { thinkingBudget: input.thinkingBudget } : {}),
-      ...(input.onStep ? { onStep: input.onStep } : {}),
-      ...(input.onToolOutcome ? { onToolOutcome: input.onToolOutcome } : {}),
+      // Requirement 11.3: tag every worker step with its workerId as it is
+      // forwarded, so the stream and checkpoint file it under the right lane.
+      ...(input.onStep ? { onStep: (s: AgentStepTrace) => input.onStep?.(s, workerId) } : {}),
+      ...(input.onToolOutcome ? { onToolOutcome: (o: ToolOutcome) => input.onToolOutcome?.(o, workerId) } : {}),
       onRestart: (info) => input.onRestart?.({ ...info, workerId }),
     }).then((record) => ({ stepId: step.id, record }));
   };

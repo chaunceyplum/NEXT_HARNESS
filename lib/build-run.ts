@@ -16,7 +16,7 @@ import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { AgentStepDTO, BuildRequest, ExecutionRecord } from '@/lib/types';
+import type { AgentStepDTO, BuildRequest, ExecutionRecord, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
@@ -55,6 +55,15 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
     // so a crash or restart leaves the steps so far (marked 'interrupted' on
     // the next start, and resumable). Saves are chained so the last write wins.
     const steps: AgentStepDTO[] = [];
+    // Orchestrated runs only (Requirements 11.2, 12.1, 12.2): the worker
+    // records seen so far, keyed by workerId so a later attempt of the same
+    // worker replaces the earlier one. Checkpointed with the run so an
+    // interrupted orchestrated run keeps its finished workers.
+    const workers = new Map<string, WorkerRecord>();
+    let orchestrated = false;
+    // Mid-run checkpoints don't track replan count incrementally; the final
+    // record takes the authoritative value from the run result.
+    const replans = 0;
     // Streamed tokens pass through the output guardrail too. A credential can
     // span several deltas, so text is held back until it's safe to redact.
     const textRedactor = createStreamRedactor();
@@ -84,6 +93,9 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           toolsConsidered: [],
           finishReason: 'running',
           usage: {},
+          // Requirement 12.2: checkpoint the workers mid-run so an orchestrated
+          // run that is interrupted can be resumed with its finished steps.
+          ...(orchestrated ? { orchestrated: true, replans, workers: [...workers.values()] } : {}),
           checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
         },
       });
@@ -109,18 +121,49 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         platformFilter: req.platformFilter,
         launchMode: req.launchMode,
         publishTarget: req.publishTarget,
+        // Orchestrator-worker mode (Requirements 2.3, 2.4, 3.2): the coordinator
+        // is used only when ORCHESTRATION is on/always and the plan parallelises.
+        orchestrate: req.orchestrate,
+        maxWorkers: req.maxWorkers,
         abortSignal: abort.signal,
-        // TASK 8: stream each step as it completes, and checkpoint it
-        onStep: (step) => {
+        // TASK 8: stream each step as it completes, and checkpoint it.
+        // Requirement 11.3: an orchestrated worker's steps arrive with a
+        // workerId; it is stored on the step and sent on the event so the
+        // client (and the per-worker restart below) can file it by lane.
+        onStep: (step, workerId) => {
           pushDelta(textRedactor.flush());
-          const redacted = redactOutput(step);
+          const redacted: AgentStepDTO = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
           steps.push(redacted);
-          push({ type: 'step', step: redacted });
+          push({ type: 'step', step: redacted, ...(workerId ? { workerId } : {}) });
           checkpoint();
           flushAudit();
         },
-        // Audit log: every write/destructive call's outcome (reads with AUDIT_READS=true)
-        onToolOutcome: (o) => {
+        // Requirement 11.1: a worker started — open its lane and checkpoint.
+        onWorkerStart: ({ workerId, stepId, modelKey, tools }) => {
+          orchestrated = true;
+          push({ type: 'worker_start', workerId, stepId, modelKey, tools });
+          checkpoint();
+        },
+        // Requirements 11.2, 12.2: a worker ended — record it, emit its result
+        // and token spend, and checkpoint.
+        onWorker: (worker) => {
+          const redacted = redactOutput(worker);
+          workers.set(redacted.workerId, redacted);
+          push({
+            type: 'worker_done',
+            workerId: redacted.workerId,
+            stepId: redacted.stepId,
+            status: redacted.status,
+            ...(redacted.result ? { result: redacted.result } : {}),
+            budgetUsage: redacted.budgetUsage,
+            ...(redacted.error ? { error: redacted.error } : {}),
+          });
+          checkpoint();
+        },
+        // Audit log: every write/destructive call's outcome (reads with
+        // AUDIT_READS=true). Requirement 9.6: an orchestrated worker's outcome
+        // carries its workerId, recorded on the audit entry.
+        onToolOutcome: (o, workerId) => {
           if (o.level === 'read' && !o.approvalReason && !auditReads()) return;
           pendingAudit.push({
             type: 'tool_call',
@@ -132,13 +175,25 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
             input: o.input,
             outcome: o.outcome,
             error: o.error,
+            ...(workerId ? { workerId } : {}),
           });
         },
         // TASK 1: stream assistant text token-by-token, through the output guardrail
         onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
-        onRestart: ({ fromModelKey, toModelKey }) => {
-          steps.length = 0;
-          push({ type: 'restart', fromModelKey, toModelKey });
+        // A same-tier restart discards the abandoned attempt's steps. For a
+        // single-agent run (no workerId) that is the whole trace; for an
+        // orchestrated run (Requirement 11.3) only that worker's steps are
+        // dropped so the other workers' steps survive the checkpoint.
+        onRestart: ({ fromModelKey, toModelKey, workerId }) => {
+          if (workerId) {
+            for (let i = steps.length - 1; i >= 0; i--) {
+              if (steps[i].workerId === workerId) steps.splice(i, 1);
+            }
+          } else {
+            steps.length = 0;
+          }
+          push({ type: 'restart', fromModelKey, toModelKey, ...(workerId ? { workerId } : {}) });
+          checkpoint();
         },
         // Deployment memory records which run and user saved a fact
         runId,
@@ -244,6 +299,12 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           critique: agentResult.critique,
           route: agentResult.route,
           versions: agentResult.versions,
+          // Requirements 12.1, 14.2: orchestration fields stored inside the
+          // existing result JSONB — no table schema change. Absent on
+          // single-agent runs, so their record shape is unchanged.
+          ...(agentResult.orchestrated
+            ? { orchestrated: true, replans: agentResult.replans ?? 0, workers: agentResult.workers ?? [] }
+            : {}),
         },
       });
       // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.
@@ -293,8 +354,19 @@ const MAX_RESUME_CHARS = 6_000;
  * tool call and its outcome, capped. The new run sees it after the original
  * request, with instructions not to redo completed changes. Continuation is
  * by context, not by replaying the model's exact message history.
+ *
+ * Requirement 12.4: an orchestrated run resumes from its DONE steps. The
+ * context lists each done plan step with its worker's WorkerResult (summary +
+ * ids) and names the steps that still have to run, so the resumed run keeps
+ * the finished work and only does what is left. A single-agent record (or a v1
+ * record read as single-agent) falls back to the tool-call history below.
  */
 export function resumeContextFrom(record: ExecutionRecord): string {
+  const result = record.result;
+  if (result?.orchestrated && result.plan) {
+    return orchestratedResumeContext(record);
+  }
+
   const lines: string[] = [];
   for (const step of record.result?.steps ?? []) {
     step.toolCalls.forEach((call, i) => {
@@ -309,5 +381,42 @@ export function resumeContextFrom(record: ExecutionRecord): string {
     `This request was started before (run ${record.id}) and was interrupted after ${record.result?.steps.length ?? 0} step(s).`,
     history ? `Tool calls it already made:\n${history}` : 'It had not made any tool calls yet.',
     'Continue from where it stopped. Do not repeat changes that already succeeded; if you are unsure whether one took effect, check with a read tool first. In your final answer, cover the whole request, including what the earlier attempt did.',
+  ].join('\n\n');
+}
+
+/**
+ * Resume context for an orchestrated run (Requirement 12.4): keep the DONE
+ * plan steps and their WorkerResults, and list the steps that are not done so
+ * the resumed run only does what is left.
+ */
+function orchestratedResumeContext(record: ExecutionRecord): string {
+  const plan = record.result?.plan;
+  const workers = record.result?.workers ?? [];
+  // Latest WorkerResult per step (a later attempt supersedes an earlier one).
+  const resultByStep = new Map<number, NonNullable<WorkerRecord['result']>>();
+  for (const w of workers) {
+    if (w.result) resultByStep.set(w.stepId, w.result);
+  }
+
+  const doneLines: string[] = [];
+  const remaining: string[] = [];
+  for (const step of plan?.steps ?? []) {
+    if (step.status === 'done') {
+      const r = resultByStep.get(step.id);
+      const ids = r && Object.keys(r.ids).length ? ` ids=${JSON.stringify(r.ids)}` : '';
+      doneLines.push(`- Step ${step.id} (${step.description}): ${r?.summary ?? 'done'}${ids}`);
+    } else {
+      remaining.push(`- Step ${step.id} (${step.description}) [${step.status}]`);
+    }
+  }
+
+  let done = doneLines.join('\n');
+  if (done.length > MAX_RESUME_CHARS) done = `${done.slice(0, MAX_RESUME_CHARS)}\n… (truncated)`;
+
+  return [
+    `This request was started before (run ${record.id}) as an orchestrated run and was interrupted with ${doneLines.length} step(s) done.`,
+    doneLines.length ? `Steps already completed (do not redo these):\n${done}` : 'No step had completed yet.',
+    remaining.length ? `Steps still to do:\n${remaining.join('\n')}` : 'All planned steps had completed.',
+    'Continue from where it stopped. Reuse the ids above instead of recreating those objects; if you are unsure whether a change took effect, check with a read tool first. In your final answer, cover the whole request, including what the earlier attempt did.',
   ].join('\n\n');
 }

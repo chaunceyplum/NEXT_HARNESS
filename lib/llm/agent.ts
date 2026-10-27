@@ -171,7 +171,7 @@ export interface RunAgentOptions {
    * partial trace for that step. Allows the route to stream step events to
    * the client as they arrive rather than waiting for the full run to finish.
    */
-  onStep?: (step: AgentStepTrace) => void;
+  onStep?: (step: AgentStepTrace, workerId?: string) => void;
   /**
    * TASK 1 (token streaming): called with each chunk of assistant text as the
    * model generates it, so the route can stream the answer to the client token
@@ -263,7 +263,7 @@ export interface RunAgentOptions {
    * same-tier fallback model. Steps already reported via onStep belong to the
    * abandoned attempt and should be discarded.
    */
-  onRestart?: (info: { fromModelKey: string; toModelKey: string }) => void;
+  onRestart?: (info: { fromModelKey: string; toModelKey: string; workerId?: string }) => void;
   /**
    * TASK 9: asks a human to approve one tool call before it runs — every call
    * approval-policy.ts flags: destructive tools, non-read-only SQL, outbound
@@ -278,7 +278,7 @@ export interface RunAgentOptions {
    * the effective tool (call_tool unwrapped), its access level, and why it
    * needed approval if it did. Feeds the audit log (lib/audit-log.ts).
    */
-  onToolOutcome?: (outcome: ToolOutcome) => void;
+  onToolOutcome?: (outcome: ToolOutcome, workerId?: string) => void;
   approveTool?: (call: {
     toolCallId: string;
     toolName: string;
@@ -296,7 +296,9 @@ export interface RunAgentOptions {
   orchestrate?: boolean;
   /** Cap on concurrent workers for this run; the smaller of it and MAX_WORKERS is used (Requirement 3.2). */
   maxWorkers?: number;
-  /** Called when a worker starts and ends, so the route can stream worker events (Requirement 11). */
+  /** Called when a worker starts, so the route can stream a `worker_start` event (Requirement 11.1). */
+  onWorkerStart?: (info: { workerId: string; stepId: number; modelKey: string; tools: string[] }) => void;
+  /** Called when a worker ends, so the route can stream a `worker_done` event (Requirement 11.2). */
   onWorker?: (worker: WorkerRecord) => void;
 }
 
@@ -1516,11 +1518,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       ...(opts.runId ? { runId: opts.runId } : {}),
       toolsConsidered,
       ...(ctx.thinkingBudget !== undefined ? { thinkingBudget: ctx.thinkingBudget } : {}),
+      ...(opts.onWorkerStart ? { onWorkerStart: opts.onWorkerStart } : {}),
       ...(opts.onWorker ? { onWorker: opts.onWorker } : {}),
-      ...(ctx.onStep ? { onStep: ctx.onStep } : {}),
+      // Requirement 11.3: forward the worker-tagged step straight through so the
+      // route can attach the workerId to the step event and checkpoint. The
+      // coordinator supplies the workerId (executeLoop's own ctx.onStep never
+      // has one), so forward opts.onStep, which carries the optional arg.
+      ...(opts.onStep ? { onStep: (step, workerId) => opts.onStep?.(step, workerId) } : {}),
       ...(ctx.onTextDelta ? { onTextDelta: ctx.onTextDelta } : {}),
-      ...(ctx.onToolOutcome ? { onToolOutcome: ctx.onToolOutcome } : {}),
-      ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey }) => opts.onRestart?.({ fromModelKey, toModelKey }) } : {}),
+      // Requirement 9.6: forward the worker-tagged outcome so its audit entry
+      // carries the workerId. opts.onToolOutcome accepts the optional arg.
+      ...(opts.onToolOutcome ? { onToolOutcome: (outcome, workerId) => opts.onToolOutcome?.(outcome, workerId) } : {}),
+      ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey, workerId }) => opts.onRestart?.({ fromModelKey, toModelKey, workerId }) } : {}),
       ...(opts.onPlan ? { onPlan: opts.onPlan } : {}),
     });
     const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];

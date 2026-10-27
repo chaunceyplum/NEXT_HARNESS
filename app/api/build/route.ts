@@ -199,6 +199,31 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     };
   }
 
+  // Orchestration opt-in (Requirements 2.3, 2.4): a per-request boolean. Its
+  // effect is gated by the ORCHESTRATION env flag (off ignores it); the route
+  // only validates the shape here.
+  if (b.orchestrate !== undefined && typeof b.orchestrate !== 'boolean') {
+    return {
+      ok: false,
+      error: { error: '"orchestrate" must be a boolean', code: 'VALIDATION_ERROR' },
+      status: 400,
+    };
+  }
+
+  // Per-request worker cap (Requirement 3.2): the smaller of it and MAX_WORKERS
+  // is used by the coordinator. Validate it as a sensible positive integer.
+  const MIN_WORKERS = 1, MAX_WORKERS_REQ = 16;
+  if (b.maxWorkers !== undefined) {
+    const v = b.maxWorkers;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < MIN_WORKERS || v > MAX_WORKERS_REQ) {
+      return {
+        ok: false,
+        error: { error: `"maxWorkers" must be an integer between ${MIN_WORKERS} and ${MAX_WORKERS_REQ}`, code: 'VALIDATION_ERROR', details: { min: MIN_WORKERS, max: MAX_WORKERS_REQ } },
+        status: 400,
+      };
+    }
+  }
+
   // publishTarget: an object with optional string members. ABSENT → library-only
   // (unchanged behaviour); PRESENT → the run may publish to a dev/staging
   // environment (resolved from server truth; production is refused in code).
@@ -253,6 +278,8 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
         : undefined,
       launchMode: typeof b.launchMode === 'boolean' ? b.launchMode : undefined,
       ...(b.publishTarget !== undefined ? { publishTarget: normalisePublishTarget(b.publishTarget) } : {}),
+      orchestrate: typeof b.orchestrate === 'boolean' ? b.orchestrate : undefined,
+      maxWorkers: typeof b.maxWorkers === 'number' ? b.maxWorkers : undefined,
     },
   };
 }

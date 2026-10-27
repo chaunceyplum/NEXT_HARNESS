@@ -4,10 +4,40 @@ import { describe, expect, it, vi } from 'vitest';
 // step is checkpointed, the final record wins, and a reconnect replays.
 
 let finishRun!: () => void;
-const saved: Array<{ status: string; steps: number }> = [];
+const saved: Array<{ status: string; steps: number; result?: Record<string, unknown> }> = [];
+
+// When set, the next runAgent call drives the orchestrator-worker callbacks
+// instead of the plain single-agent path, so the worker-event and per-worker
+// restart forwarding can be exercised end to end through the route.
+type WorkerAgentOpts = {
+  onStep?: (s: unknown, workerId?: string) => void;
+  onWorkerStart?: (info: { workerId: string; stepId: number; modelKey: string; tools: string[] }) => void;
+  onWorker?: (w: Record<string, unknown>) => void;
+  onRestart?: (info: { fromModelKey: string; toModelKey: string; workerId?: string }) => void;
+  abortSignal?: AbortSignal;
+};
+let orchestratedScript: ((opts: WorkerAgentOpts) => void) | null = null;
 
 vi.mock('@/lib/llm/agent', () => ({
-  runAgent: async (opts: { onStep?: (s: unknown) => void; abortSignal?: AbortSignal }) => {
+  runAgent: async (opts: WorkerAgentOpts) => {
+    if (orchestratedScript) {
+      const script = orchestratedScript;
+      orchestratedScript = null;
+      script(opts);
+      return {
+        finalText: 'synthesised',
+        steps: [{ stepNumber: 0, text: '', toolCalls: [], toolResults: [], workerId: 'r:w2:1' }],
+        toolsConsidered: [],
+        finishReason: 'stop',
+        modelKey: 'm',
+        usage: {},
+        budgetUsage: { tokens: 0, durationMs: 0 },
+        ragJudgments: [],
+        orchestrated: true,
+        replans: 1,
+        workers: [{ workerId: 'r:w2:1', stepId: 2, attempt: 1, modelKey: 'm', status: 'done', steps: [], budgetUsage: { tokens: 1, durationMs: 1 }, startedAt: 'x' }],
+      };
+    }
     opts.onStep?.({ stepNumber: 0, text: '', toolCalls: [{ toolName: 'adobe_list_segments', input: {} }], toolResults: [] });
     await new Promise<void>((resolve, reject) => {
       finishRun = resolve;
@@ -26,10 +56,10 @@ vi.mock('@/lib/llm/agent', () => ({
   },
 }));
 vi.mock('@/lib/execution-store', () => ({
-  CHECKPOINT_SCHEMA_VERSION: 1,
+  CHECKPOINT_SCHEMA_VERSION: 2,
   newRunId: () => `run-${Math.random().toString(36).slice(2)}`,
   saveExecution: async (r: { status: string; result?: { steps: unknown[] } }) => {
-    saved.push({ status: r.status, steps: r.result?.steps.length ?? 0 });
+    saved.push({ status: r.status, steps: r.result?.steps.length ?? 0, result: r.result as Record<string, unknown> | undefined });
   },
 }));
 
@@ -133,6 +163,75 @@ describe('POST /api/build — concurrency cap (Requirement 13.3)', () => {
     // Stop the run so it doesn't leak into later tests.
     await cancel.POST(new Request('http://x', { method: 'POST' }), params(start.runId));
     await tick();
+  });
+});
+
+describe('POST /api/build — orchestration input validation', () => {
+  it('rejects a non-boolean orchestrate and an out-of-range maxWorkers', async () => {
+    const bad = (body: Record<string, unknown>) =>
+      POST(new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'list all segments please', ...body }) }));
+
+    expect((await bad({ orchestrate: 'yes' })).status).toBe(400);
+    expect((await bad({ maxWorkers: 0 })).status).toBe(400);
+    expect((await bad({ maxWorkers: 2.5 })).status).toBe(400);
+    expect((await bad({ maxWorkers: 99 })).status).toBe(400);
+  });
+});
+
+describe('POST /api/build — orchestrated runs (Requirements 11.1, 11.3, 12.2)', () => {
+  it('streams worker_start / worker_done, tags steps, drops only the restarted worker, and stores workers', async () => {
+    saved.length = 0;
+    // Drive the worker callbacks: two workers start; one step from each; a
+    // per-worker restart drops only w1's step; both workers finish.
+    orchestratedScript = (opts) => {
+      opts.onWorkerStart?.({ workerId: 'r:w1:1', stepId: 1, modelKey: 'm', tools: ['reactor_get_property'] });
+      opts.onWorkerStart?.({ workerId: 'r:w2:1', stepId: 2, modelKey: 'm', tools: ['reactor_create_data_element'] });
+      opts.onStep?.({ stepNumber: 0, text: '', toolCalls: [], toolResults: [] }, 'r:w1:1');
+      opts.onStep?.({ stepNumber: 1, text: '', toolCalls: [], toolResults: [] }, 'r:w2:1');
+      // w1 restarts on a same-tier fallback: only its step is discarded.
+      opts.onRestart?.({ fromModelKey: 'm', toModelKey: 'm2', workerId: 'r:w1:1' });
+      opts.onStep?.({ stepNumber: 0, text: '', toolCalls: [], toolResults: [] }, 'r:w1:1');
+      opts.onWorker?.({ workerId: 'r:w1:1', stepId: 1, attempt: 2, modelKey: 'm2', status: 'done', steps: [], budgetUsage: { tokens: 1, durationMs: 1 }, startedAt: 'x' });
+      opts.onWorker?.({ workerId: 'r:w2:1', stepId: 2, attempt: 1, modelKey: 'm', status: 'done', steps: [], budgetUsage: { tokens: 1, durationMs: 1 }, startedAt: 'x' });
+    };
+
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'build data elements please', orchestrate: true }) })
+    );
+    expect(res.status).toBe(200);
+    // Read the whole stream to completion (the run finishes on its own).
+    const lines = (await res.text()).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    await tick();
+
+    const types = lines.map((l) => l.type);
+    expect(types).toContain('worker_start');
+    expect(types).toContain('worker_done');
+
+    const starts = lines.filter((l) => l.type === 'worker_start');
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toMatchObject({ workerId: 'r:w1:1', stepId: 1, modelKey: 'm', tools: ['reactor_get_property'] });
+
+    // Step events from workers carry the workerId (Requirement 11.3).
+    const stepEvents = lines.filter((l) => l.type === 'step');
+    expect(stepEvents.every((e) => typeof e.workerId === 'string')).toBe(true);
+
+    // The restart event is tagged with the worker (Requirement 11.3).
+    const restart = lines.find((l) => l.type === 'restart');
+    expect(restart).toMatchObject({ workerId: 'r:w1:1' });
+
+    const done = lines.find((l) => l.type === 'worker_done' && l.workerId === 'r:w1:1');
+    expect(done).toMatchObject({ status: 'done', stepId: 1 });
+
+    // Requirement 12.2: checkpoints happened on worker start/end, and the final
+    // record stores the orchestration fields inside result.
+    const final = saved.at(-1);
+    expect(final).toMatchObject({ status: 'completed' });
+    expect(final?.result).toMatchObject({ orchestrated: true, replans: 1 });
+    expect((final?.result?.workers as unknown[]).length).toBe(1);
+    // Per-worker restart: only w1's pre-restart step was dropped, so the final
+    // running checkpoint keeps w2's step plus w1's re-run step (2 steps), not 3.
+    const runningCheckpoints = saved.filter((s) => s.status === 'running');
+    expect(runningCheckpoints.at(-1)?.steps).toBe(2);
   });
 });
 

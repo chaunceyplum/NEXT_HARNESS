@@ -32,6 +32,12 @@ export interface ProductionRunRow {
   judgePass?: boolean;
   rating?: 1 | -1;
   comment?: string;
+  /** Orchestrator-worker run (Requirement 14.2): true when the coordinator ran it as workers. */
+  orchestrated?: boolean;
+  /** Workers this run fanned out into. */
+  workerCount?: number;
+  /** Replanning calls this run made. */
+  replans?: number;
 }
 
 export interface ModelBreakdown {
@@ -61,8 +67,44 @@ export interface ProductionMetrics {
   thumbsUp: number;
   thumbsDown: number;
   byModel: ModelBreakdown[];
+  /** Orchestration summary over the window (Requirement 14.2). */
+  orchestration: OrchestrationMetrics;
   /** Newest runs a user rated 👎 or the judge failed — the weekly trace-review queue. */
   needsReview: Array<Pick<ProductionRunRow, 'id' | 'createdAt' | 'description' | 'rating' | 'comment' | 'judgePass'>>;
+}
+
+/** Orchestrator-worker rollup for /metrics (Requirement 14.2). */
+export interface OrchestrationMetrics {
+  /** Runs the coordinator ran as workers. */
+  orchestratedRuns: number;
+  /** Share of all runs that were orchestrated. */
+  orchestratedRate: number;
+  /** Total workers across orchestrated runs. */
+  totalWorkers: number;
+  /** Mean workers per orchestrated run. */
+  workersPerRun?: number;
+  /** Total replanning calls across orchestrated runs. */
+  totalReplans: number;
+  /** Mean chat-model tokens per worker (run tokens / workers), across orchestrated runs. */
+  tokensPerWorker?: number;
+}
+
+/** Orchestrator-worker rollup over the window (Requirement 14.2). */
+export function computeOrchestration(rows: ProductionRunRow[]): OrchestrationMetrics {
+  const orchestrated = rows.filter((r) => r.orchestrated);
+  const totalWorkers = sum(orchestrated.map((r) => r.workerCount ?? 0));
+  const totalReplans = sum(orchestrated.map((r) => r.replans ?? 0));
+  // Per-worker tokens: run chat-model tokens summed over orchestrated runs,
+  // divided by the workers they ran. A rough per-worker figure for comparison.
+  const tokens = sum(orchestrated.map((r) => (r.inputTokens ?? 0) + (r.outputTokens ?? 0)));
+  return {
+    orchestratedRuns: orchestrated.length,
+    orchestratedRate: rows.length ? orchestrated.length / rows.length : 0,
+    totalWorkers,
+    workersPerRun: orchestrated.length ? totalWorkers / orchestrated.length : undefined,
+    totalReplans,
+    tokensPerWorker: totalWorkers ? tokens / totalWorkers : undefined,
+  };
 }
 
 export function isSuccess(r: ProductionRunRow): boolean {
@@ -113,6 +155,8 @@ export function computeProductionMetrics(rows: ProductionRunRow[]): ProductionMe
     })
     .sort((a, b) => b.runs - a.runs);
 
+  const orchestration = computeOrchestration(rows);
+
   return {
     runs: rows.length,
     completed: rows.filter((r) => r.status === 'completed').length,
@@ -131,6 +175,7 @@ export function computeProductionMetrics(rows: ProductionRunRow[]): ProductionMe
     thumbsUp: rated.filter((r) => r.rating === 1).length,
     thumbsDown: rated.filter((r) => r.rating === -1).length,
     byModel,
+    orchestration,
     needsReview: rows
       .filter((r) => r.rating === -1 || r.judgePass === false)
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
@@ -154,6 +199,9 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
             (SELECT count(*) FROM jsonb_array_elements(COALESCE(r.result->'steps', '[]'::jsonb)) s,
                     jsonb_array_elements(COALESCE(s->'toolResults', '[]'::jsonb)) t
               WHERE t->>'error' LIKE 'Not executed:%') AS denied,
+            (r.result->>'orchestrated')::boolean AS orchestrated,
+            jsonb_array_length(COALESCE(r.result->'workers', '[]'::jsonb)) AS worker_count,
+            (r.result->>'replans')::int AS replans,
             q.judge_pass, q.rating, q.comment
        FROM harness_agent_runs r
        LEFT JOIN harness_run_quality q ON q.run_id = r.id
@@ -175,6 +223,9 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
     outputTokens: num(row.output_tokens),
     steps: row.status === 'completed' ? num(row.steps) : undefined,
     denied: Number(row.denied ?? 0),
+    orchestrated: (row.orchestrated as boolean | null) ?? undefined,
+    workerCount: num(row.worker_count),
+    replans: num(row.replans),
     judgePass: (row.judge_pass as boolean | null) ?? undefined,
     rating: (row.rating as 1 | -1 | null) ?? undefined,
     comment: (row.comment as string | null) ?? undefined,
