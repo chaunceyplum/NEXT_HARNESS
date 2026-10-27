@@ -114,15 +114,18 @@ function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
 
 /**
  * Read a stored result in a version-aware way (Requirement 12.3). A record
- * saved under checkpoint schema v1 predates orchestration, so it is always a
+ * whose checkpoint says schema v1 predates orchestration, so it is always a
  * single-agent run: any orchestration fields that somehow appear on it are
  * dropped so it is never mistaken for an orchestrated run on resume or render.
- * v2+ records are returned as-is (they may carry orchestrated/replans/workers).
+ *
+ * Only a mid-run checkpoint carries a schema version; a completed run's
+ * record has none. A record with no checkpoint is returned as-is: v1 code
+ * never wrote orchestration fields, so any it carries came from v2+.
  */
-function normaliseResult(result: ExecutionRecord['result'] | undefined): ExecutionRecord['result'] | undefined {
+export function normaliseResult(result: ExecutionRecord['result'] | undefined): ExecutionRecord['result'] | undefined {
   if (!result) return result;
-  const version = result.checkpoint?.schemaVersion ?? 1;
-  if (version >= ORCHESTRATION_SCHEMA_VERSION) return result;
+  const version = result.checkpoint?.schemaVersion;
+  if (version === undefined || version >= ORCHESTRATION_SCHEMA_VERSION) return result;
   if (result.orchestrated === undefined && result.workers === undefined && result.replans === undefined) {
     return result;
   }
