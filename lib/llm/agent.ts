@@ -331,14 +331,50 @@ function buildSystemMessage(
   launchMode = false,
   publishEnabled = false
 ): SystemModelMessage {
-  const entry = tryGetModelEntry(modelKey);
-  const providerOptions: SystemModelMessage['providerOptions'] =
-    entry?.provider === 'anthropic'
-      ? { anthropic: { cacheControl: { type: 'ephemeral' } } }
-      : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
-        ? { bedrock: { cachePoint: { type: 'default' } } }
-        : undefined;
+  const providerOptions = cacheMarker(modelKey);
   return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled }), ...(providerOptions ? { providerOptions } : {}) };
+}
+
+/** The provider's cache breakpoint for a message, or undefined when the model can't cache. */
+function cacheMarker(modelKey: string): SystemModelMessage['providerOptions'] {
+  const entry = tryGetModelEntry(modelKey);
+  return entry?.provider === 'anthropic'
+    ? { anthropic: { cacheControl: { type: 'ephemeral' } } }
+    : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
+      ? { bedrock: { cachePoint: { type: 'default' } } }
+      : undefined;
+}
+
+/**
+ * The conversation's cache breakpoint: the last message gets a marker each
+ * step, so the next step reads the whole history so far from cache instead
+ * of paying full price for it again. Together with the system prompt's
+ * marker that's 2 of the 4 allowed. Moving a marker isn't a history edit, so
+ * it's safe on history-bound models too.
+ */
+function withCacheBreakpoint(messages: ModelMessage[], marker: SystemModelMessage['providerOptions']): ModelMessage[] {
+  if (!marker || messages.length === 0) return messages;
+  // Messages returned here stay in the SDK's history, so earlier steps' markers
+  // are still on their messages: clear them, or they'd pile past the limit and
+  // the provider would drop the newest one.
+  const earlier = messages.slice(0, -1).map(withoutCacheMarker);
+  const last = messages[messages.length - 1];
+  return [...earlier, { ...last, providerOptions: { ...last.providerOptions, ...marker } } as ModelMessage];
+}
+
+function withoutCacheMarker(message: ModelMessage): ModelMessage {
+  const opts = message.providerOptions as Record<string, Record<string, unknown>> | undefined;
+  if (!opts?.anthropic?.cacheControl && !opts?.bedrock?.cachePoint) return message;
+  const cleaned: Record<string, Record<string, unknown>> = {};
+  for (const [provider, values] of Object.entries(opts)) {
+    const { cacheControl: _c, cachePoint: _p, ...rest } = values;
+    void _c;
+    void _p;
+    if (Object.keys(rest).length) cleaned[provider] = rest;
+  }
+  const { providerOptions: _old, ...base } = message;
+  void _old;
+  return (Object.keys(cleaned).length ? { ...base, providerOptions: cleaned } : base) as ModelMessage;
 }
 
 /** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter narrowed to it turns Launch mode on. */
@@ -496,6 +532,14 @@ function resolveThinkingProviderOptions(
 const RESULT_SUMMARY_THRESHOLD = 2;
 
 /**
+ * Old results are compressed this many tool messages at a time. Compressing
+ * changes the history from that message on, which restarts the prompt cache
+ * from there; moving the boundary one message per step would restart it every
+ * step. In batches, the history stays byte-identical (and cached) between moves.
+ */
+const COMPRESS_BATCH = 4;
+
+/**
  * Compress tool results in the conversation history for steps older than
  * RESULT_SUMMARY_THRESHOLD. Large list/read payloads otherwise accumulate at
  * full size in the context that's resent on every turn (the same mechanism
@@ -507,8 +551,9 @@ const RESULT_SUMMARY_THRESHOLD = 2;
  * leave the messages untouched (so we only override when it actually helps).
  *
  * Strategy: tool messages appear in call order. We keep the tool results from
- * the most recent RESULT_SUMMARY_THRESHOLD tool messages at full fidelity and
- * summarise the text/JSON output of older ones. Only outputs above a size
+ * at least the most recent RESULT_SUMMARY_THRESHOLD tool messages at full
+ * fidelity and summarise the text/JSON output of older ones, COMPRESS_BATCH
+ * at a time. Only outputs above a size
  * floor are touched, so small confirmation objects are left alone.
  */
 const COMPRESS_FLOOR_CHARS = 500;
@@ -524,9 +569,10 @@ function compressOldToolMessages(
   messages.forEach((m, i) => {
     if (m.role === 'tool') toolMsgIndexes.push(i);
   });
-  if (toolMsgIndexes.length <= RESULT_SUMMARY_THRESHOLD) return undefined;
+  const compressible = Math.floor((toolMsgIndexes.length - RESULT_SUMMARY_THRESHOLD) / COMPRESS_BATCH) * COMPRESS_BATCH;
+  if (compressible <= 0) return undefined;
 
-  const keepFrom = toolMsgIndexes[toolMsgIndexes.length - RESULT_SUMMARY_THRESHOLD];
+  const keepFrom = toolMsgIndexes[compressible];
   let changed = false;
 
   const rewritten = messages.map((m, i) => {
@@ -1242,6 +1288,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
     const historyBound = isHistoryBound(resolvedModelKey);
+    const conversationCacheMarker = cacheMarker(resolvedModelKey);
     const providerOptions = mergeProviderOptions(
       thinkingProviderOptions,
       historyBound ? contextEditingProviderOptions(resolvedModelKey) : undefined
@@ -1302,7 +1349,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // tools array — toolChoice 'none' makes the providers drop it — and
           // instead appends an instruction after the latest tool results.
           if (historyBound) {
-            return notes.length ? { messages: withNotes(messages) } : {};
+            return { messages: withCacheBreakpoint(withNotes(messages), conversationCacheMarker) };
           }
 
           // TASK 2: compress tool results from steps older than the threshold
@@ -1323,10 +1370,9 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           const lastStepToolChoice = ctx.forceFinalTool
             ? ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
             : ('none' as const);
-          const nextMessages = notes.length ? withNotes(compressedMessages ?? messages) : compressedMessages;
           return {
             toolChoice: isLastStep ? lastStepToolChoice : 'auto',
-            ...(nextMessages ? { messages: nextMessages } : {}),
+            messages: withCacheBreakpoint(withNotes(compressedMessages ?? messages), conversationCacheMarker),
           };
         },
         // TASK 8: fire onStep callback after each step so the route can stream it

@@ -152,6 +152,14 @@ beforeEach(() => {
   delete process.env.ROLLOUT_MODE;
 });
 
+/** A prompt with each message's providerOptions (where the cache marker sits) removed. */
+const withoutMarkers = (prompt: unknown[]) =>
+  prompt.map((m) => {
+    const { providerOptions: _p, ...rest } = m as Record<string, unknown>;
+    void _p;
+    return rest;
+  });
+
 const deleteViaProxy: Scripted = {
   toolCall: { toolName: 'call_tool', input: { tool_name: 'adobe_delete_segment', arguments: { id: 's1' } } },
 };
@@ -271,8 +279,10 @@ describe('runAgent loop shape', () => {
 
     expect(calls.length).toBe(4);
     for (let i = 1; i < calls.length; i++) {
-      // Each request's history is the previous request's, plus appended messages.
-      expect(calls[i].prompt.slice(0, calls[i - 1].prompt.length)).toEqual(calls[i - 1].prompt);
+      // Each request's history is the previous request's, plus appended
+      // messages. Only the cache marker moves, which isn't a history edit.
+      const prev = withoutMarkers(calls[i - 1].prompt);
+      expect(withoutMarkers(calls[i].prompt).slice(0, prev.length)).toEqual(prev);
       expect(toolNames(calls[i])).toEqual(toolNames(calls[0]));
       expect(calls[i].toolChoice?.type).not.toBe('none');
     }
@@ -282,14 +292,33 @@ describe('runAgent loop shape', () => {
     });
   });
 
-  it('on other models, compresses old tool results and forces text on the last step', async () => {
-    script = [listCall, listCall, listCall, { text: 'final' }];
-    await runAgent({ userInput: 'list segments three times', modelKey: 'test:plain', maxSteps: 4 });
+  it('on other models, compresses old tool results in batches and forces text on the last step', async () => {
+    // Different arguments each time, so loop detection doesn't end the run early.
+    const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
+    script = [...['a', 'b', 'c', 'd', 'e', 'f'].map(listPage), { text: 'final' }];
+    await runAgent({ userInput: 'list segments six times', modelKey: 'test:plain', maxSteps: 7 });
 
     const last = calls.at(-1)!;
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
     expect(calls[0].providerOptions?.anthropic).toBeUndefined();
+    // The history is rewritten only when a batch of 4 old results is
+    // compressed (at the 6th result), not once per step, so it stays cached.
+    const rewrites = calls.slice(1).filter((c, i) => {
+      const prev = withoutMarkers(calls[i].prompt);
+      return JSON.stringify(withoutMarkers(c.prompt).slice(0, prev.length)) !== JSON.stringify(prev);
+    });
+    expect(rewrites).toHaveLength(1);
+  });
+
+  it('marks only the system prompt and the newest message for caching', async () => {
+    script = [listCall, listCall, { text: 'final' }];
+    await runAgent({ userInput: 'list segments twice', modelKey: 'test:plain', maxSteps: 3 });
+
+    for (const call of calls) {
+      const marked = call.prompt.flatMap((m, i) => ((m as { providerOptions?: { anthropic?: { cacheControl?: unknown } } }).providerOptions?.anthropic?.cacheControl ? [i] : []));
+      expect(marked).toEqual([0, call.prompt.length - 1]);
+    }
   });
 });
 
