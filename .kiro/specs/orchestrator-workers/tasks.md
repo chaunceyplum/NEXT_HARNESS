@@ -85,14 +85,14 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 6.7 Call `runOrchestrated` from `runAgent` when `shouldOrchestrate` is true; force planning when orchestration is requested
   - _Requirements: 2.3, 2.4, 2.6_
 
-- [ ] 7. Shared safety state and observability
-- [ ] 7.1 Pass the run's single `LaunchValidationGate` to every worker; verify the gate still blocks the library handoff until checks pass
+- [x] 7. Shared safety state and observability
+- [x] 7.1 Pass the run's single `LaunchValidationGate` to every worker; verify the gate still blocks the library handoff until checks pass
   - _Requirements: 9.1, 9.2_
-- [ ] 7.2 Route worker tool calls through the existing approval hook; allow several pending approvals per run
+- [x] 7.2 Route worker tool calls through the existing approval hook; allow several pending approvals per run
   - _Requirements: 9.5_
-- [ ] 7.3 Add `SpanRef` to `lib/tracing.ts`; record coordinator and per-worker child spans with worker attributes
+- [x] 7.3 Add `SpanRef` to `lib/tracing.ts`; record coordinator and per-worker child spans with worker attributes
   - _Requirements: 14.1_
-- [ ] 7.4 Verify a kill-switch trip aborts every worker (`lib/kill-switch.test.ts`)
+- [x] 7.4 Verify a kill-switch trip aborts every worker (`lib/kill-switch.test.ts`)
   - _Requirements: 9.4_
 
 - [ ] 8. Types, events, record and resume

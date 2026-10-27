@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RunTracer, toOtlpJson, exportSpans, contentAttr, type StepSample, type Span } from './tracing';
+import { RunTracer, toOtlpJson, exportSpans, contentAttr, type SpanRef, type StepSample, type Span } from './tracing';
 
 /** A monotonically increasing clock so span timings are deterministic. */
 function fakeClock(start = 1_000): () => number {
@@ -58,6 +58,29 @@ describe('RunTracer span tree', () => {
     expect(tool.attributes['gen_ai.tool.call.id']).toBe('call-1');
     // durationMs (150) is reflected in the span window.
     expect(tool.endMs - tool.startMs).toBe(150);
+  });
+
+  // Task 7.3 (Req 14.1): a child tracer (a worker) joins a parent span (the
+  // coordinator) so a run's spans form one tree instead of separate traces.
+  it('nests a child tracer under a parent SpanRef, sharing its trace id', () => {
+    const coordinator = new RunTracer({ 'harness.orchestration': true }, fakeClock());
+    const parent: SpanRef = coordinator.ref();
+
+    const worker = new RunTracer({ 'harness.worker.id': 'run1:w2:1' }, fakeClock(5_000), parent);
+    worker.recordStep(sampleStep());
+    const workerSpans = worker.finish();
+
+    const workerRoot = workerSpans[0];
+    // The worker's root joins the coordinator's trace and is parented to it.
+    expect(workerRoot.traceId).toBe(parent.traceId);
+    expect(workerRoot.parentSpanId).toBe(parent.spanId);
+    // Its own step spans carry the shared trace id too.
+    expect(new Set(workerSpans.map((s) => s.traceId))).toEqual(new Set([parent.traceId]));
+
+    // The coordinator's own trace keeps its root unparented.
+    const coordinatorSpans = coordinator.finish();
+    expect(coordinatorSpans[0].spanId).toBe(parent.spanId);
+    expect(coordinatorSpans[0].parentSpanId).toBeUndefined();
   });
 
   it('records a span per step', () => {

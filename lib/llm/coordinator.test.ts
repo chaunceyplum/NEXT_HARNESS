@@ -328,6 +328,30 @@ describe('runOrchestrated replanning (Req 6.1, 6.3)', () => {
   });
 });
 
+describe('runOrchestrated observability (Req 14.1)', () => {
+  it('opens a coordinator span and nests every worker under it via shared.tracerParent', async () => {
+    const plan = makePlan([{ id: 1 }, { id: 2 }]);
+    const run = runOrchestrated(baseInput(plan, { baseTracerAttrs: { 'harness.run.id': 'run1' } }));
+    await tick();
+
+    const mockRunWorker = vi.mocked((await import('./worker')).runWorker);
+    // Both workers were handed the SAME coordinator span as their trace parent
+    // (so their spans form one tree — coordinator → worker → step).
+    const parents = mockRunWorker.mock.calls.map((c) => c[0].shared.tracerParent);
+    expect(parents.every((p) => p !== undefined)).toBe(true);
+    const first = parents[0]!;
+    expect(first).toMatchObject({ traceId: expect.any(String), spanId: expect.any(String) });
+    for (const p of parents) {
+      expect(p?.traceId).toBe(first.traceId);
+      expect(p?.spanId).toBe(first.spanId);
+    }
+
+    finishDone(1);
+    finishDone(2);
+    await run;
+  });
+});
+
 describe('runOrchestrated synthesis (Req 7.1, 7.2)', () => {
   it('streams one synthesis call built from every step result, including failures', async () => {
     const plan = makePlan([{ id: 1 }, { id: 2 }]);

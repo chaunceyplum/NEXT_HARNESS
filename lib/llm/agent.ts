@@ -1135,6 +1135,10 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       modelHealth,
       ...(toolApproval ? { toolApproval } : {}),
       approvalReasons,
+      // Phase 3 (workers): the run's single gate (Requirement 9.1). Already
+      // embedded in `tools`; carried on the ctx so the coordinator hands the
+      // same instance to every worker.
+      ...(launchGate ? { launchGate } : {}),
       baseTracerAttrs,
       ...(opts.thinkingBudget !== undefined ? { thinkingBudget: opts.thinkingBudget } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
@@ -1186,7 +1190,11 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
   // exportSpans() run once the loop settles, on both success and error.
   // Tracing reads only what the SDK already reports per step, so it never
   // changes the agent's behaviour, and export is best-effort (never throws).
-  let tracer = new RunTracer(baseTracerAttrs);
+  // Phase 3 (workers): when the coordinator passes a parent span, each
+  // attempt's tracer nests under it so the run's spans form one tree
+  // (Requirement 14.1). Single-agent runs leave it undefined, so the trace
+  // opens fresh exactly as before.
+  let tracer = new RunTracer(baseTracerAttrs, Date.now, ctx.tracerParent);
 
   const registry = getModelRegistry();
 
@@ -1209,8 +1217,9 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
     attemptHadSideEffects = false;
     budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt, Date.now, ctx.budgetParent);
     stopReason = undefined;
-    // Fresh tracer for this attempt (a fallback restarts the run from scratch).
-    tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey });
+    // Fresh tracer for this attempt (a fallback restarts the run from scratch),
+    // still nested under the coordinator span when one was passed.
+    tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey }, Date.now, ctx.tracerParent);
     // Step index at which a budget forced the wrap-up step; the loop stops after it.
     let forcedAt: number | undefined;
 
@@ -1495,9 +1504,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
       isPinned: ctx.isPinned,
       budgetLimits: ctx.budgetLimits,
       modelHealth: ctx.modelHealth,
-      // The shared LaunchValidationGate is wired through in Task 7.1; Task 6
-      // only needs launchMode (carried in `config.serialWrites`) to keep write
-      // workers serial.
+      // Requirement 9.1: the run's single LaunchValidationGate, shared by every
+      // worker. It is already embedded in `ctx.tools` (so a worker's narrowed
+      // tool set calls through the same instance); passing it here also tells
+      // each worker it is in a gated Launch run (worker launchMode grounding).
+      ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
       ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
       ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
       approvalReasons: ctx.approvalReasons,

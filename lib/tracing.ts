@@ -22,6 +22,18 @@ import { randomBytes } from 'crypto';
 
 export type AttrValue = string | number | boolean;
 
+/**
+ * A reference to an already-open span in another tracer, so a nested run can
+ * attach its own trace to it: the trace id to share and the span id to parent
+ * to. The orchestrator (Phase 3) builds one for its coordinator span and hands
+ * it to each worker's {@link RunTracer}, so a run's spans form one tree —
+ * run → coordinator → worker → step — instead of several disconnected traces.
+ */
+export interface SpanRef {
+  traceId: string;
+  spanId: string;
+}
+
 export interface Span {
   traceId: string;
   spanId: string;
@@ -63,16 +75,31 @@ export interface StepSample {
 }
 
 export class RunTracer {
-  readonly traceId = hex(16);
+  readonly traceId: string;
   private readonly rootId = hex(8);
+  private readonly parentSpanId?: string;
   private readonly spans: Span[] = [];
   private readonly startMs: number;
 
+  /**
+   * @param parent when set, this tracer's root span joins the parent's trace
+   *   (sharing its trace id) and is parented to the parent span, so a worker's
+   *   spans nest under the coordinator span instead of forming a separate
+   *   trace. When unset, the tracer opens a fresh trace, exactly as before.
+   */
   constructor(
     private readonly attrs: Record<string, AttrValue>,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    parent?: SpanRef
   ) {
+    this.traceId = parent?.traceId ?? hex(16);
+    this.parentSpanId = parent?.spanId;
     this.startMs = now();
+  }
+
+  /** A reference to this tracer's root span, for nesting a child run under it. */
+  ref(): SpanRef {
+    return { traceId: this.traceId, spanId: this.rootId };
   }
 
   /** Record a finished step, called when it ends (its start is derived from stepTimeMs). */
@@ -142,6 +169,7 @@ export class RunTracer {
     const root: Span = {
       traceId: this.traceId,
       spanId: this.rootId,
+      ...(this.parentSpanId ? { parentSpanId: this.parentSpanId } : {}),
       name: 'invoke_agent harness',
       startMs: this.startMs,
       endMs: this.now(),

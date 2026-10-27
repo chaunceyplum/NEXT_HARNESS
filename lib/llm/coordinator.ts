@@ -36,7 +36,7 @@ import type { AgentStepTrace, ToolApprovalFn, ToolOutcome } from './agent-core';
 import type { ApprovalReason } from './approval-policy';
 import type { LaunchValidationGate } from './launch-validation';
 import type { ModelHealthTracker } from './model-health';
-import type { AttrValue } from '../tracing';
+import { RunTracer, exportSpans, type AttrValue, type Span, type SpanRef } from '../tracing';
 import { resolveModel } from './model-registry';
 import {
   readySteps,
@@ -148,6 +148,8 @@ export interface OrchestratorInput {
   toolApproval?: ToolApprovalFn;
   approvalReasons?: Map<string, ApprovalReason>;
   baseTracerAttrs?: Record<string, AttrValue>;
+  /** The run span the coordinator span nests under (Requirement 14.1), when the run is traced. */
+  tracerParent?: SpanRef;
   runId?: string;
   toolsConsidered: string[];
   thinkingBudget?: number;
@@ -180,15 +182,59 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   const startedAt = now();
   const ledger = new RunLedger(input.budgetLimits, startedAt, now);
 
+  // Requirement 14.1: the coordinator opens one span for the whole
+  // orchestration; every worker's trace nests under it (shared.tracerParent),
+  // and the coordinator also records a summary child span per finished worker
+  // (recordWorkerSpan). The coordinator span joins the run's trace when the
+  // caller passed one, so the full tree is run → coordinator → worker → step.
+  const coordinatorTracer = new RunTracer(
+    { ...(input.baseTracerAttrs ?? {}), 'harness.orchestration': true },
+    now,
+    input.tracerParent
+  );
+  const coordinatorRef: SpanRef = coordinatorTracer.ref();
+  const workerSpans: Span[] = [];
+
   const shared: SharedRunState = {
     ledger,
     modelHealth: input.modelHealth,
+    tracerParent: coordinatorRef,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.launchGate ? { launchGate: input.launchGate } : {}),
     ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
     ...(input.toolApproval ? { toolApproval: input.toolApproval } : {}),
     ...(input.approvalReasons ? { approvalReasons: input.approvalReasons } : {}),
     ...(input.baseTracerAttrs ? { baseTracerAttrs: input.baseTracerAttrs } : {}),
+  };
+
+  /**
+   * Record a summary child span for a finished worker under the coordinator
+   * span (Requirement 14.1): one span per worker carrying the worker id, step,
+   * attempt, model, status and token spend, so a backend shows the worker
+   * fan-out at the coordinator level even though the worker's own step spans
+   * live in its nested trace.
+   */
+  const recordWorkerSpan = (record: WorkerRecord): void => {
+    const startMs = Date.parse(record.startedAt);
+    const start = Number.isFinite(startMs) ? startMs : now();
+    workerSpans.push({
+      traceId: coordinatorRef.traceId,
+      spanId: `${coordinatorRef.spanId.slice(0, 8)}${String(record.stepId).padStart(4, '0').slice(-4)}${String(record.attempt).padStart(4, '0').slice(-4)}`,
+      parentSpanId: coordinatorRef.spanId,
+      name: `worker step ${record.stepId}`,
+      startMs: start,
+      endMs: start + (record.durationMs ?? 0),
+      attributes: {
+        'gen_ai.operation.name': 'invoke_agent',
+        'harness.worker.id': record.workerId,
+        'harness.worker.step_id': record.stepId,
+        'harness.worker.attempt': record.attempt,
+        'harness.worker.status': record.status,
+        'gen_ai.request.model': record.modelKey,
+        'gen_ai.usage.total_tokens': record.budgetUsage.tokens,
+      },
+      ...(record.error ? { error: record.error } : {}),
+    });
   };
 
   // WorkerResult per done/failed step, so a dependant's brief carries its
@@ -246,6 +292,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     const { record } = outcome;
     const step = tracker.plan.steps.find((s) => s.id === outcome.stepId);
     workers.push(record);
+    recordWorkerSpan(record);
     input.onWorker?.(record);
     for (const s of record.steps) steps.push(s);
     if (!step) return;
@@ -384,6 +431,22 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   if (synthesis.usageTokens) ledger.charge(synthesis.usageTokens, synthesis.costUsd);
 
   const budgetUsage: BudgetUsage = ledger.usage();
+
+  // Requirement 14.1: close the coordinator span and export it with the
+  // per-worker summary spans. Best-effort, exactly like executeLoop's export
+  // (exportSpans never throws), so tracing can't disturb the run.
+  try {
+    const coordinatorSpans = coordinatorTracer.finish({
+      attributes: {
+        'harness.orchestration.workers': workers.length,
+        'harness.orchestration.replans': replans,
+        ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
+      },
+    });
+    void exportSpans([...coordinatorSpans, ...workerSpans]);
+  } catch (err) {
+    console.error('[coordinator] failed to finish/export coordinator trace:', err instanceof Error ? err.message : err);
+  }
 
   return {
     finalText: synthesis.text,

@@ -82,6 +82,7 @@ vi.mock('./model-registry', () => {
 const { runWorker, workerTools, reportResultTool, buildWorkerBrief, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS } = await import('./worker');
 const { ModelHealthTracker } = await import('./model-health');
 const { RunLedger, resolveBudget } = await import('./run-budget');
+const { LaunchValidationGate } = await import('./launch-validation');
 
 /** A scripted, policy-allowed tool set the way a run hands one to a worker. */
 function makeToolSet(names: string[]): ToolSet {
@@ -290,5 +291,56 @@ describe('runWorker', () => {
     script = [report({ status: 'done', summary: 'unreachable' })];
     const rec = await runWorker(baseInput({ shared: makeShared({ abortSignal: controller.signal }) }));
     expect(rec.status).toBe('cancelled');
+  });
+
+  // Task 7.1 (Req 9.1, 9.2): every worker runs the SAME LaunchValidationGate
+  // the run built (it is embedded in the tool set the coordinator narrows for
+  // each worker). The gate must still block the library handoff until the
+  // checks pass — a worker gets no bypass. Here the gate is wired into the
+  // worker's handoff tool exactly as buildAiTools wires it for a live run:
+  // observe() on success, gate() before the write throws when a check fails.
+  it('keeps the shared gate blocking the library handoff for a worker (Req 9.1, 9.2)', async () => {
+    const gate = new LaunchValidationGate();
+    // The property only has `core`; the created rule component references an
+    // uninstalled `web-sdk` extension, so the handoff must be blocked.
+    gate.observe('reactor_list_extensions', {}, { data: [{ attributes: { name: 'core' } }] });
+    gate.observe('reactor_create_rule_component', { delegate_descriptor_id: 'web-sdk::events::send', settings: {} }, {});
+
+    let handoffSucceeded = false;
+    // A gate-wrapped handoff tool, mirroring buildAiTools' execute wrapper:
+    // gate() runs BEFORE the write and throws to block it.
+    const handoff = tool({
+      description: 'create the launch library',
+      inputSchema: jsonSchema<{ name?: string }>({ type: 'object', properties: { name: { type: 'string' } } }),
+      execute: async (input: unknown) => {
+        gate.gate('reactor_create_library', input);
+        handoffSucceeded = true;
+        return { ok: true };
+      },
+    });
+
+    const step = makeStep({ id: 5, tool: 'reactor_create_library', description: 'Populate the library' });
+    // The model tries the handoff (blocked by the gate → tool error), then
+    // reports the step failed.
+    script = [
+      { toolCall: { toolName: 'reactor_create_library', input: { name: 'lib' } } },
+      report({ status: 'failed', summary: 'library handoff blocked by the validation gate' }),
+    ];
+
+    const rec = await runWorker(
+      baseInput({
+        step,
+        tools: { reactor_create_library: handoff },
+        catalog: makeCatalog(['reactor_create_library']),
+        shared: makeShared({ launchGate: gate }),
+      })
+    );
+
+    // The gate blocked the write (it never completed) and the step is failed.
+    expect(handoffSucceeded).toBe(false);
+    expect(rec.status).toBe('failed');
+    // The worker ran as a Launch worker because the shared gate was present.
+    const launchCall = calls.find((c) => (c.tools ?? []).some((t) => t.name === 'reactor_create_library'));
+    expect(launchCall).toBeDefined();
   });
 });

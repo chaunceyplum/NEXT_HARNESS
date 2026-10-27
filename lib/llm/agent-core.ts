@@ -17,7 +17,8 @@ import type { PlanTracker, Plan } from './planner';
 import type { PlanningRetrieval } from './planning-retrieval';
 import type { RagJudgmentSink, RagJudgmentEntry } from './tool-catalog';
 import type { RouteDecision } from './model-router';
-import type { AttrValue } from '../tracing';
+import type { AttrValue, SpanRef } from '../tracing';
+import type { LaunchValidationGate } from './launch-validation';
 
 /**
  * Tools always available regardless of the shortlist, because the requests
@@ -316,8 +317,23 @@ export interface LoopContext {
   toolApproval?: ToolApprovalFn;
   /** Approval reason per tool-call id, filled by toolApproval and read when reporting outcomes. */
   approvalReasons: Map<string, ApprovalReason>;
+  /**
+   * Phase 3 (workers): the run's single LaunchValidationGate (Requirement
+   * 9.1). The gate is already embedded in `tools` (buildAiTools wraps each
+   * tool's execute with it), so a single-agent loop doesn't read this field —
+   * it is carried here so the coordinator can hand the SAME instance to every
+   * worker and so a worker's loop knows it is in a gated Launch run.
+   */
+  launchGate?: LaunchValidationGate;
   /** Base attributes for the run trace span. */
   baseTracerAttrs: Record<string, AttrValue>;
+  /**
+   * Phase 3 (workers): the coordinator span this loop's trace nests under, so
+   * a run's spans form one tree — coordinator → worker → step — instead of
+   * one disconnected trace per worker (Requirement 14.1). Unset for
+   * single-agent runs, so their trace opens fresh exactly as before.
+   */
+  tracerParent?: SpanRef;
   /** Extended-thinking token budget for this request, if any. */
   thinkingBudget?: number;
   /** Aborts model calls and the step loop. */

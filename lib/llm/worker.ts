@@ -212,6 +212,12 @@ export interface SharedRunState {
   approvalReasons?: Map<string, ApprovalReason>;
   /** Base tracer attributes for the run; worker spans extend these. */
   baseTracerAttrs?: Record<string, import('../tracing').AttrValue>;
+  /**
+   * The coordinator span each worker's trace nests under, so the run's spans
+   * form one tree — coordinator → worker → step (Requirement 14.1). Unset when
+   * the run is untraced (the eval path).
+   */
+  tracerParent?: import('../tracing').SpanRef;
 }
 
 export interface WorkerInput {
@@ -342,6 +348,8 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       'harness.worker.step_id': step.id,
       'harness.worker.attempt': attempt,
     },
+    // Requirement 14.1: nest the worker's trace under the coordinator span.
+    ...(shared.tracerParent ? { tracerParent: shared.tracerParent } : {}),
     ...(shared.launchGate ? { launchGate: shared.launchGate } : {}),
     ...(shared.toolApproval ? { toolApproval: shared.toolApproval } : {}),
     ...(input.thinkingBudget !== undefined ? { thinkingBudget: input.thinkingBudget } : {}),
