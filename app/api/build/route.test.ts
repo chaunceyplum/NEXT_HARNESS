@@ -14,16 +14,18 @@ type WorkerAgentOpts = {
   onWorkerStart?: (info: { workerId: string; stepId: number; modelKey: string; tools: string[] }) => void;
   onWorker?: (w: Record<string, unknown>) => void;
   onRestart?: (info: { fromModelKey: string; toModelKey: string; workerId?: string }) => void;
+  approveTool?: (req: { toolCallId: string; toolName: string; input: unknown; reason: string; workerId?: string }) => Promise<{ approved: boolean }>;
   abortSignal?: AbortSignal;
+  runId?: string;
 };
-let orchestratedScript: ((opts: WorkerAgentOpts) => void) | null = null;
+let orchestratedScript: ((opts: WorkerAgentOpts) => void | Promise<void>) | null = null;
 
 vi.mock('@/lib/llm/agent', () => ({
   runAgent: async (opts: WorkerAgentOpts) => {
     if (orchestratedScript) {
       const script = orchestratedScript;
       orchestratedScript = null;
-      script(opts);
+      await script(opts);
       return {
         finalText: 'synthesised',
         steps: [{ stepNumber: 0, text: '', toolCalls: [], toolResults: [], workerId: 'r:w2:1' }],
@@ -63,10 +65,10 @@ vi.mock('@/lib/execution-store', () => ({
   },
 }));
 
-const audited: Array<{ type: string; actor: string }> = [];
+const audited: Array<{ type: string; actor: string; workerId?: string }> = [];
 vi.mock('@/lib/audit-log', () => ({
   auditReads: () => false,
-  recordAudit: async (events: Array<{ type: string; actor: string }>) => {
+  recordAudit: async (events: typeof audited) => {
     audited.push(...events);
   },
 }));
@@ -81,6 +83,7 @@ vi.mock('@/lib/llm/orchestration-config', () => ({
 }));
 
 const { POST } = await import('./route');
+const { resolveApproval } = await import('@/lib/llm/approvals');
 const events = await import('../runs/[id]/events/route');
 const cancel = await import('../runs/[id]/cancel/route');
 
@@ -232,6 +235,26 @@ describe('POST /api/build — orchestrated runs (Requirements 11.1, 11.3, 12.2)'
     // running checkpoint keeps w2's step plus w1's re-run step (2 steps), not 3.
     const runningCheckpoints = saved.filter((s) => s.status === 'running');
     expect(runningCheckpoints.at(-1)?.steps).toBe(2);
+  });
+  // Requirement 9.6: a worker's approval request is tagged with its workerId,
+  // on the streamed event and on the approval's audit entry.
+  it('tags a worker\'s approval_request event and approval audit entry with the workerId', async () => {
+    audited.length = 0;
+    orchestratedScript = async (opts) => {
+      const decision = opts.approveTool!({ toolCallId: 'tc-1', toolName: 'adobe_delete_segment', input: { id: 's1' }, reason: 'destructive', workerId: 'r:w2:1' });
+      await tick();
+      resolveApproval(opts.runId!, 'tc-1', true, 'alice');
+      expect(await decision).toMatchObject({ approved: true });
+    };
+
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'delete the old segment', orchestrate: true }) })
+    );
+    const lines = (await res.text()).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    await tick();
+
+    expect(lines.find((l) => l.type === 'approval_request')).toMatchObject({ toolCallId: 'tc-1', reason: 'destructive', workerId: 'r:w2:1' });
+    expect(audited).toContainEqual(expect.objectContaining({ type: 'approval', actor: 'alice', workerId: 'r:w2:1' }));
   });
 });
 
