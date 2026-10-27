@@ -221,16 +221,23 @@ export class PlanTracker {
   revise(
     reason: string,
     remaining: Array<{ description: string; tool: string | null; expectedOutput: string; dependsOn?: number[] }>
-  ): { ok: boolean; message: string } {
+  ): { ok: boolean; message: string; renumbered?: Map<number, number> } {
     const kept = this.plan.steps.filter((s) => s.status === 'done');
     const room = MAX_PLAN_STEPS - kept.length;
     if (remaining.length > room) return { ok: false, message: `Too many steps: at most ${room} more (the plan is capped at ${MAX_PLAN_STEPS}).` };
     const total = kept.length + remaining.length;
+    // Old id -> new id for the kept steps, so callers holding per-step state
+    // (the coordinator's results) can follow the renumbering.
+    const renumbered = new Map(kept.map((s, i) => [s.id, i + 1]));
     this.plan = {
       goal: this.plan.goal,
       version: this.plan.version + 1,
       steps: [
-        ...kept,
+        ...kept.map((s, i) => ({
+          ...s,
+          id: i + 1,
+          dependsOn: s.dependsOn.map((d) => renumbered.get(d)).filter((d): d is number => d !== undefined),
+        })),
         ...remaining.map((s, i) => {
           const selfId = kept.length + i + 1;
           const dependsOn = [
@@ -255,7 +262,7 @@ export class PlanTracker {
       ],
     };
     this.onChange?.(this.plan);
-    return { ok: true, message: `Plan revised (v${this.plan.version}):\n${formatPlan(this.plan)}` };
+    return { ok: true, message: `Plan revised (v${this.plan.version}):\n${formatPlan(this.plan)}`, renumbered };
   }
 }
 
@@ -309,7 +316,10 @@ export function buildPlanTools(tracker: PlanTracker): ToolSet {
         required: ['reason', 'steps'],
         additionalProperties: false,
       }),
-      execute: async ({ reason, steps }) => tracker.revise(reason, steps),
+      execute: async ({ reason, steps }) => {
+        const { ok, message } = tracker.revise(reason, steps);
+        return { ok, message };
+      },
       // steps[].dependsOn is optional; revise() remaps it to the renumbered plan.
     }),
   };

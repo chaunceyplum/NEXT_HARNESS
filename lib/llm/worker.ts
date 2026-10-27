@@ -197,6 +197,8 @@ export interface SharedRunState {
 }
 
 export interface WorkerInput {
+  /** The id the coordinator gave this worker; defaults to `${runId}:w${stepId}:${attempt}`. */
+  workerId?: string;
   runGoal: string;
   step: PlanStep;
   /** The WorkerResults of the steps this step depends on (Requirement 4.4). */
@@ -285,7 +287,7 @@ export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'step' | '
  */
 export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
   const { step, shared, attempt } = input;
-  const workerId = `${shared.runId ?? 'run'}:w${step.id}:${attempt}`;
+  const workerId = input.workerId ?? `${shared.runId ?? 'run'}:w${step.id}:${attempt}`;
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
 

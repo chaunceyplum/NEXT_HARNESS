@@ -325,6 +325,36 @@ describe('runOrchestrated replanning (Req 6.1, 6.3)', () => {
     expect(result.replans).toBe(1);
   });
 
+  it('carries results across the renumbering and gives replanned workers new ids', async () => {
+    // 1 fails; 2 and 3 are done; the replan adds one step needing kept step 2 (old id 3).
+    const plan = makePlan([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    replanObject = { reason: 'retry', steps: [{ description: 'recover', tool: 'reactor_read_9', expectedOutput: 'ok', dependsOn: [2] }] };
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    finishDone(2, { summary: 'two', ids: { a: 'A2' } });
+    finishDone(3, { summary: 'three', ids: { b: 'B3' } });
+    finishFailed(1);
+    await tick();
+
+    // Kept steps 2,3 -> 1,2; the new step is 3 and gets old step 3's result as its dep.
+    expect([...pending.keys()]).toEqual([3]);
+    const d = pending.get(3)!;
+    expect(d.input.step.description).toBe('recover');
+    expect(d.input.deps).toEqual([expect.objectContaining({ stepId: 2, summary: 'three' })]);
+    const mockRunWorker = vi.mocked((await import('./worker')).runWorker);
+    const ids = mockRunWorker.mock.calls.map((c) => c[0].workerId);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.at(-1)).toBe('run1:v2:w3:1');
+
+    finishDone(3);
+    const result = await run;
+    expect(result.plan?.steps.map((s) => [s.id, s.status])).toEqual([
+      [1, 'done'],
+      [2, 'done'],
+      [3, 'done'],
+    ]);
+  });
+
   it('stops replanning at MAX_REPLANS and skips the rest (Req 6.3)', async () => {
     const plan = makePlan([{ id: 1 }]);
     // Each replan yields one more failing step, so the cap is what stops it.

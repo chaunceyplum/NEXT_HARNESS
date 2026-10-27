@@ -313,7 +313,10 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   const startWorker = (step: PlanStep): Promise<WorkerOutcome> => {
     const attempt = attempts.get(step.id) ?? 1;
     attempts.set(step.id, attempt);
-    const workerId = `${input.runId ?? 'run'}:w${step.id}:${attempt}`;
+    // Step ids are renumbered when the plan is revised, so after a replan the
+    // plan version goes into the id to keep it unique within the run.
+    const version = tracker.plan.version > 1 ? `v${tracker.plan.version}:` : '';
+    const workerId = `${input.runId ?? 'run'}:${version}w${step.id}:${attempt}`;
     step.workerId = workerId;
     setStatus(step, 'running');
     const { deps, folded } = gatherInputs(step);
@@ -324,6 +327,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     input.onWorkerStart?.({ workerId, stepId: step.id, modelKey: workerModelKey, tools: narrowed });
 
     return runWorker({
+      workerId,
       runGoal: tracker.plan.goal,
       step,
       deps,
@@ -457,6 +461,16 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
       console.warn('[coordinator] revised plan rejected; skipping remaining steps:', outcome.message);
       return false;
     }
+    // Kept steps were renumbered from 1: carry their results over to the new
+    // ids and drop the rest, so no new step inherits an old step's result.
+    const remapped = new Map<number, WorkerResult>();
+    for (const [oldId, newId] of outcome.renumbered ?? []) {
+      const r = results.get(oldId);
+      if (r) remapped.set(newId, { ...r, stepId: newId });
+    }
+    results.clear();
+    for (const [id, r] of remapped) results.set(id, r);
+    attempts.clear();
     input.onPlan?.(tracker.plan);
     return true;
   }
@@ -563,15 +577,17 @@ async function requestReplan(args: {
   toolNames: string[];
   abortSignal?: AbortSignal;
 }): Promise<ReplanResult> {
+  // The revised plan renumbers the completed steps 1..n in this order and
+  // numbers the new steps after them, so list them under those ids.
   const done = args.plan.steps.filter((s) => s.status === 'done');
-  const completedLines = done.map((s) => {
+  const completedLines = done.map((s, i) => {
     const r = args.results.get(s.id);
     const ids = r && Object.keys(r.ids).length ? ` ids=${JSON.stringify(r.ids)}` : '';
-    return `- Step ${s.id} (${s.description}): ${r?.summary ?? 'done'}${ids}`;
+    return `- Step ${i + 1} (${s.description}): ${r?.summary ?? 'done'}${ids}`;
   });
   const failureLines = args.failed.map((s) => {
     const r = args.results.get(s.id);
-    return `- Step ${s.id} (${s.description}) FAILED: ${r?.summary ?? s.note ?? 'no result'}`;
+    return `- ${s.description} FAILED: ${r?.summary ?? s.note ?? 'no result'}`;
   });
 
   const { object } = await generateObject({
@@ -581,7 +597,7 @@ async function requestReplan(args: {
       'You are revising a plan for a MarTech engineering agent after a step failed.',
       'Produce the MINIMUM set of steps that still achieves the goal given what already succeeded.',
       'Do not repeat completed steps. Each new step names the exact tool it will call (from the list) or null, and a checkable expected output.',
-      'Number dependencies as in the revised plan: the completed steps keep their ids, then your new steps follow in order.',
+      `Number dependencies as in the revised plan: the completed steps are 1-${done.length} as listed, and your new steps are ${done.length + 1}, ${done.length + 2}, … in order.`,
     ].join('\n'),
     prompt: [
       `Goal: ${args.goal}`,

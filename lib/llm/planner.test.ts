@@ -170,6 +170,35 @@ describe('PlanTracker', () => {
     ]);
   });
 
+  it('renumbers kept done steps from 1 so new steps never reuse an id', () => {
+    const t = new PlanTracker({
+      goal: 'g',
+      version: 1,
+      steps: [1, 2, 3, 4].map((id) => ({
+        id,
+        description: `s${id}`,
+        tool: 'x',
+        expectedOutput: 'e',
+        dependsOn: id === 3 ? [2] : [],
+        status: id === 1 ? ('failed' as const) : id < 4 ? ('done' as const) : ('pending' as const),
+      })),
+    });
+    const r = t.revise('r', [
+      { description: 'new A', tool: 'x', expectedOutput: 'e', dependsOn: [2] },
+      { description: 'new B', tool: 'x', expectedOutput: 'e' },
+    ]);
+    expect(t.plan.steps.map((s) => [s.id, s.description, s.dependsOn])).toEqual([
+      [1, 's2', []],
+      [2, 's3', [1]],
+      [3, 'new A', [2]],
+      [4, 'new B', []],
+    ]);
+    expect([...(r.renumbered ?? [])]).toEqual([
+      [2, 1],
+      [3, 2],
+    ]);
+  });
+
   it('drops a revised dependsOn that references a step that no longer exists', () => {
     const t = new PlanTracker(normalisePlan(raw, 1));
     t.update(1, 'done'); // kept as id 1; the revised plan will have ids 1 and 2

@@ -392,17 +392,21 @@ export function resumeContextFrom(record: ExecutionRecord): string {
 function orchestratedResumeContext(record: ExecutionRecord): string {
   const plan = record.result?.plan;
   const workers = record.result?.workers ?? [];
-  // Latest WorkerResult per step (a later attempt supersedes an earlier one).
+  // A done step names the worker that did it. Match on that first: a replan
+  // renumbers step ids, so the step id alone can point at an older worker.
+  const resultByWorker = new Map<string, NonNullable<WorkerRecord['result']>>();
   const resultByStep = new Map<number, NonNullable<WorkerRecord['result']>>();
   for (const w of workers) {
-    if (w.result) resultByStep.set(w.stepId, w.result);
+    if (!w.result) continue;
+    resultByWorker.set(w.workerId, w.result);
+    resultByStep.set(w.stepId, w.result);
   }
 
   const doneLines: string[] = [];
   const remaining: string[] = [];
   for (const step of plan?.steps ?? []) {
     if (step.status === 'done') {
-      const r = resultByStep.get(step.id);
+      const r = step.workerId ? resultByWorker.get(step.workerId) : resultByStep.get(step.id);
       const ids = r && Object.keys(r.ids).length ? ` ids=${JSON.stringify(r.ids)}` : '';
       doneLines.push(`- Step ${step.id} (${step.description}): ${r?.summary ?? 'done'}${ids}`);
     } else {
