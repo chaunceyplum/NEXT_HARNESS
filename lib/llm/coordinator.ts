@@ -38,6 +38,7 @@ import type { LaunchValidationGate } from './launch-validation';
 import type { ModelHealthTracker } from './model-health';
 import { RunTracer, exportSpans, type AttrValue, type Span, type SpanRef } from '../tracing';
 import { resolveModel } from './model-registry';
+import { estimateCostUsd } from './pricing';
 import {
   readySteps,
   parallelWidth,
@@ -258,6 +259,16 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   const isWriteStep = (step: PlanStep): boolean => Boolean(step.tool) && classifyTool(step.tool as string) !== 'read';
   const aborted = (): boolean => Boolean(input.abortSignal?.aborted);
 
+  /** Charge one of the coordinator's own model calls (replan, synthesis) to the run ledger. */
+  const chargeCall = (modelKey: string, usage: CallUsage | undefined): void => {
+    if (!usage) return;
+    const inputTokens = usage.inputTokens ?? 0;
+    const outputTokens = usage.outputTokens ?? 0;
+    const tokens = usage.totalTokens ?? inputTokens + outputTokens;
+    if (!tokens) return;
+    ledger.charge(tokens, estimateCostUsd(modelKey, { inputTokens, outputTokens }), { inputTokens, outputTokens });
+  };
+
   /** Mark a step and notify the plan listener (Requirement 3.5). */
   const setStatus = (step: PlanStep, status: PlanStep['status']): void => {
     tracker.update(step.id, status);
@@ -442,7 +453,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     const failed = tracker.plan.steps.filter((s) => s.status === 'failed');
     let revised: ReplanResult;
     try {
-      revised = await requestReplan({
+      const reply = await requestReplan({
         goal: tracker.plan.goal,
         plan: tracker.plan,
         results,
@@ -451,6 +462,8 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
         toolNames: input.toolsConsidered,
         abortSignal: input.abortSignal,
       });
+      chargeCall(input.runModelKey, reply.usage);
+      revised = reply.object;
     } catch (err) {
       console.warn('[coordinator] replanning call failed; skipping remaining steps:', err instanceof Error ? err.message : err);
       return false;
@@ -501,7 +514,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     stopReason,
     onTextDelta: input.onTextDelta,
   });
-  if (synthesis.usageTokens) ledger.charge(synthesis.usageTokens, synthesis.costUsd);
+  chargeCall(input.runModelKey, synthesis.usage);
 
   const budgetUsage: BudgetUsage = ledger.usage();
 
@@ -529,13 +542,20 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     modelKey: input.runModelKey,
     ...(stopReason ? { stopReason } : {}),
     budgetUsage,
-    usage: { totalTokens: budgetUsage.tokens },
+    usage: ledger.tokenUsage(),
     ragJudgments: [],
     plan: tracker.plan,
     orchestrated: true,
     replans,
     workers,
   };
+}
+
+/** Token usage reported by one model call. */
+interface CallUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
 }
 
 // ── Replanning ──────────────────────────────────────────────────────────────────
@@ -576,7 +596,7 @@ async function requestReplan(args: {
   modelKey: string;
   toolNames: string[];
   abortSignal?: AbortSignal;
-}): Promise<ReplanResult> {
+}): Promise<{ object: ReplanResult; usage?: CallUsage }> {
   // The revised plan renumbers the completed steps 1..n in this order and
   // numbers the new steps after them, so list them under those ids.
   const done = args.plan.steps.filter((s) => s.status === 'done');
@@ -590,7 +610,7 @@ async function requestReplan(args: {
     return `- ${s.description} FAILED: ${r?.summary ?? s.note ?? 'no result'}`;
   });
 
-  const { object } = await generateObject({
+  const { object, usage } = await generateObject({
     model: resolveModel(args.modelKey),
     schema: replanSchema,
     system: [
@@ -610,7 +630,7 @@ async function requestReplan(args: {
     ].join('\n'),
     ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
   });
-  return object;
+  return { object, ...(usage ? { usage } : {}) };
 }
 
 // ── Synthesis ────────────────────────────────────────────────────────────────────
@@ -618,8 +638,7 @@ async function requestReplan(args: {
 interface SynthesisResult {
   text: string;
   finishReason: string;
-  usageTokens?: number;
-  costUsd?: number;
+  usage?: CallUsage;
 }
 
 /**
@@ -674,11 +693,7 @@ async function synthesize(args: {
     }
 
     const [text, finishReason, usage] = await Promise.all([stream.text, stream.finishReason, stream.usage]);
-    return {
-      text,
-      finishReason,
-      ...(usage.totalTokens !== undefined ? { usageTokens: usage.totalTokens } : {}),
-    };
+    return { text, finishReason, usage };
   } catch (err) {
     console.warn('[coordinator] synthesis call failed; returning a plain list of step summaries:', err instanceof Error ? err.message : err);
     const fallback = [`Here is what each step of "${args.goal}" produced:`, ...stepLines].join('\n');

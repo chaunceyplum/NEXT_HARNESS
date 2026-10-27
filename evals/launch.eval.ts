@@ -176,7 +176,9 @@ async function runTrial(fixture: LaunchFixture, trial: number, mode: 'off' | 'on
       })
     );
     record.totalTokens = run.usage.totalTokens;
-    record.costUsd = estimateCostUsd(run.modelKey, run.usage);
+    // An orchestrated run's workers can run on WORKER_MODEL, so price it from
+    // the run ledger, which charged each call at its own model's price.
+    record.costUsd = run.orchestrated ? run.budgetUsage.costUsd : estimateCostUsd(run.modelKey, run.usage);
     record.steps = run.steps.length;
     record.toolCalls = calls.length;
 

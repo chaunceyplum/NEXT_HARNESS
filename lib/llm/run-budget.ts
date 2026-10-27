@@ -126,7 +126,7 @@ export class RunBudgetTracker {
     this.costUsd = this.costUsd === undefined || stepCost === undefined ? undefined : this.costUsd + stepCost;
     // A worker step charges the run ledger too, so the run's limits hold no
     // matter how many workers run. Cost is charged at the child's model price.
-    this.parent?.charge(input + output, stepCost);
+    this.parent?.charge(input + output, stepCost, { inputTokens: input, outputTokens: output });
 
     for (const call of calls) {
       const sig = callSignature(call.toolName, call.input);
@@ -193,6 +193,8 @@ export class RunBudgetTracker {
  */
 export class RunLedger {
   private tokens = 0;
+  private inputTokens = 0;
+  private outputTokens = 0;
   private costUsd: number | undefined = 0;
   private stopReason: BudgetStopReason | undefined;
 
@@ -228,9 +230,17 @@ export class RunLedger {
     };
   }
 
-  /** Add a worker step's tokens and cost to the run totals. Called by child trackers. */
-  charge(tokens: number, costUsd: number | undefined): void {
+  /**
+   * Add a step's tokens and cost to the run totals. Called by child trackers,
+   * and by the coordinator for its own replan and synthesis calls. `split`
+   * keeps the input/output breakdown the run record reports as `usage`.
+   */
+  charge(tokens: number, costUsd: number | undefined, split?: { inputTokens: number; outputTokens: number }): void {
     this.tokens += tokens;
+    if (split) {
+      this.inputTokens += split.inputTokens;
+      this.outputTokens += split.outputTokens;
+    }
     this.costUsd = this.costUsd === undefined || costUsd === undefined ? undefined : this.costUsd + costUsd;
     this.checkLimits();
   }
@@ -251,6 +261,11 @@ export class RunLedger {
 
   usage(): BudgetUsage {
     return { tokens: this.tokens, costUsd: this.costUsd, durationMs: this.now() - this.startedAt };
+  }
+
+  /** Input/output token totals across every charge that carried a split. */
+  tokenUsage(): { inputTokens: number; outputTokens: number; totalTokens: number } {
+    return { inputTokens: this.inputTokens, outputTokens: this.outputTokens, totalTokens: this.tokens };
   }
 }
 

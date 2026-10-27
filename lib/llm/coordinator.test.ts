@@ -84,7 +84,7 @@ vi.mock('ai', async (importOriginal) => {
         },
         text: Promise.resolve(synthesisText),
         finishReason: Promise.resolve('stop'),
-        usage: Promise.resolve({ totalTokens: 7 }),
+        usage: Promise.resolve({ inputTokens: 5, outputTokens: 2, totalTokens: 7 }),
       };
     }),
   };
@@ -430,6 +430,19 @@ describe('runOrchestrated synthesis (Req 7.1, 7.2)', () => {
     expect(synthesisPrompt).toContain('DE1');
     expect(synthesisPrompt).toContain('rule creation failed');
     expect(synthesisPrompt).toContain('[failed]');
+  });
+
+  it('reports the input/output split and a priced cost, synthesis included', async () => {
+    vi.stubEnv('MODEL_PRICING_JSON', JSON.stringify({ 'test:run': { input: 1, output: 1 } }));
+    const plan = makePlan([{ id: 1 }]);
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    finishDone(1);
+    const result = await run;
+    vi.unstubAllEnvs();
+    // The scripted worker charges nothing; synthesis charges 5 in / 2 out.
+    expect(result.usage).toEqual({ inputTokens: 5, outputTokens: 2, totalTokens: 7 });
+    expect(result.budgetUsage.costUsd).toBeGreaterThan(0);
   });
 
   it('falls back to a plain list of summaries when synthesis throws', async () => {

@@ -90,6 +90,13 @@ describe('RunBudgetTracker', () => {
 });
 
 describe('RunLedger', () => {
+  it('keeps the input/output token split charged by child trackers', () => {
+    const ledger = new RunLedger({ maxIdenticalCalls: 3 }, 0, () => 0);
+    ledger.child('unknown', 1).recordStep({ inputTokens: 100, outputTokens: 20 }, []);
+    ledger.charge(7, undefined, { inputTokens: 5, outputTokens: 2 });
+    expect(ledger.tokenUsage()).toEqual({ inputTokens: 105, outputTokens: 22, totalTokens: 127 });
+  });
+
   const limits = { maxTokens: 1_000, maxDurationMs: 10_000, maxIdenticalCalls: 3 };
 
   it('caps a child budget at a share of the ledger remaining tokens (8.2)', () => {

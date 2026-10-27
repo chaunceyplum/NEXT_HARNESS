@@ -38,6 +38,8 @@ export interface ProductionRunRow {
   workerCount?: number;
   /** Replanning calls this run made. */
   replans?: number;
+  /** The run ledger's cost, priced per call; set for orchestrated runs, whose workers may use another model. */
+  ledgerCostUsd?: number;
 }
 
 export interface ModelBreakdown {
@@ -112,6 +114,7 @@ export function isSuccess(r: ProductionRunRow): boolean {
 }
 
 function runCost(r: ProductionRunRow): number | undefined {
+  if (r.orchestrated && r.ledgerCostUsd !== undefined) return r.ledgerCostUsd;
   return estimateCostUsd(r.model, { inputTokens: r.inputTokens, outputTokens: r.outputTokens });
 }
 
@@ -202,6 +205,7 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
             (r.result->>'orchestrated')::boolean AS orchestrated,
             jsonb_array_length(COALESCE(r.result->'workers', '[]'::jsonb)) AS worker_count,
             (r.result->>'replans')::int AS replans,
+            (r.result->'budgetUsage'->>'costUsd')::float8 AS ledger_cost_usd,
             q.judge_pass, q.rating, q.comment
        FROM harness_agent_runs r
        LEFT JOIN harness_run_quality q ON q.run_id = r.id
@@ -226,6 +230,7 @@ export async function loadProductionRuns(days: number): Promise<ProductionRunRow
     orchestrated: (row.orchestrated as boolean | null) ?? undefined,
     workerCount: num(row.worker_count),
     replans: num(row.replans),
+    ledgerCostUsd: num(row.ledger_cost_usd),
     judgePass: (row.judge_pass as boolean | null) ?? undefined,
     rating: (row.rating as 1 | -1 | null) ?? undefined,
     comment: (row.comment as string | null) ?? undefined,
