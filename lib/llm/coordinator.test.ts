@@ -95,7 +95,7 @@ vi.mock('./model-registry', () => ({
   getDefaultModelKey: () => 'test:run',
 }));
 
-const { runOrchestrated, orchestrationConfig, shouldOrchestrate } = await import('./coordinator');
+const { runOrchestrated, orchestrationConfig, orchestrationRequested, shouldOrchestrate } = await import('./coordinator');
 const { PlanTracker } = await import('./planner');
 const { ModelHealthTracker } = await import('./model-health');
 const { resolveBudget } = await import('./run-budget');
@@ -176,6 +176,16 @@ describe('orchestrationConfig', () => {
     expect(orchestrationConfig({}, true).serialWrites).toBe(false);
     expect(orchestrationConfig({}, false).serialWrites).toBe(false);
     vi.unstubAllEnvs();
+  });
+});
+
+describe('orchestrationRequested', () => {
+  it('follows the flag and the request, without looking at a plan', () => {
+    expect(orchestrationRequested('off', true)).toBe(false);
+    expect(orchestrationRequested('on', true)).toBe(true);
+    expect(orchestrationRequested('on', undefined)).toBe(false);
+    expect(orchestrationRequested('always', undefined)).toBe(true);
+    expect(orchestrationRequested('always', false)).toBe(false);
   });
 });
 

@@ -322,7 +322,10 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           // single-agent runs, so their record shape is unchanged.
           ...(agentResult.orchestrated
             ? { orchestrated: true, replans: agentResult.replans ?? 0, workers: agentResult.workers ?? [] }
-            : {}),
+            : agentResult.orchestrated === false
+              ? // Requested but run single-agent (Requirement 2.5).
+                { orchestrated: false }
+              : {}),
         },
       });
       // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.

@@ -112,13 +112,20 @@ export function orchestrationConfig(req: { maxWorkers?: number }, launchMode: bo
  *     runs single-agent whatever the flag (2.5); so does a run with no plan.
  */
 export function shouldOrchestrate(flag: OrchestrationFlag, requested: boolean | undefined, plan: Plan | undefined): boolean {
-  if (flag === 'off') return false;
-  if (!plan) return false;
-  const enabled = flag === 'always' ? requested !== false : requested === true;
-  if (!enabled) return false;
+  if (!plan || !orchestrationRequested(flag, requested)) return false;
   // Orchestration can only help when two or more steps are independent
   // (Requirement 2.5). parallelWidth is the largest antichain in the plan DAG.
   return parallelWidth(plan) >= 2;
+}
+
+/**
+ * Whether this run asks for orchestration at all, before looking at the plan
+ * (Requirements 2.2–2.4): `on` needs `orchestrate: true`, `always` runs
+ * unless `orchestrate: false`, `off` never does.
+ */
+export function orchestrationRequested(flag: OrchestrationFlag, requested: boolean | undefined): boolean {
+  if (flag === 'off') return false;
+  return flag === 'always' ? requested !== false : requested === true;
 }
 
 // ── runOrchestrated ─────────────────────────────────────────────────────────────

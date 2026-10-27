@@ -72,7 +72,7 @@ import {
 } from './run-budget';
 import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from './approval-policy';
 import { acquireLoopSlot } from './agent-slots';
-import { orchestrationConfig, runOrchestrated, shouldOrchestrate } from './coordinator';
+import { orchestrationConfig, orchestrationRequested, runOrchestrated, shouldOrchestrate } from './coordinator';
 import { orchestrationFlag } from './orchestration-config';
 import type { ResumePlan } from '../types';
 import type { WorkerRecord } from './worker';
@@ -1018,9 +1018,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   // coordinator to schedule, so planning is forced on (as if planFirst) when
   // orchestration could actually run — unless the flag is off, where the
   // request's orchestrate option is ignored entirely (Requirement 2.2).
-  const orchestrationRequested =
-    orchestrationFlag() !== 'off' && (orchestrationFlag() === 'always' ? opts.orchestrate !== false : opts.orchestrate === true);
-  const planFirst = opts.planFirst || orchestrationRequested || Boolean(opts.resumePlan);
+  const planFirst = opts.planFirst || orchestrationRequested(orchestrationFlag(), opts.orchestrate) || Boolean(opts.resumePlan);
   let planTracker: PlanTracker | undefined;
   if (planFirst) {
     const planModel = startModelKey || getDefaultModelKey();
@@ -1603,5 +1601,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     versions,
     ...(planTracker ? { plan: planTracker.plan } : {}),
     ...(route ? { route } : {}),
+    // Requirement 2.5: orchestration was asked for but the plan (or the lack
+    // of one) left nothing to run in parallel, so this ran single-agent.
+    ...(orchestrationRequested(orchestrationFlag(), opts.orchestrate) ? { orchestrated: false } : {}),
   };
 }
