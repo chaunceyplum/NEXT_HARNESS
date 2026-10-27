@@ -38,6 +38,7 @@ import type { LaunchValidationGate } from './launch-validation';
 import type { ModelHealthTracker } from './model-health';
 import { RunTracer, exportSpans, type AttrValue, type Span, type SpanRef } from '../tracing';
 import { resolveModel } from './model-registry';
+import { acquireLoopSlot } from './agent-slots';
 import { estimateCostUsd } from './pricing';
 import {
   readySteps,
@@ -660,27 +661,34 @@ async function requestReplan(args: {
     return `- ${s.description} FAILED: ${r?.summary ?? s.note ?? 'no result'}`;
   });
 
-  const { object, usage } = await generateObject({
-    model: resolveModel(args.modelKey),
-    schema: replanSchema,
-    system: [
-      'You are revising a plan for a MarTech engineering agent after a step failed.',
-      'Produce the MINIMUM set of steps that still achieves the goal given what already succeeded.',
-      'Do not repeat completed steps. Each new step names the exact tool it will call (from the list) or null, and a checkable expected output.',
-      `Number dependencies as in the revised plan: the completed steps are 1-${done.length} as listed, and your new steps are ${done.length + 1}, ${done.length + 2}, … in order.`,
-    ].join('\n'),
-    prompt: [
-      `Goal: ${args.goal}`,
-      '',
-      completedLines.length ? `Completed so far:\n${completedLines.join('\n')}` : 'Nothing completed yet.',
-      '',
-      failureLines.length ? `Failed:\n${failureLines.join('\n')}` : '',
-      '',
-      `Tools available: ${args.toolNames.join(', ')}`,
-    ].join('\n'),
-    ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
-  });
-  return { object, ...(usage ? { usage } : {}) };
+  // Every model-calling loop in the process shares MAX_AGENT_LOOPS
+  // (Requirement 13.1); the coordinator's own calls take a slot too.
+  const release = await acquireLoopSlot(args.abortSignal);
+  try {
+    const { object, usage } = await generateObject({
+      model: resolveModel(args.modelKey),
+      schema: replanSchema,
+      system: [
+        'You are revising a plan for a MarTech engineering agent after a step failed.',
+        'Produce the MINIMUM set of steps that still achieves the goal given what already succeeded.',
+        'Do not repeat completed steps. Each new step names the exact tool it will call (from the list) or null, and a checkable expected output.',
+        `Number dependencies as in the revised plan: the completed steps are 1-${done.length} as listed, and your new steps are ${done.length + 1}, ${done.length + 2}, … in order.`,
+      ].join('\n'),
+      prompt: [
+        `Goal: ${args.goal}`,
+        '',
+        completedLines.length ? `Completed so far:\n${completedLines.join('\n')}` : 'Nothing completed yet.',
+        '',
+        failureLines.length ? `Failed:\n${failureLines.join('\n')}` : '',
+        '',
+        `Tools available: ${args.toolNames.join(', ')}`,
+      ].join('\n'),
+      ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
+    });
+    return { object, ...(usage ? { usage } : {}) };
+  } finally {
+    release();
+  }
 }
 
 // ── Synthesis ────────────────────────────────────────────────────────────────────
@@ -726,7 +734,10 @@ async function synthesize(args: {
     .filter(Boolean)
     .join('\n');
 
+  let release: (() => void) | undefined;
   try {
+    // Shares MAX_AGENT_LOOPS with the workers (Requirement 13.1).
+    release = await acquireLoopSlot(args.abortSignal);
     const stream = streamText({
       model: resolveModel(args.modelKey),
       system:
@@ -751,5 +762,7 @@ async function synthesize(args: {
     // sees the answer.
     args.onTextDelta?.(fallback);
     return { text: fallback, finishReason: 'error' };
+  } finally {
+    release?.();
   }
 }

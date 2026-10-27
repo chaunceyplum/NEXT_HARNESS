@@ -530,6 +530,23 @@ describe('runOrchestrated synthesis (Req 7.1, 7.2)', () => {
     expect(result.budgetUsage.costUsd).toBeGreaterThan(0);
   });
 
+  it('waits for an agent-loop slot before the synthesis call (Req 13.1)', async () => {
+    vi.stubEnv('MAX_AGENT_LOOPS', '1');
+    const { acquireLoopSlot } = await import('./agent-slots');
+    const plan = makePlan([{ id: 1 }]);
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    const holdSlot = await acquireLoopSlot(); // something else holds the only slot
+    finishDone(1);
+    await tick();
+    const ai = await import('ai');
+    expect(vi.mocked(ai.streamText)).not.toHaveBeenCalled();
+    holdSlot();
+    await run;
+    expect(vi.mocked(ai.streamText)).toHaveBeenCalledTimes(1);
+    vi.unstubAllEnvs();
+  });
+
   it('falls back to a plain list of summaries when synthesis throws', async () => {
     const plan = makePlan([{ id: 1 }]);
     const run = runOrchestrated(baseInput(plan));
