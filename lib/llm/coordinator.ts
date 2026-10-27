@@ -446,7 +446,37 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     if (exhausted) stopReason = exhausted;
   }
 
-  if (aborted()) stopReason ??= 'time-budget';
+  /**
+   * Requirement 14.1: close the coordinator span and export it with the
+   * per-worker summary spans. Best-effort, exactly like executeLoop's export
+   * (exportSpans never throws), so tracing can't disturb the run.
+   */
+  const finishCoordinatorTrace = (error?: string): void => {
+    try {
+      const coordinatorSpans = coordinatorTracer.finish({
+        attributes: {
+          'harness.orchestration.workers': workers.length,
+          'harness.orchestration.replans': replans,
+          ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
+          ...(error === 'aborted' ? { 'harness.aborted': true } : {}),
+        },
+        ...(error ? { error } : {}),
+      });
+      void exportSpans([...coordinatorSpans, ...workerSpans]);
+    } catch (err) {
+      console.error('[coordinator] failed to finish/export coordinator trace:', err instanceof Error ? err.message : err);
+    }
+  };
+
+  // Requirement 9.4: a cancelled run (or a tripped kill switch) ends like a
+  // cancelled single-agent run: the running workers have drained (each was
+  // aborted through its linked controller), and the abort is rethrown with no
+  // synthesis, so the job wrapper records the run as cancelled rather than as
+  // a completed run that stopped on its time budget.
+  if (aborted()) {
+    finishCoordinatorTrace('aborted');
+    throw input.abortSignal?.reason ?? new Error('aborted');
+  }
 
   /** One replanning call, applied through PlanTracker.revise (Requirements 6.1–6.3). */
   async function tryReplan(): Promise<boolean> {
@@ -504,7 +534,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
 
   // Nothing pending that a worker could pick up, but a replan is still owed
   // (e.g. the ledger halted new work mid-failure): never leave a step dangling.
-  if (hasPendingWork() && (aborted() || ledger.exhausted())) skipRemaining();
+  if (hasPendingWork() && ledger.exhausted()) skipRemaining();
 
   // ── Synthesis (Requirements 7.1, 7.2) ──────────────────────────────────────────
   const synthesis = await synthesize({
@@ -519,22 +549,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   chargeCall(input.runModelKey, synthesis.usage);
 
   const budgetUsage: BudgetUsage = ledger.usage();
-
-  // Requirement 14.1: close the coordinator span and export it with the
-  // per-worker summary spans. Best-effort, exactly like executeLoop's export
-  // (exportSpans never throws), so tracing can't disturb the run.
-  try {
-    const coordinatorSpans = coordinatorTracer.finish({
-      attributes: {
-        'harness.orchestration.workers': workers.length,
-        'harness.orchestration.replans': replans,
-        ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
-      },
-    });
-    void exportSpans([...coordinatorSpans, ...workerSpans]);
-  } catch (err) {
-    console.error('[coordinator] failed to finish/export coordinator trace:', err instanceof Error ? err.message : err);
-  }
+  finishCoordinatorTrace();
 
   return {
     finalText: synthesis.text,

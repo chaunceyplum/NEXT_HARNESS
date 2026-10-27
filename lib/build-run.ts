@@ -350,8 +350,24 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         durationMs: Date.now() - startedAt,
         request: req,
         // Keep the checkpointed steps: they show what ran before the failure.
-        ...(steps.length
-          ? { result: { runId, finalText: '', steps, toolsConsidered: [], finishReason: 'error', usage: {} } }
+        // An orchestrated run also keeps its plan and workers, so resume can
+        // continue it from the done steps (Requirement 12.4).
+        ...(steps.length || orchestrated
+          ? {
+              result: {
+                runId,
+                finalText: '',
+                steps,
+                toolsConsidered: [],
+                finishReason: 'error',
+                usage: {},
+                ...(latestPlan ? { plan: latestPlan } : {}),
+                ...(orchestrated
+                  ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
+                  : {}),
+                checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+              },
+            }
           : {}),
         error: message,
       });

@@ -268,6 +268,27 @@ describe('runOrchestrated scheduling', () => {
   });
 });
 
+describe('runOrchestrated cancellation (Req 9.4)', () => {
+  it('drains running workers, skips synthesis and rethrows the abort', async () => {
+    const controller = new AbortController();
+    const plan = makePlan([{ id: 1 }, { id: 2 }, { id: 3, dependsOn: [1] }]);
+    const run = runOrchestrated(baseInput(plan, { abortSignal: controller.signal }));
+    const settled = run.then(
+      () => 'resolved',
+      (e: Error) => e.message
+    );
+    await tick();
+    controller.abort(new Error('Cancelled by user'));
+    pending.get(1)!.resolve({ status: 'cancelled', error: 'aborted' });
+    pending.get(2)!.resolve({ status: 'cancelled', error: 'aborted' });
+    expect(await settled).toBe('Cancelled by user');
+    // No new worker started after the abort, and no synthesis call was made.
+    expect(startOrder.sort()).toEqual([1, 2]);
+    const ai = await import('ai');
+    expect(vi.mocked(ai.streamText)).not.toHaveBeenCalled();
+  });
+});
+
 describe('runOrchestrated resume (Req 12.4)', () => {
   it('runs only the steps that are not done and hands seeded results to dependants', async () => {
     const plan = makePlan([{ id: 1, status: 'done' }, { id: 2, dependsOn: [1] }]);
