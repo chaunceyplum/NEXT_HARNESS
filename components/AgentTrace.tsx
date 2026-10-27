@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage, WorkerStatus } from '@/lib/types';
 
 /**
@@ -71,8 +71,13 @@ const STOP_REASON_LABEL: Record<string, string> = {
 };
 
 /** Step-by-step tool-call trace for one agent run. Shared between the home page (fresh run) and /results/[id] (replay view). */
-/** One step card in the trace. Shared by the flat list and the worker lanes. */
-function StepCard({ step }: { step: AgentStepDTO }) {
+/**
+ * One step card in the trace. Shared by the flat list and the worker lanes.
+ * Memoised: a finished step never changes, and while a run streams the trace
+ * re-renders on every text delta, which would otherwise re-stringify every
+ * step's inputs and outputs each time.
+ */
+const StepCard = memo(function StepCard({ step }: { step: AgentStepDTO }) {
   const stepTime = formatMs(step.durationMs);
   const modelTime = formatMs(step.modelMs);
   const stepTokens = step.usage?.totalTokens;
@@ -118,7 +123,7 @@ function StepCard({ step }: { step: AgentStepDTO }) {
       })}
     </div>
   );
-}
+});
 
 /** A collapsible lane for one worker: its status, model, tokens and steps (Requirement 15.1). */
 function WorkerLaneCard({ lane, steps }: { lane: WorkerLane; steps: AgentStepDTO[] }) {

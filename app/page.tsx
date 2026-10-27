@@ -92,6 +92,21 @@ export default function Home() {
   const [runState, setRunState] = useState<RunState | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef<string | null>(null);
+  // Streamed text is buffered and applied once per animation frame: one state
+  // update per token re-rendered the whole trace dozens of times a second.
+  const pendingDeltaRef = useRef('');
+  const deltaFrameRef = useRef<number | null>(null);
+  const dropPendingDelta = () => {
+    pendingDeltaRef.current = '';
+    if (deltaFrameRef.current !== null) cancelAnimationFrame(deltaFrameRef.current);
+    deltaFrameRef.current = null;
+  };
+  const flushPendingDelta = () => {
+    deltaFrameRef.current = null;
+    const delta = pendingDeltaRef.current;
+    pendingDeltaRef.current = '';
+    if (delta) setRunState((prev) => (prev ? { ...prev, streamingText: prev.streamingText + delta } : prev));
+  };
 
   // /?run=<id>: attach to a run that's live on the server (e.g. after a reload or a resume).
   useEffect(() => {
@@ -172,6 +187,9 @@ export default function Home() {
       try { event = JSON.parse(trimmed); } catch { return; }
 
       if (event.type === 'done' || event.type === 'error') terminal = true;
+      // These replace the live text (a step captures it, run_start and done
+      // reset or supersede it), so text still waiting for a frame is dropped.
+      if (event.type === 'run_start' || event.type === 'step' || event.type === 'done') dropPendingDelta();
       if (event.type === 'run_start') {
         runIdRef.current = event.runId;
         setRunState({
@@ -193,9 +211,8 @@ export default function Home() {
           prev ? { ...prev, steps: [...prev.steps, event.step], streamingText: '' } : prev
         );
       } else if (event.type === 'text_delta') {
-        setRunState((prev) =>
-          prev ? { ...prev, streamingText: prev.streamingText + event.delta } : prev
-        );
+        pendingDeltaRef.current += event.delta;
+        deltaFrameRef.current ??= requestAnimationFrame(flushPendingDelta);
       } else if (event.type === 'approval_request') {
         setRunState((prev) =>
           prev
