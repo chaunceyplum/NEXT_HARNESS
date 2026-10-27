@@ -1,0 +1,18 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "label": "Approval-request workerId unset",
+      "severity": "minor",
+      "confidence": "confirmed",
+      "detail": "Worker approval_request events never populate workerId because the shared approval gate is built in prepareRun before any worker exists and is not threaded the per-call worker id. Behaviour-safe (approvals still work) and documented in ci-task8.md; outside the Task 8.3 requirement set. Thread the id through the gate in a later task if the UI needs lane attribution. Non-blocking."
+    },
+    {
+      "label": "v1 back-compat normalization untested",
+      "severity": "minor",
+      "confidence": "confirmed",
+      "detail": "normaliseResult strips orchestration fields from v1/version-absent records (Requirement 12.3) but has no unit test and there is no execution-store.test.ts. Low production risk since real v1 records do not carry orchestration fields, but the back-compat guarantee is unverified by CI. Non-blocking."
+    }
+  ],
+  "reviewDoc": "/Users/chauncey/Desktop/PROJECTS/next_harness/NEXT_HARNESS/.worktrees/orchestrator-workers/.agents/tasks/review-task8.md"
+}
