@@ -99,13 +99,23 @@ export class RunBudgetTracker {
   private readonly warned = new Set<string>();
   private pendingWarnings: string[] = [];
   private stopReason: BudgetStopReason | undefined;
+  /**
+   * Run ledger this tracker charges in addition to itself, when it is a
+   * worker's child budget. Single-agent trackers have no parent and behave
+   * exactly as before. Loop detection stays on the child; the parent only
+   * accumulates tokens, cost and the run clock.
+   */
+  private readonly parent: RunLedger | undefined;
 
   constructor(
     private readonly limits: RunBudgetLimits,
     private readonly modelKey: string,
     private readonly startedAt: number,
-    private readonly now: () => number = Date.now
-  ) {}
+    private readonly now: () => number = Date.now,
+    parent?: RunLedger
+  ) {
+    this.parent = parent;
+  }
 
   /** Record one finished step's usage and tool calls (effective calls — call_tool already unwrapped). */
   recordStep(usage: { inputTokens?: number; outputTokens?: number }, calls: Array<{ toolName: string; input: unknown }>): void {
@@ -114,6 +124,9 @@ export class RunBudgetTracker {
     this.tokens += input + output;
     const stepCost = estimateCostUsd(this.modelKey, { inputTokens: input, outputTokens: output });
     this.costUsd = this.costUsd === undefined || stepCost === undefined ? undefined : this.costUsd + stepCost;
+    // A worker step charges the run ledger too, so the run's limits hold no
+    // matter how many workers run. Cost is charged at the child's model price.
+    this.parent?.charge(input + output, stepCost);
 
     for (const call of calls) {
       const sig = callSignature(call.toolName, call.input);
@@ -142,10 +155,14 @@ export class RunBudgetTracker {
     else if (maxDurationMs !== undefined && this.now() - this.startedAt >= maxDurationMs) this.stopReason = 'time-budget';
   }
 
-  /** Why the run must wrap up now, if it must. Re-checks the clock. */
+  /**
+   * Why the run must wrap up now, if it must. Re-checks the clock. A worker's
+   * tracker reports the run ledger's reason when the ledger is exhausted,
+   * even if the worker's own child budget still has room.
+   */
   exceeded(): BudgetStopReason | undefined {
     this.checkLimits();
-    return this.stopReason;
+    return this.stopReason ?? this.parent?.exhausted();
   }
 
   /** Loop warnings not yet shown to the model. Returns each once. */
@@ -158,6 +175,79 @@ export class RunBudgetTracker {
   usage(): BudgetUsage {
     return { tokens: this.tokens, costUsd: this.costUsd, durationMs: this.now() - this.startedAt };
   }
+}
+
+/**
+ * One run-level budget shared by every worker of an orchestrated run.
+ *
+ * The ledger holds the run's resolved limits and accumulates the tokens,
+ * cost and wall-clock time of all workers. Each worker gets a child
+ * `RunBudgetTracker` from `child(modelKey, share)` whose own limits are
+ * capped at `share` of what the run has left when the worker starts, so one
+ * worker can never spend more than its slice, and no set of workers can spend
+ * past the run's limits. The child charges the ledger on every step; the
+ * ledger never does loop detection (that stays per worker).
+ *
+ * Single-agent runs do not use a ledger: they build a plain
+ * `RunBudgetTracker` with no parent, so their behaviour is unchanged.
+ */
+export class RunLedger {
+  private tokens = 0;
+  private costUsd: number | undefined = 0;
+  private stopReason: BudgetStopReason | undefined;
+
+  constructor(
+    private readonly limits: RunBudgetLimits,
+    private readonly startedAt: number,
+    private readonly now: () => number = Date.now
+  ) {}
+
+  /**
+   * A child budget for one worker, capped at `share` of the run's remaining
+   * tokens and cost. The child shares the run clock (same `startedAt` and
+   * `now`) and charges this ledger on every recorded step.
+   */
+  child(modelKey: string, share: number): RunBudgetTracker {
+    const clamped = Math.min(1, Math.max(0, share));
+    const childLimits: RunBudgetLimits = {
+      maxTokens: scaleRemaining(this.limits.maxTokens, this.tokens, clamped),
+      maxCostUsd: scaleRemaining(this.limits.maxCostUsd, this.costUsd ?? 0, clamped),
+      maxDurationMs: this.limits.maxDurationMs,
+      maxIdenticalCalls: this.limits.maxIdenticalCalls,
+    };
+    return new RunBudgetTracker(childLimits, modelKey, this.startedAt, this.now, this);
+  }
+
+  /** Add a worker step's tokens and cost to the run totals. Called by child trackers. */
+  charge(tokens: number, costUsd: number | undefined): void {
+    this.tokens += tokens;
+    this.costUsd = this.costUsd === undefined || costUsd === undefined ? undefined : this.costUsd + costUsd;
+    this.checkLimits();
+  }
+
+  private checkLimits(): void {
+    if (this.stopReason) return;
+    const { maxTokens, maxCostUsd, maxDurationMs } = this.limits;
+    if (maxTokens !== undefined && this.tokens >= maxTokens) this.stopReason = 'token-budget';
+    else if (maxCostUsd !== undefined && this.costUsd !== undefined && this.costUsd >= maxCostUsd) this.stopReason = 'cost-budget';
+    else if (maxDurationMs !== undefined && this.now() - this.startedAt >= maxDurationMs) this.stopReason = 'time-budget';
+  }
+
+  /** Why the run must start no new workers and wrap up, if it must. Re-checks the clock. */
+  exhausted(): BudgetStopReason | undefined {
+    this.checkLimits();
+    return this.stopReason;
+  }
+
+  usage(): BudgetUsage {
+    return { tokens: this.tokens, costUsd: this.costUsd, durationMs: this.now() - this.startedAt };
+  }
+}
+
+/** `share` of what a limit has left (limit − used), floored at 0. Undefined limits stay undefined. */
+function scaleRemaining(limit: number | undefined, used: number, share: number): number | undefined {
+  if (limit === undefined) return undefined;
+  return Math.max(0, limit - used) * share;
 }
 
 export const STOP_REASON_TEXT: Record<BudgetStopReason, string> = {

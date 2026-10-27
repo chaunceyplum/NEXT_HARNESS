@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { callSignature, resolveBudget, RunBudgetTracker } from './run-budget';
+import { callSignature, resolveBudget, RunBudgetTracker, RunLedger } from './run-budget';
 
 afterEach(() => {
   for (const k of ['RUN_MAX_TOKENS', 'RUN_MAX_COST_USD', 'RUN_TIMEOUT_MS', 'RUN_MAX_IDENTICAL_CALLS', 'MODEL_PRICING_JSON']) delete process.env[k];
@@ -86,5 +86,87 @@ describe('RunBudgetTracker', () => {
     for (let i = 0; i < 6; i++) t.recordStep({}, [{ toolName: 'adobe_list_segments', input: { page: i } }]);
     expect(t.takeWarnings()).toEqual([]);
     expect(t.exceeded()).toBeUndefined();
+  });
+});
+
+describe('RunLedger', () => {
+  const limits = { maxTokens: 1_000, maxDurationMs: 10_000, maxIdenticalCalls: 3 };
+
+  it('caps a child budget at a share of the ledger remaining tokens (8.2)', () => {
+    const ledger = new RunLedger(limits, 0, () => 0);
+    // Nothing spent yet: half of 1,000 tokens.
+    const first = ledger.child('unknown', 0.5);
+    first.recordStep({ inputTokens: 300, outputTokens: 100 }, []);
+    expect(first.exceeded()).toBeUndefined();
+    first.recordStep({ inputTokens: 100, outputTokens: 0 }, []);
+    // Child's own 500-token slice is reached.
+    expect(first.exceeded()).toBe('token-budget');
+    expect(ledger.usage().tokens).toBe(500);
+
+    // A later worker's slice is half of what's left (1,000 − 500 = 500) → 250.
+    const second = ledger.child('unknown', 0.5);
+    second.recordStep({ inputTokens: 250, outputTokens: 0 }, []);
+    expect(second.exceeded()).toBe('token-budget');
+  });
+
+  it('charges every worker step to both the child and the run ledger (8.1, 8.3)', () => {
+    const ledger = new RunLedger(limits, 0, () => 0);
+    const a = ledger.child('unknown', 1);
+    const b = ledger.child('unknown', 1);
+    a.recordStep({ inputTokens: 100, outputTokens: 50 }, []);
+    b.recordStep({ inputTokens: 200, outputTokens: 0 }, []);
+    expect(a.usage().tokens).toBe(150);
+    expect(b.usage().tokens).toBe(200);
+    // Run ledger sums across workers.
+    expect(ledger.usage().tokens).toBe(350);
+  });
+
+  it('reports exhaustion to a worker even when its child slice has room (8.1)', () => {
+    const ledger = new RunLedger({ ...limits, maxTokens: 300 }, 0, () => 0);
+    const a = ledger.child('unknown', 1); // slice = full 300
+    const b = ledger.child('unknown', 1); // slice = full 300
+    a.recordStep({ inputTokens: 300, outputTokens: 0 }, []);
+    expect(ledger.exhausted()).toBe('token-budget');
+    // b has used nothing of its own slice but must still report the run reason.
+    expect(b.exceeded()).toBe('token-budget');
+  });
+
+  it('exhausts on the run cost ceiling across priced workers (8.1)', () => {
+    process.env.MODEL_PRICING_JSON = JSON.stringify({ priced: { input: 1_000_000, output: 0 } });
+    const ledger = new RunLedger({ ...limits, maxTokens: undefined, maxCostUsd: 5 }, 0, () => 0);
+    const a = ledger.child('priced', 1);
+    const b = ledger.child('priced', 1);
+    a.recordStep({ inputTokens: 3, outputTokens: 0 }, []); // $3
+    expect(ledger.exhausted()).toBeUndefined();
+    b.recordStep({ inputTokens: 2, outputTokens: 0 }, []); // $2 → $5 total
+    expect(ledger.exhausted()).toBe('cost-budget');
+    expect(ledger.usage().costUsd).toBe(5);
+  });
+
+  it('exhausts on the run time limit, re-checking the clock (8.1)', () => {
+    let now = 0;
+    const ledger = new RunLedger(limits, 0, () => now);
+    expect(ledger.exhausted()).toBeUndefined();
+    now = 10_000;
+    expect(ledger.exhausted()).toBe('time-budget');
+  });
+
+  it('keeps identical-call loop detection per worker (8.5)', () => {
+    const ledger = new RunLedger(limits, 0, () => 0);
+    const a = ledger.child('unknown', 1);
+    const b = ledger.child('unknown', 1);
+    const call = { toolName: 'adobe_list_segments', input: { limit: 5 } };
+    // Worker a repeats the same call; worker b never does.
+    for (let i = 0; i < 4; i++) a.recordStep({}, [call]);
+    expect(a.exceeded()).toBe('loop-detected');
+    expect(b.exceeded()).toBeUndefined();
+  });
+
+  it('a tracker with no parent behaves exactly as before (single-agent path)', () => {
+    const t = new RunBudgetTracker({ ...limits, maxTokens: 100 }, 'unknown', 0, () => 0);
+    t.recordStep({ inputTokens: 40, outputTokens: 10 }, []);
+    expect(t.exceeded()).toBeUndefined();
+    t.recordStep({ inputTokens: 40, outputTokens: 10 }, []);
+    expect(t.exceeded()).toBe('token-budget');
   });
 });

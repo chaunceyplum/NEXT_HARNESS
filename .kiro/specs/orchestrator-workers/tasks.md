@@ -48,8 +48,8 @@ stop. That means behaviour changed, and it must be fixed before going on.
 - [x] 3.4 Add config readers for `ORCHESTRATION`, `MAX_WORKERS`, `WORKER_MAX_STEPS`, `WORKER_BUDGET_SHARE`, `MAX_REPLANS`, `WORKER_MODEL`, `LAUNCH_PARALLEL_WRITES`; document all variables in `.env.local.example` and `ENVIRONMENT_VARIABLES.md`
   - _Requirements: 2.1, 3.1, 4.1, 4.8, 6.1, 8.2_
 
-- [ ] 4. Shared run budget
-- [ ] 4.1 Add `RunLedger` and parent charging to `RunBudgetTracker` (`lib/llm/run-budget.ts`)
+- [x] 4. Shared run budget
+- [x] 4.1 Add `RunLedger` and parent charging to `RunBudgetTracker` (`lib/llm/run-budget.ts`)
   - `child(modelKey, share)`; `recordStep` charges child and parent; `exceeded()` reports either
   - Single-agent path uses a tracker with no parent (unchanged behaviour)
   - Tests in `lib/llm/run-budget.test.ts`
