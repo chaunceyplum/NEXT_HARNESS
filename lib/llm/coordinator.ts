@@ -391,8 +391,6 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   const running = new Map<number, Promise<WorkerOutcome>>();
   let needReplan = false;
 
-  const hasPendingWork = (): boolean => tracker.plan.steps.some((s) => s.status === 'pending' && s.tool !== null);
-
   for (;;) {
     // Requirements 8.4 / 9.4: stop scheduling on abort or a spent ledger. Keep
     // draining the workers already running so their spend is recorded.
@@ -526,11 +524,23 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     return true;
   }
 
-  /** Mark every not-done step skipped so synthesis reports it (Requirement 6.3). */
+  /**
+   * An answer step: a reasoning step (`tool: null`) nothing depends on, whose
+   * own dependencies are done. Synthesis carries it out (Requirement 3.7).
+   */
+  function isAnswerStep(step: PlanStep): boolean {
+    return step.tool === null && !hasDependants(step) && step.dependsOn.every((d) => stepById(d)?.status === 'done');
+  }
+
+  /**
+   * Mark every step that will not run skipped, so synthesis reports it and
+   * the stored plan has no step left pending (Requirement 6.3). Answer steps
+   * stay pending for synthesis.
+   */
   function skipRemaining(): void {
     let changed = false;
     for (const step of tracker.plan.steps) {
-      if (step.status === 'pending' || step.status === 'running') {
+      if (step.status === 'running' || (step.status === 'pending' && !isAnswerStep(step))) {
         tracker.update(step.id, 'skipped');
         changed = true;
       }
@@ -538,9 +548,9 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     if (changed) input.onPlan?.(tracker.plan);
   }
 
-  // Nothing pending that a worker could pick up, but a replan is still owed
-  // (e.g. the ledger halted new work mid-failure): never leave a step dangling.
-  if (hasPendingWork() && ledger.exhausted()) skipRemaining();
+  // Whatever ended the scheduler — every step done, a spent ledger, or steps
+  // stranded behind a failed dependency — nothing left will get a worker.
+  skipRemaining();
 
   // ── Synthesis (Requirements 7.1, 7.2) ──────────────────────────────────────────
   const synthesis = await synthesize({
@@ -553,6 +563,16 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     onTextDelta: input.onTextDelta,
   });
   chargeCall(input.runModelKey, synthesis.usage);
+
+  // The answer steps were carried out by synthesis — unless it failed and the
+  // answer fell back to a plain list of step summaries.
+  let answered = false;
+  for (const step of tracker.plan.steps) {
+    if (step.status !== 'pending') continue;
+    tracker.update(step.id, synthesis.finishReason === 'error' ? 'skipped' : 'done');
+    answered = true;
+  }
+  if (answered) input.onPlan?.(tracker.plan);
 
   const budgetUsage: BudgetUsage = ledger.usage();
   finishCoordinatorTrace();

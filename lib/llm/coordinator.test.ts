@@ -335,6 +335,29 @@ describe('runOrchestrated reasoning steps (Req 3.7)', () => {
   });
 });
 
+describe('runOrchestrated final plan statuses', () => {
+  it('leaves no step pending: answer steps done by synthesis, stranded steps skipped', async () => {
+    replanObject = new Error('model unavailable');
+    const plan = makePlan([
+      { id: 1 },
+      { id: 2 },
+      { id: 3, dependsOn: [2] }, // stranded behind the failed step 2
+      { id: 4, tool: null, dependsOn: [1] }, // answer step
+    ]);
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    finishDone(1);
+    finishFailed(2);
+    const result = await run;
+    expect(result.plan?.steps.map((s) => [s.id, s.status])).toEqual([
+      [1, 'done'],
+      [2, 'failed'],
+      [3, 'skipped'],
+      [4, 'done'],
+    ]);
+  });
+});
+
 describe('runOrchestrated replanning (Req 6.1, 6.3)', () => {
   it('waits for running workers, then replans once after a failure', async () => {
     const plan = makePlan([{ id: 1 }, { id: 2 }]);
