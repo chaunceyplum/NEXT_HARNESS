@@ -255,6 +255,12 @@ export interface WorkerInput {
   /** The id the coordinator gave this worker; defaults to `${runId}:w${stepId}:${attempt}`. */
   workerId?: string;
   runGoal: string;
+  /**
+   * The user's request as they wrote it. The plan goal is the planner's
+   * paraphrase and can drop a constraint ("don't build", "ask before
+   * deleting"), so the worker sees the original too.
+   */
+  request?: string;
   step: PlanStep;
   /** The WorkerResults of the steps this step depends on (Requirement 4.4). */
   deps: WorkerResult[];
@@ -291,11 +297,18 @@ export interface WorkerInput {
  * this step, the results of the steps it depends on, and the planning
  * knowledge. No other worker's transcript appears here.
  */
-export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'step' | 'deps' | 'knowledge' | 'folded'>): string {
-  const { runGoal, step, deps, knowledge, folded } = input;
+export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'request' | 'step' | 'deps' | 'knowledge' | 'folded'>): string {
+  const { runGoal, request, step, deps, knowledge, folded } = input;
   const lines = [
     'You are carrying out ONE step of a larger plan. Do only this step.',
     '',
+    ...(request?.trim()
+      ? [
+          "The user's request, as they wrote it. Any limit it sets (what not to do, what to ask about first) applies to your step:",
+          request.trim(),
+          '',
+        ]
+      : []),
     `Goal of the whole run: ${runGoal}`,
     `Your step: ${step.description}`,
     `Tool to use: ${step.tool ?? '(none — reason and report)'}`,

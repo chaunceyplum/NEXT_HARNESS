@@ -1534,6 +1534,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     try {
       orchestrated = await runOrchestrated({
         tracker: planTracker,
+        request: opts.userInput,
         config,
         ...(opts.resumePlan ? { seedResults: opts.resumePlan.results } : {}),
         tools: ctx.tools,

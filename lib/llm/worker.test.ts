@@ -266,6 +266,19 @@ describe('buildWorkerBrief', () => {
     expect(brief).toContain('Launch data elements need a delegate id.');
     expect(brief).toContain('call report_result');
   });
+
+  it("puts the user's own request, with its limits, ahead of the plan goal", () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'Clean up old segments',
+      request: 'Find the old test segments and ask me before deleting any.',
+      step: makeStep(),
+      deps: [],
+    });
+    expect(brief).toContain("The user's request, as they wrote it.");
+    expect(brief).toContain('ask me before deleting any');
+    expect(brief.indexOf('ask me before deleting')).toBeLessThan(brief.indexOf('Goal of the whole run'));
+    expect(buildWorkerBrief({ runGoal: 'g', step: makeStep(), deps: [] })).not.toContain("The user's request");
+  });
 });
 
 describe('runWorker', () => {

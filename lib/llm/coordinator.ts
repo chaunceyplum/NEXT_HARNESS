@@ -138,6 +138,8 @@ export function orchestrationRequested(flag: OrchestrationFlag, requested: boole
 export interface OrchestratorInput {
   /** The plan tracker from prepareRun; its plan is mutated as steps complete / are revised. */
   tracker: PlanTracker;
+  /** The user's request as written; workers, replanning and synthesis see it alongside the plan goal. */
+  request?: string;
   /** Results of steps already done before this run started — a resumed run's done steps (Requirement 12.4). */
   seedResults?: WorkerResult[];
   config: OrchestrationConfig;
@@ -353,6 +355,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     return runWorker({
       workerId,
       runGoal: tracker.plan.goal,
+      ...(input.request ? { request: input.request } : {}),
       step,
       deps,
       ...(folded.length ? { folded } : {}),
@@ -499,6 +502,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     try {
       const reply = await requestReplan({
         goal: tracker.plan.goal,
+        ...(input.request ? { request: input.request } : {}),
         plan: tracker.plan,
         results,
         failed,
@@ -563,6 +567,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
   // ── Synthesis (Requirements 7.1, 7.2) ──────────────────────────────────────────
   const synthesis = await synthesize({
     goal: tracker.plan.goal,
+    ...(input.request ? { request: input.request } : {}),
     plan: tracker.plan,
     results,
     modelKey: input.runModelKey,
@@ -641,6 +646,7 @@ const replanSchema = z.object({
  */
 async function requestReplan(args: {
   goal: string;
+  request?: string;
   plan: Plan;
   results: Map<number, WorkerResult>;
   failed: PlanStep[];
@@ -675,6 +681,7 @@ async function requestReplan(args: {
         `Number dependencies as in the revised plan: the completed steps are 1-${done.length} as listed, and your new steps are ${done.length + 1}, ${done.length + 2}, … in order.`,
       ].join('\n'),
       prompt: [
+        ...(args.request ? [`User's request (its limits still apply): ${args.request}`, ''] : []),
         `Goal: ${args.goal}`,
         '',
         completedLines.length ? `Completed so far:\n${completedLines.join('\n')}` : 'Nothing completed yet.',
@@ -708,6 +715,7 @@ interface SynthesisResult {
  */
 async function synthesize(args: {
   goal: string;
+  request?: string;
   plan: Plan;
   results: Map<number, WorkerResult>;
   modelKey: string;
@@ -723,6 +731,7 @@ async function synthesize(args: {
   });
 
   const prompt = [
+    ...(args.request ? [`User's request: ${args.request}`, ''] : []),
     `Goal: ${args.goal}`,
     '',
     'Results of each step:',

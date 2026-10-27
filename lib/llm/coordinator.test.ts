@@ -517,6 +517,21 @@ describe('runOrchestrated synthesis (Req 7.1, 7.2)', () => {
     expect(synthesisPrompt).toContain('[failed]');
   });
 
+  it("hands the user's request to every worker and to synthesis", async () => {
+    const plan = makePlan([{ id: 1 }, { id: 2 }]);
+    const run = runOrchestrated(baseInput(plan, { request: 'List them, but do not delete anything.' }));
+    await tick();
+    const mockRunWorker = vi.mocked((await import('./worker')).runWorker);
+    expect(mockRunWorker.mock.calls.map((c) => c[0].request)).toEqual([
+      'List them, but do not delete anything.',
+      'List them, but do not delete anything.',
+    ]);
+    finishDone(1);
+    finishDone(2);
+    await run;
+    expect(synthesisPrompt).toContain('do not delete anything');
+  });
+
   it('reports the input/output split and a priced cost, synthesis included', async () => {
     vi.stubEnv('MODEL_PRICING_JSON', JSON.stringify({ 'test:run': { input: 1, output: 1 } }));
     const plan = makePlan([{ id: 1 }]);
