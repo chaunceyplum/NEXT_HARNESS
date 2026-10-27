@@ -141,16 +141,6 @@ async function callTool(toolName: string, args: Record<string, unknown>, signal?
   return callMcpTool(toolName, args, { signal });
 }
 
-/** Force the next getMcpToolCatalog() call to refetch (e.g. after MCP redeploy). */
-export function invalidateToolCatalogCache(): void {
-  catalogPromise = null;
-}
-
-export async function getToolDefinition(name: string): Promise<McpToolDefinition | undefined> {
-  const catalog = await getMcpToolCatalog();
-  return catalog.find((t) => t.name === name);
-}
-
 /**
  * Knowledge-search tools used to ground a retry. Never wrapped in their own
  * retry logic (that would recurse) and never chosen as the RAG tool for

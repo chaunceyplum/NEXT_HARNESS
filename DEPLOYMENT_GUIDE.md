@@ -22,7 +22,8 @@ Create `.env.local`. `MCP_ENDPOINT_URL` is required, but so is at least one
 chat-model provider now — the harness runs an LLM agent loop
 (`lib/llm/agent.ts`), not just an MCP passthrough. See
 `ENVIRONMENT_VARIABLES.md` for the full list (Bedrock/Anthropic/OpenAI
-options, tool-shortlisting embeddings, `ADOBE_TOOLS_ONLY`, the RAG judge).
+options, tool-shortlisting embeddings, `ADOBE_TOOLS_ONLY`, the RAG judge,
+orchestrator-worker mode).
 Minimum to actually run something:
 ```bash
 MCP_ENDPOINT_URL=https://xxx.execute-api.us-east-1.amazonaws.com/mcp
@@ -65,9 +66,16 @@ you also need at least one chat-model provider's credentials (Bedrock's
 `AWS_*` vars by default, per step 3 above) or the app will fail at request
 time, not at startup. See `ENVIRONMENT_VARIABLES.md` for the full list.
 
-### Option A: Vercel (Recommended)
+### Option A: Vercel
 
-**Easiest for Next.js, free tier available**
+**Easiest for Next.js, free tier available — with caveats**
+
+Runs, their event buffers and paused approvals live in the memory of the
+process that started them (`lib/run-jobs.ts`, `lib/llm/approvals.ts`). On
+serverless hosting a request to reconnect, cancel or approve can land on a
+different instance than the run, and a long run can outlive the function's
+time limit. The harness is built and tested as one long-lived Node process
+(EC2 under PM2, or Docker), so prefer Option B or C.
 
 #### Step 1: Push to GitHub
 ```bash
@@ -176,37 +184,22 @@ sudo systemctl restart nginx
 
 **Portable, easy to scale**
 
-#### Step 1: Create Dockerfile
-```dockerfile
-FROM node:20-alpine
+The repo ships a multi-stage `Dockerfile` (a standalone `runner` image for
+the app, and an `evals` image) and a `compose.yaml`. Configuration comes
+from `.env.local`, injected when the container starts and never baked into
+the image.
 
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci --only=production
-
-COPY . .
-RUN npm run build
-
-EXPOSE 3000
-
-CMD ["npm", "run", "start"]
-```
-
-#### Step 2: Build Image
 ```bash
-docker build -t mcp-harness:latest .
+cp .env.local.example .env.local   # then fill it in
+docker compose up -d --build       # the app on http://localhost:3000
+docker compose ps                  # "healthy" once GET /api/models answers
+docker compose logs -f app
 ```
 
-#### Step 3: Run Container
-```bash
-docker run -p 3000:3000 \
-  -e MCP_ENDPOINT_URL="https://xxx.execute-api.us-east-1.amazonaws.com/mcp" \
-  mcp-harness:latest
-```
-
-#### Step 4: Access
-Visit `http://localhost:3000`
+Set `HARNESS_PORT=8080` to publish on a different host port. Config changes
+need `docker compose up -d --force-recreate app`; code changes need
+`--build`. See the Docker section of `README.md` for running evals in a
+container and for Bedrock with an EC2 instance role.
 
 ---
 
@@ -272,6 +265,12 @@ sudo certbot certonly --standalone -d your-domain.com
 - [ ] Monitor server resources
 
 ### Security
+- [ ] **Access is restricted.** The harness has no built-in authentication
+      (the old `proxy.ts` gate was removed), so anyone who can reach it can
+      run the agent with your Adobe/GitHub credentials. Put it on a private
+      network or behind an authenticating proxy / load balancer. If you rely
+      on `HARNESS_APPROVERS` or `HARNESS_ADMINS`, that proxy must set the
+      `x-harness-user` header and strip any copy the client sends.
 - [ ] HTTPS enabled (for production)
 - [ ] Firewall properly configured
 - [ ] Rate limiting enabled (optional)
@@ -352,7 +351,7 @@ vercel logs
 pm2 logs mcp-harness
 
 # Docker
-docker logs <container-id>
+docker compose logs -f app
 ```
 
 ### Metrics to Monitor
@@ -457,10 +456,8 @@ checking both of these before assuming an IAM permissions problem.
 
 - **Overview & architecture**: See `README.md` and `ARCHITECTURE.md`
 - **Environment variables**: See `ENVIRONMENT_VARIABLES.md`
-- Everything else in this repo's root (`START_HERE.md`,
-  `HARNESS_REQUIREMENTS.md`, `MCP_TOOLS_REFERENCE.md`,
-  `IMPLEMENTATION_SUMMARY.md`, etc.) describes an earlier, abandoned design
-  and is marked superseded at the top — historical context only.
+- **Weekly operating habits**: See `OPERATIONS.md`
+- **Evals**: See `evals/README.md`
 
 ---
 

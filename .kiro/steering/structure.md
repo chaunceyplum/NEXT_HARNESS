@@ -28,10 +28,13 @@ lib/
     run-budget.ts         Token / cost / time budgets and loop detection
     answer-critic.ts, rag-judge.ts, guardrails.ts
     launch-*.ts           Launch (Reactor) brief parsing, plan template, examples, validation gate
+    coordinator.ts        Orchestrator: runs independent plan steps as concurrent workers, replans, synthesises
+    worker.ts             One worker agent loop for a plan step, with a narrowed tool set
+    agent-slots.ts        Process-wide cap on concurrent agent loops
+    orchestration-config.ts  ORCHESTRATION / MAX_WORKERS / ... env readers
 evals/                    vitest eval suites, fixtures, baseline.json
 scripts/                  Eval baseline check, run-to-fixture
 .kiro/specs/              Kiro feature specs (requirements, design, tasks)
 ```
 
-New orchestration modules go in `lib/llm/`: `coordinator.ts`, `worker.ts`,
-`agent-slots.ts`, each with a sibling `*.test.ts`.
+Unit tests live next to the module they cover as `*.test.ts`.

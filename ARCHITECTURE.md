@@ -14,8 +14,10 @@ flowchart TD
         UI["UI<br/>app/page.tsx"]
         Agent["Agent loop<br/>POST /api/build → lib/llm/agent.ts<br/>shortlists tools, loops the model up to maxSteps,<br/>retries failed calls, skips permission errors outright"]
         Catalog["Tool catalog<br/>tool-catalog.ts — drops non-Adobe<br/>tools by default"]
+        Coordinator["Coordinator (optional)<br/>coordinator.ts — runs independent<br/>plan steps as concurrent workers"]
         UI --> Agent
         Agent -.-> Catalog
+        Agent -.->|"ORCHESTRATION on +<br/>parallel plan"| Coordinator
     end
 
     LLM["LLM Providers<br/>Amazon Bedrock (default)<br/>Anthropic direct · OpenAI"]
@@ -61,9 +63,25 @@ relevant tools, then lets the model decide what to call and in what order,
 up to a configurable step budget.
 
 - Model, tool-shortlist size, and step limit are all tunable per request
+- Runs are in-process jobs (`lib/run-jobs.ts`): the browser can disconnect
+  and reconnect, and paused approvals wait in memory, so the app must run as
+  one long-lived Node process
+- No built-in authentication: deploy it on a private network or behind an
+  authenticating proxy (see `ENVIRONMENT_VARIABLES.md`, Access control)
 - There is no full, end-to-end build tool — every request resolves through
   specific, narrow tool calls the agent chooses itself
 - Runs on AWS EC2 under PM2; also ships to Vercel or Docker
+
+## Orchestrator-worker mode (optional)
+
+Off by default (`ORCHESTRATION=off`). When it's on and a run's plan has
+steps whose dependencies are done, the coordinator (`lib/llm/coordinator.ts`)
+runs them as concurrent worker agents (`lib/llm/worker.ts`), each with its
+own narrowed tool set, step cap and share of the run's budget. A failed
+step triggers a bounded replan, and one synthesis call writes the final
+answer. Everything stays in the same Node process: a process-wide slot pool
+(`lib/llm/agent-slots.ts`, `MAX_AGENT_LOOPS`) caps concurrent agent loops
+across all runs, and traces nest run → coordinator → worker.
 
 ## MCP Server (AEC_MCP, separate system)
 

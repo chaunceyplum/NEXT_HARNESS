@@ -443,24 +443,6 @@ export interface ApiError {
   details?: Record<string, unknown>;
 }
 
-export class MCPError extends Error {
-  constructor(
-    message: string,
-    public code: string = 'MCP_ERROR',
-    public details?: Record<string, unknown>
-  ) {
-    super(message);
-    this.name = 'MCPError';
-  }
-}
-
-export class ValidationError extends Error {
-  constructor(message: string, public details?: Record<string, unknown>) {
-    super(message);
-    this.name = 'ValidationError';
-  }
-}
-
 // ============================================================================
 // Eval history (lib/eval-store.ts, written by evals/lib/report.ts)
 // ============================================================================

@@ -70,23 +70,27 @@ guessing at file contents.
 
 ---
 
-## Authentication (`proxy.ts`, `lib/auth.ts`) — required in production
+## Access control (`lib/auth.ts`)
 
-Every page and API route is authenticated. **A production build with none
-of these set refuses every request with 503**, so set at least one before
-deploying. `next dev` allows unauthenticated requests.
+**The harness has no built-in authentication.** The `proxy.ts` auth gate
+was removed, so every page and API route is open to anyone who can reach
+the app, and the agent acts with the MCP server's Adobe/GitHub credentials.
+Run it on a private network or behind something that authenticates (a VPN,
+an authenticating load balancer or reverse proxy).
+
+Route handlers take the caller's name from the `x-harness-user` header
+(`anonymous` when absent) for audit entries, approvals, feedback and the
+kill switch. Only a proxy in front of the app should set that header, and
+it must strip any copy the client sends; otherwise it is whatever the
+client claims.
 
 | Variable | Format | Purpose |
 | --- | --- | --- |
-| `HARNESS_AUTH_USERS` | `alice:password,bob:password` | HTTP Basic for people. The browser shows its sign-in prompt. |
-| `HARNESS_API_TOKENS` | `ci-bot:token,cron:token` | `Authorization: Bearer <token>` for scripts. The name before `:` is the identity. |
-| `HARNESS_APPROVERS` | `alice,carol` | Only these users may approve or deny paused tool calls. Unset = any signed-in user. |
-| `HARNESS_AUTH_DISABLED` | `true` | Explicit opt-out, e.g. behind a VPN or an authenticating load balancer. |
+| `HARNESS_APPROVERS` | `alice,carol` | Only these `x-harness-user` names may approve or deny paused tool calls. Unset = anyone. |
+| `HARNESS_ADMINS` | `alice,bob` | Only these names may engage or release the kill switch. Unset = anyone. |
 
-The authenticated name is passed to route handlers in the `x-harness-user`
-header. The proxy overwrites any value a client sends. Approval decisions
-record who made them. Serve the app over HTTPS: Basic credentials are
-only base64-encoded.
+Both lists restrict nothing unless a proxy in front of the app sets
+`x-harness-user`.
 
 ## LLM Provider Variables (agent — lib/llm/)
 
@@ -175,7 +179,11 @@ DEFAULT_MODEL=anthropic:sonnet
 OPENAI_API_KEY=sk-...
 OPENAI_CHEAP_MODEL_ID=gpt-4o-mini
 OPENAI_BALANCED_MODEL_ID=gpt-4o
+OPENAI_EXPENSIVE_MODEL_ID=<model-id>
 ```
+
+There are no OpenAI defaults: each `openai:<tier>` entry is registered only
+when its `OPENAI_<TIER>_MODEL_ID` is set.
 
 ### Model routing (optional — `lib/llm/model-router.ts`)
 
@@ -291,6 +299,22 @@ run's `stopReason` is set so the UI flags the answer as partial.
 
 A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
 
+## Extended thinking (`lib/llm/agent.ts`)
+
+- `THINKING_BUDGET_TOKENS` (unset = off): turns on extended thinking for
+  Claude models (Anthropic direct or on Bedrock). Values below `1024` are
+  ignored. Older models get a fixed budget of this many tokens; newer ones
+  that reject fixed budgets get adaptive thinking instead. A request's
+  `thinkingBudget` takes precedence.
+
+## Tool catalog scope and tool policy (`lib/llm/tool-catalog.ts`, `lib/llm/tool-policy.ts`)
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `ADOBE_TOOLS_ONLY` | `true` | Drops AWS, Databricks, Snowflake and other non-Adobe tools from the catalog before the agent sees it. GitHub's `msb_github_*` tools are always kept. Only the exact value `false` disables the filter. |
+| `BUILD_POLICY` | `full` | `read-only` removes every write and destructive tool from the tool set, so the model cannot call them at all. A request's `policy` can tighten this, never loosen it. |
+| `TOOL_DRY_RUN` | `false` | `true` makes destructive tools return a description of what they would do instead of calling the MCP server. A request's `dryRun: true` can turn it on, never off. |
+
 ## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
 
 These calls pause for Approve/Deny on the home page before they run:
@@ -318,8 +342,8 @@ These calls pause for Approve/Deny on the home page before they run:
   releases it.
 - `AGENT_DISABLED=true`: durable off switch. It can't be released from the
   UI.
-- `HARNESS_ADMINS=alice,bob`: only these users (from the auth proxy's
-  `x-harness-user`) may engage or release it. Unset means anyone.
+- `HARNESS_ADMINS=alice,bob`: only these users (from `x-harness-user`, see
+  Access control above) may engage or release it. Unset means anyone.
 - `GET /api/admin/kill-switch` lists active runs.
 
 ## Guardrails (`lib/llm/guardrails.ts`)
@@ -516,28 +540,6 @@ are now always `false`/`NULL` on new rows.
 
 ---
 
-## Optional Variables
-
-### `NEXT_PUBLIC_API_URL` (OPTIONAL)
-
-**What it is**: Public URL for your harness API (used by frontend)
-
-**Default value**: `http://localhost:3000` (development)
-
-**Use cases**:
-- **Local development**: `http://localhost:3000`
-- **Staging**: `https://staging-harness.example.com`
-- **Production**: `https://harness.example.com`
-
-**Example**:
-```
-NEXT_PUBLIC_API_URL=https://harness.example.com
-```
-
-**Note**: Variables prefixed with `NEXT_PUBLIC_` are exposed to the browser
-
----
-
 ## Setup Instructions
 
 ### Local Development
@@ -549,8 +551,8 @@ cat > .env.local << 'EOF'
 # Required: Get from MCP SAM deployment
 MCP_ENDPOINT_URL=https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp
 
-# Optional: API URL (defaults to http://localhost:3000)
-NEXT_PUBLIC_API_URL=http://localhost:3000
+# Required: at least one chat-model provider (Bedrock is the default)
+AWS_REGION=us-east-1
 EOF
 ```
 
@@ -577,7 +579,7 @@ cd NEXT_HARNESS
 
 cat > .env.local << 'EOF'
 MCP_ENDPOINT_URL=https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp
-NEXT_PUBLIC_API_URL=https://your-domain.com
+AWS_REGION=us-east-1   # plus credentials, or an instance role
 EOF
 
 npm run build
@@ -586,28 +588,14 @@ npm run start
 
 ### Docker Deployment
 
-Pass environment variables when running:
+`compose.yaml` reads `.env.local` (copy `.env.local.example`) and injects it
+when the container starts; nothing is baked into the image:
 
 ```bash
-docker run -p 3000:3000 \
-  -e MCP_ENDPOINT_URL="https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp" \
-  -e NEXT_PUBLIC_API_URL="https://harness.example.com" \
-  mcp-harness:latest
+docker compose up -d --build
 ```
 
-Or in docker-compose.yml:
-
-```yaml
-version: '3'
-services:
-  harness:
-    image: mcp-harness:latest
-    ports:
-      - "3000:3000"
-    environment:
-      MCP_ENDPOINT_URL: https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp
-      NEXT_PUBLIC_API_URL: https://harness.example.com
-```
+Or with plain Docker: `docker run --env-file .env.local -p 3000:3000 next-harness:latest`.
 
 ### Self-Hosted Deployment
 
@@ -615,7 +603,7 @@ Create `.env.local`:
 
 ```bash
 MCP_ENDPOINT_URL=https://abc123xyz.execute-api.us-east-1.amazonaws.com/mcp
-NEXT_PUBLIC_API_URL=https://your-domain.com
+AWS_REGION=us-east-1   # plus credentials, or an instance role
 ```
 
 Then start:
@@ -727,7 +715,10 @@ Then load with: `next build --env-file=.env.production`
 | `OPENAI_CHEAP_MODEL_ID` / `_BALANCED_` / `_EXPENSIVE_` | ❌ No | string | `gpt-4o-mini` |
 | `MODEL_REGISTRY_JSON` | ❌ No | JSON array | see LLM Provider Variables section |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL_ID` | ❌ No | string | `openai` / `text-embedding-3-small` |
-| `NEXT_PUBLIC_API_URL` | ❌ No | URL | `https://harness.example.com` |
+| `ADOBE_TOOLS_ONLY` | ❌ No | `false` to disable | `true` (default) |
+| `BUILD_POLICY` / `TOOL_DRY_RUN` | ❌ No | string / bool | `read-only` / `true` |
+| `THINKING_BUDGET_TOKENS` | ❌ No | number | `8000` |
+| `HARNESS_APPROVERS` / `HARNESS_ADMINS` | ❌ No | comma list | `alice,carol` |
 
 ---
 
@@ -746,6 +737,7 @@ Then load with: `next build --env-file=.env.production`
 - Share endpoints publicly
 - Use HTTP (insecure)
 - Expose endpoint in client-side code
+- Expose the harness itself to the internet without an authenticating proxy in front (it has no auth of its own)
 
 ---
 
@@ -798,68 +790,19 @@ npm run dev
 # 4. Open http://localhost:3000
 ```
 
-### Production Setup (Vercel)
-
-```bash
-# 1. Push to GitHub
-git push origin main
-
-# 2. On Vercel Dashboard:
-#    - Go to Settings → Environment Variables
-#    - Add MCP_ENDPOINT_URL
-#    - Deploy
-
-# 3. Application live at your-project.vercel.app
-```
-
 ### Docker Quick Setup
 
 ```bash
-docker run -p 3000:3000 \
-  -e MCP_ENDPOINT_URL="https://your-endpoint/mcp" \
-  mcp-harness:latest
+cp .env.local.example .env.local   # fill in MCP_ENDPOINT_URL and a model provider
+docker compose up -d --build
 ```
 
 ---
 
-## Advanced Configuration
-
-### Multiple MCP Endpoints (A/B Testing)
-
-```bash
-# .env.local
-MCP_ENDPOINT_URL=https://primary-endpoint/mcp
-MCP_ENDPOINT_URL_FALLBACK=https://fallback-endpoint/mcp
-```
-
-Then update `lib/mcp-client.ts` to use fallback on failure.
-
-### Custom API Base Path
-
-```bash
-# If your API isn't at /api
-NEXT_PUBLIC_API_BASE=/v1/api
-```
-
-### Development vs Production
-
-Use `.env.development` and `.env.production`:
-
-**.env.development**:
-```
-MCP_ENDPOINT_URL=https://localhost:3001/mcp
-NODE_ENV=development
-```
-
-**.env.production**:
-```
-MCP_ENDPOINT_URL=https://api.example.com/mcp
-NODE_ENV=production
-```
+That's the minimum: `MCP_ENDPOINT_URL` plus one chat-model provider. The
+sections below cover everything else the app reads.
 
 ---
-
-That's it! Just set `MCP_ENDPOINT_URL` and you're good to go. 🚀
 
 ## Tracing and versioning (`lib/tracing.ts`, `lib/version.ts`)
 
