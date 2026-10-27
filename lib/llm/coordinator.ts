@@ -49,7 +49,7 @@ import {
 import { classifyTool } from './tool-policy';
 import { RunLedger, type BudgetStopReason, type BudgetUsage, type RunBudgetLimits } from './run-budget';
 import type { McpToolDefinition } from './tool-catalog';
-import { runWorker, workerTools, type SharedRunState, type WorkerRecord, type WorkerResult } from './worker';
+import { runWorker, workerTools, WriteLock, type SharedRunState, type WorkerRecord, type WorkerResult } from './worker';
 import {
   launchParallelWrites,
   maxReplans as envMaxReplans,
@@ -209,6 +209,9 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     tracerParent: coordinatorRef,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.launchGate ? { launchGate: input.launchGate } : {}),
+    // Requirement 3.4: serialise the write calls themselves, not only the
+    // workers whose declared step tool writes.
+    ...(config.serialWrites ? { writeLock: new WriteLock() } : {}),
     ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
     ...(input.toolApproval ? { toolApproval: input.toolApproval } : {}),
     ...(input.approvalReasons ? { approvalReasons: input.approvalReasons } : {}),

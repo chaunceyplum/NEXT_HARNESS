@@ -35,6 +35,8 @@ import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from '.
 import type { PlanStep } from './planner';
 import type { RunLedger } from './run-budget';
 import { workerBudgetShare } from './orchestration-config';
+import { classifyTool } from './tool-policy';
+import { effectiveToolCall } from './tool-discovery';
 
 // ── Worker result / record types ───────────────────────────────────────────────
 // Re-homed to lib/types.ts in Task 8.1 (the record/resume phase) so the run
@@ -162,6 +164,56 @@ export function workerTools(all: ToolSet, step: PlanStep, catalog: McpToolDefini
   return out;
 }
 
+// ── Serial writes ────────────────────────────────────────────────────────────────
+
+/**
+ * One run-wide lock that write/destructive tool calls take while they
+ * execute (Requirement 3.4). The coordinator already avoids starting two
+ * workers whose declared step tools write, but every worker also gets its
+ * platform-group siblings and call_tool, so a worker for a read step can
+ * still write. Taking this lock around the call itself keeps writes in a
+ * Launch run one at a time whatever tool a worker reaches for. Approval
+ * happens before execute, so a call waiting on a person does not hold it.
+ */
+export class WriteLock {
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(fn);
+    // The next caller waits for this one to settle, whatever its outcome.
+    this.tail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+}
+
+/** Wrap every tool so its write/destructive calls (call_tool unwrapped) run under `lock`. */
+export function serialiseWrites(tools: ToolSet, lock: WriteLock): ToolSet {
+  const out: ToolSet = {};
+  for (const [name, t] of Object.entries(tools)) {
+    const execute = t.execute;
+    if (!execute) {
+      out[name] = t;
+      continue;
+    }
+    out[name] = {
+      ...t,
+      execute: (input: unknown, options: Parameters<typeof execute>[1]) => {
+        const call = effectiveToolCall(name, input);
+        if (classifyTool(call.toolName) === 'read') return execute(input, options);
+        return lock.run(async () => {
+          // The worker may have been aborted while this call waited its turn.
+          options?.abortSignal?.throwIfAborted();
+          return execute(input, options);
+        });
+      },
+    } as Tool;
+  }
+  return out;
+}
+
 // ── runWorker ────────────────────────────────────────────────────────────────────
 
 /**
@@ -174,6 +226,8 @@ export interface SharedRunState {
   ledger: RunLedger;
   /** One LaunchValidationGate per run, shared by every worker (Requirement 9.1). */
   launchGate?: LaunchValidationGate;
+  /** Set when writes must run one at a time (Launch, LAUNCH_PARALLEL_WRITES off) (Requirement 3.4). */
+  writeLock?: WriteLock;
   /** The run's abort signal; each worker links a child controller to it (Requirement 9.3). */
   abortSignal?: AbortSignal;
   /** Health tracker, shared so a model that fails in one worker is routed around in the next. */
@@ -329,7 +383,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
 
   const narrowed = workerTools(input.tools, step, input.catalog);
   const tools: ToolSet = {
-    ...narrowed,
+    ...(shared.writeLock ? serialiseWrites(narrowed, shared.writeLock) : narrowed),
     [REPORT_RESULT_TOOL]: reportResultTool(step.id, (r) => {
       reported = r;
     }),

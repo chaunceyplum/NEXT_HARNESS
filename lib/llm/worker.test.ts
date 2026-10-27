@@ -79,7 +79,7 @@ vi.mock('./model-registry', () => {
   };
 });
 
-const { runWorker, workerTools, reportResultTool, buildWorkerBrief, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS } = await import('./worker');
+const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS } = await import('./worker');
 const { ModelHealthTracker } = await import('./model-health');
 const { RunLedger, resolveBudget } = await import('./run-budget');
 const { LaunchValidationGate } = await import('./launch-validation');
@@ -178,6 +178,45 @@ describe('workerTools', () => {
     const all = makeToolSet(['reactor_create_data_element', 'find_tools', 'call_tool']);
     const tools = workerTools(all, makeStep({ tool: null }), makeCatalog(['reactor_create_data_element']));
     expect(Object.keys(tools).sort()).toEqual(['call_tool', 'find_tools']);
+  });
+});
+
+describe('serialiseWrites (Req 3.4)', () => {
+  it('runs write calls one at a time, including writes through call_tool, and leaves reads alone', async () => {
+    const log: string[] = [];
+    const gates = new Map<string, () => void>();
+    const slow = (name: string) =>
+      tool({
+        description: name,
+        inputSchema: jsonSchema<Record<string, unknown>>({ type: 'object' }),
+        execute: (_input: unknown) =>
+          new Promise((resolve) => {
+            log.push(`start ${name}`);
+            gates.set(name, () => {
+              log.push(`end ${name}`);
+              resolve({ ok: name });
+            });
+          }),
+      });
+    const tools = serialiseWrites(
+      { reactor_create_rule: slow('reactor_create_rule'), call_tool: slow('call_tool'), reactor_list_rules: slow('reactor_list_rules') },
+      new WriteLock()
+    );
+    const opts = { toolCallId: 'c', messages: [] } as never;
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+
+    const a = tools.reactor_create_rule.execute!({}, opts);
+    const b = tools.call_tool.execute!({ tool_name: 'reactor_create_data_element', arguments: {} }, opts);
+    const c = tools.reactor_list_rules.execute!({}, opts);
+    await tick();
+    // The direct write and the read started; the proxied write waits its turn.
+    expect([...log].sort()).toEqual(['start reactor_create_rule', 'start reactor_list_rules']);
+    gates.get('reactor_create_rule')!();
+    await tick();
+    expect(log).toContain('start call_tool');
+    gates.get('call_tool')!();
+    gates.get('reactor_list_rules')!();
+    await Promise.all([a, b, c]);
   });
 });
 
