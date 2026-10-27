@@ -2,9 +2,9 @@
 
 Task 10 wires orchestration into the two comparison eval suites. Scripted tools now answer by name + input so concurrent workers get stable results; `EVAL_ORCHESTRATE=off|on|both` runs each fixture single-agent, orchestrated, or both with a side-by-side table and a rollout-bar verdict; two new agent fixtures exercise independent steps and a forced worker failure; and `agent_orchestrated` / `launch_orchestrated` baseline keys track the coordinator path separately. The code is clean and the CI evidence shows tsc, lint, 562 tests, and build all green, plus both suites run end to end with the baseline gate passing.
 
-Watch for: **(confirmed, blocking)** Task 10.5 requires the run results to be recorded against the rollout bar *in the introduction of `requirements.md`*. The commit does not touch `requirements.md`; the rollout-bar results live only in `ci-task10.md`. The named destination is unchanged, so the task is marked `[x]` against an acceptance criterion it does not meet.
+Watch for: **(resolved)** Task 10.5 requires the run results recorded against the rollout bar *in the introduction of `requirements.md`*. The original Task 10 commit (`36dc914`) left `requirements.md` untouched, recording the results only in `ci-task10.md`. Follow-up commit `c9d3f04` adds a "Rollout check results (Task 10.5)" section to the requirements intro with the comparison table and the "stays off by default" verdict, closing the gap. Nothing else outstanding.
 
-**Verdict**: NEEDS_CHANGES
+**Verdict**: APPROVED
 
 ## High-level view
 
@@ -14,12 +14,12 @@ The suite plumbing threads a `mode` ('off' | 'on') through each trial. `withOrch
 
 The rollout-bar logic is isolated in `compareToRolloutBar` and fails conservatively — a missing wall-clock or cost figure fails that part rather than passing it — which is the right default and is covered by tests. The two new fixtures grade structurally (no judge), so the mode comparison does not hinge on model wording; the forced-failure fixture bounds the failing read to the worker step budget.
 
-The gap is in 10.5's recording requirement. The harness side is complete and the results were produced, but they were written to `ci-task10.md` instead of the introduction of `requirements.md`, which 10.5 names explicitly. On the measured run orchestration does not clear the bar (0%→0% pass parity, −6% wall-clock vs the −30% needed, cost n/a), so it correctly stays off by default — but that verdict is not reflected where the task says to put it.
+10.5's recording requirement is now met. The harness produces the comparison, and commit `c9d3f04` records it in the introduction of `requirements.md` — the "Rollout check results (Task 10.5)" section carries the Launch comparison table (0%→0% pass parity, 25.2s→23.8s median, cost n/a) and the verdict that orchestration does not clear the bar and stays off by default. On the measured run that verdict is correct.
 
 <details>
-<summary>Issues (1)</summary>
+<summary>Issues (0)</summary>
 
-1. **Rollout results not recorded in requirements.md** — 10.5 requires the both-mode results to be recorded against the rollout bar in the introduction of `requirements.md`; they exist only in `ci-task10.md` and `requirements.md` is untouched by the commit. Add the measured off/on comparison and the "stays off by default" verdict to the rollout-bar section of the requirements intro, then re-mark 10.5.
+No outstanding issues. The one blocking gap — rollout results missing from the `requirements.md` introduction — was closed by follow-up commit `c9d3f04`.
 
 </details>
 
@@ -48,7 +48,7 @@ The back-compat claim holds: `unmatched = responses.filter((r) => !r.when)` and 
 
 ### Rollout recording destination (10.5)
 
-This is the blocking gap. The harness produces the comparison and the CI evidence records it: Launch 0%→0% pass parity, median wall-clock −6% (needs ≤ −30%), cost n/a, so orchestration does not clear the bar and correctly stays off by default. But 10.5's acceptance text is specific — results recorded "in the introduction of `requirements.md`" — and the requirements intro still contains only the *definition* of the rollout bar (lines 29–31), with no recorded run and no verdict. `git show --stat` confirms the commit does not modify `requirements.md`. The evidence exists in the wrong file relative to what the task names. (confirmed)
+Originally the blocking gap: the harness produced the comparison and `ci-task10.md` recorded it, but 10.5's acceptance text names the introduction of `requirements.md`, which commit `36dc914` left holding only the rollout-bar *definition*. Follow-up commit `c9d3f04` adds a "Rollout check results (Task 10.5)" section to that introduction with the Launch comparison table (pass 0%→0%, median 25.2s→23.8s, cost n/a) and the verdict — orchestration does not clear the bar (−6% wall-clock vs the −30% needed) and stays off by default (`ORCHESTRATION=off`). The evidence now lives where the task names it. (confirmed)
 
 The Launch pass rate being 0% in both modes makes the parity vacuous (the model stopped to ask for IDs and made almost no tool calls), which the CI note acknowledges. That is a model-behavior observation, not a code defect, and does not by itself block — the rollout machinery works and fails conservatively. The block is the recording location, not the numbers. (confirmed)
 
@@ -68,7 +68,8 @@ The Launch pass rate being 0% in both modes makes the parity vacuous (the model 
 - `lib/types.ts` / `lib/eval-labels.ts` — `EvalSuite` union + labels for the two keys
 - `.env.local.example` / `ENVIRONMENT_VARIABLES.md` — document `EVAL_ORCHESTRATE`
 - `.kiro/specs/orchestrator-workers/tasks.md` — Task 10 marked done
-- `.agents/tasks/ci-task10.md` — CI + eval evidence (holds the rollout results that 10.5 wants in requirements.md)
+- `.agents/tasks/ci-task10.md` — CI + eval evidence
+- `.kiro/specs/orchestrator-workers/requirements.md` — (commit `c9d3f04`) "Rollout check results (Task 10.5)" section in the intro
 
-Full diff: `git show 36dc914`
+Full diff: `git show 36dc914` (code) and `git show c9d3f04` (rollout recording fix)
 </details>
