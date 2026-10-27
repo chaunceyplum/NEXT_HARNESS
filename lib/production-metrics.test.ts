@@ -1,5 +1,18 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { computeProductionMetrics, isSuccess, type ProductionRunRow } from './production-metrics';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// The store, for the load cache: counts the runs query and returns no rows.
+let runQueries = 0;
+vi.mock('./mcp-sql', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./mcp-sql')>()),
+  execSql: async (sql: string) => {
+    if (sql.includes('FROM harness_agent_runs')) runQueries++;
+    return { sql, returned_rows: true, rows: [] };
+  },
+}));
+
+const { computeProductionMetrics, isSuccess, loadProductionRuns } = await import('./production-metrics');
+const { saveFeedback } = await import('./run-quality');
+type ProductionRunRow = import('./production-metrics').ProductionRunRow;
 
 afterEach(() => {
   delete process.env.MODEL_PRICING_JSON;
@@ -69,5 +82,18 @@ describe('computeProductionMetrics', () => {
 
   it('handles an empty window', () => {
     expect(computeProductionMetrics([])).toMatchObject({ runs: 0, successRate: 0, escalationRate: 0, needsReview: [] });
+  });
+});
+
+describe('loadProductionRuns', () => {
+  it('reuses a window for a minute, and reloads at once after a new rating', async () => {
+    await loadProductionRuns(7);
+    await loadProductionRuns(7);
+    expect(runQueries).toBe(1);
+    await loadProductionRuns(30);
+    expect(runQueries).toBe(2);
+    await saveFeedback('run-1', -1, undefined, 'alice');
+    await loadProductionRuns(7);
+    expect(runQueries).toBe(3);
   });
 });

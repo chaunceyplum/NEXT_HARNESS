@@ -52,8 +52,15 @@ export function ensureQualityTable(): Promise<void> {
   return ensureTablePromise;
 }
 
+/** Bumped on every rating or judgment, so cached metrics (production-metrics.ts) know to reload. */
+let version = 0;
+export function qualityVersion(): number {
+  return version;
+}
+
 export async function saveFeedback(runId: string, rating: 1 | -1, comment: string | undefined, user: string): Promise<void> {
   await ensureQualityTable();
+  version++;
   await execSql(
     `INSERT INTO ${TABLE} (run_id, rating, comment, rated_by, rated_at)
      VALUES (${sqlStr(runId)}, ${sqlInt(rating)}, ${sqlStrOrNull(comment)}, ${sqlStr(user)}, now())
@@ -67,6 +74,7 @@ export async function saveJudgment(
   j: { pass: boolean; scores: unknown; notes: string; judgedBy: string }
 ): Promise<void> {
   await ensureQualityTable();
+  version++;
   await execSql(
     `INSERT INTO ${TABLE} (run_id, judge_pass, judge_scores, judge_notes, judged_by, judged_at)
      VALUES (${sqlStr(runId)}, ${j.pass ? 'TRUE' : 'FALSE'}, ${sqlJsonOrNull(j.scores)}, ${sqlStrOrNull(j.notes)}, ${sqlStr(j.judgedBy)}, now())

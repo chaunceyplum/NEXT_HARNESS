@@ -13,7 +13,7 @@
 import { percentile } from './eval-metrics';
 import { execSql, sqlInt } from './mcp-sql';
 import { estimateCostUsd } from './llm/pricing';
-import { ensureQualityTable } from './run-quality';
+import { ensureQualityTable, qualityVersion } from './run-quality';
 
 export interface ProductionRunRow {
   id: string;
@@ -197,8 +197,28 @@ export function computeProductionMetrics(rows: ProductionRunRow[]): ProductionMe
 
 const MAX_RUNS = 5_000;
 
+/**
+ * How long a window's rows are reused. The query unpacks every step's tool
+ * results for up to MAX_RUNS runs, so reloading /metrics shouldn't rerun it.
+ * A new rating or judgment reloads at once (qualityVersion).
+ */
+const RUNS_CACHE_TTL_MS = 60_000;
+const runsCache = new Map<number, { expires: number; version: number; rows: Promise<ProductionRunRow[]> }>();
+
 /** Runs from the last `days` days (newest first, capped), joined with their quality signals. */
-export async function loadProductionRuns(days: number): Promise<ProductionRunRow[]> {
+export function loadProductionRuns(days: number): Promise<ProductionRunRow[]> {
+  const version = qualityVersion();
+  const hit = runsCache.get(days);
+  if (hit && hit.version === version && hit.expires > Date.now()) return hit.rows;
+  const rows = queryProductionRuns(days);
+  runsCache.set(days, { expires: Date.now() + RUNS_CACHE_TTL_MS, version, rows });
+  rows.catch(() => {
+    if (runsCache.get(days)?.rows === rows) runsCache.delete(days); // don't keep a failure
+  });
+  return rows;
+}
+
+async function queryProductionRuns(days: number): Promise<ProductionRunRow[]> {
   await ensureQualityTable();
   const result = await execSql(
     `SELECT r.id, r.created_at, r.description, r.model, r.status, r.duration_ms,
