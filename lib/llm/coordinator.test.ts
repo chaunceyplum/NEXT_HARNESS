@@ -268,6 +268,21 @@ describe('runOrchestrated scheduling', () => {
   });
 });
 
+describe('runOrchestrated resume (Req 12.4)', () => {
+  it('runs only the steps that are not done and hands seeded results to dependants', async () => {
+    const plan = makePlan([{ id: 1, status: 'done' }, { id: 2, dependsOn: [1] }]);
+    const run = runOrchestrated(
+      baseInput(plan, { seedResults: [{ stepId: 1, status: 'done', summary: 'earlier', ids: { a: 'A1' } }] })
+    );
+    await tick();
+    expect([...pending.keys()]).toEqual([2]);
+    expect(pending.get(2)!.input.deps).toEqual([expect.objectContaining({ stepId: 1, summary: 'earlier' })]);
+    finishDone(2);
+    await run;
+    expect(startOrder).toEqual([2]);
+  });
+});
+
 describe('runOrchestrated reasoning steps (Req 3.7)', () => {
   it('folds tool:null steps into their dependant so a Launch-shaped plan reaches its write step', async () => {
     // The Launch backbone: two reads, three reasoning steps, then the write.

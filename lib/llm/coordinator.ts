@@ -130,6 +130,8 @@ export function shouldOrchestrate(flag: OrchestrationFlag, requested: boolean | 
 export interface OrchestratorInput {
   /** The plan tracker from prepareRun; its plan is mutated as steps complete / are revised. */
   tracker: PlanTracker;
+  /** Results of steps already done before this run started — a resumed run's done steps (Requirement 12.4). */
+  seedResults?: WorkerResult[];
   config: OrchestrationConfig;
   /** The run's policy-filtered tool set; narrowed per step by workerTools. */
   tools: ToolSet;
@@ -245,7 +247,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
 
   // WorkerResult per done/failed step, so a dependant's brief carries its
   // dependencies' results (Requirement 4.4) and synthesis sees every outcome.
-  const results = new Map<number, WorkerResult>();
+  const results = new Map<number, WorkerResult>((input.seedResults ?? []).map((r) => [r.stepId, r]));
   const workers: WorkerRecord[] = [];
   // The next attempt number for a step (a restart would bump it; a fresh
   // worker for a revised step starts at 1).

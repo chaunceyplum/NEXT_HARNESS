@@ -9,7 +9,7 @@
  */
 
 import { getExecution } from '@/lib/execution-store';
-import { resumeContextFrom, startBuildRun } from '@/lib/build-run';
+import { resumeContextFrom, resumePlanFrom, startBuildRun } from '@/lib/build-run';
 import { runsBlockedReason } from '@/lib/kill-switch';
 import { getJob, streamJob } from '@/lib/run-jobs';
 import type { ApiError } from '@/lib/types';
@@ -29,10 +29,14 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   }
 
   // The original request, minus anything from an earlier resume, plus this run's history.
-  const { resumeContext: _previous, ...original } = record.request;
+  const { resumeContext: _previous, resumePlan: _previousPlan, ...original } = record.request;
   void _previous;
+  void _previousPlan;
+  // An orchestrated run continues its stored plan, running only the steps
+  // that are not done (Requirement 12.4).
+  const resumePlan = resumePlanFrom(record);
   const job = startBuildRun(
-    { ...original, resumeContext: resumeContextFrom(record), resumedFrom: record.id },
+    { ...original, resumeContext: resumeContextFrom(record), resumedFrom: record.id, ...(resumePlan ? { resumePlan } : {}) },
     request.headers.get('x-harness-user') || 'anonymous'
   );
   return streamJob(job);

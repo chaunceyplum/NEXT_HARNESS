@@ -16,7 +16,7 @@ import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { AgentStepDTO, BuildRequest, ExecutionRecord, WorkerRecord } from '@/lib/types';
+import type { AgentStepDTO, BuildRequest, ExecutionRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
@@ -61,9 +61,9 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
     // interrupted orchestrated run keeps its finished workers.
     const workers = new Map<string, WorkerRecord>();
     let orchestrated = false;
-    // Mid-run checkpoints don't track replan count incrementally; the final
-    // record takes the authoritative value from the run result.
-    const replans = 0;
+    // The plan as last emitted, checkpointed so an interrupted orchestrated run
+    // can be resumed from its done steps (Requirement 12.4).
+    let latestPlan: PlanInfo | undefined;
     // Streamed tokens pass through the output guardrail too. A credential can
     // span several deltas, so text is held back until it's safe to redact.
     const textRedactor = createStreamRedactor();
@@ -95,7 +95,12 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
           usage: {},
           // Requirement 12.2: checkpoint the workers mid-run so an orchestrated
           // run that is interrupted can be resumed with its finished steps.
-          ...(orchestrated ? { orchestrated: true, replans, workers: [...workers.values()] } : {}),
+          ...(latestPlan ? { plan: latestPlan } : {}),
+          // Only the coordinator revises an orchestrated plan (workers have no
+          // revise_plan), so each version past the first is one replan.
+          ...(orchestrated
+            ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
+            : {}),
           checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
         },
       });
@@ -200,7 +205,11 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         actor,
         // Plan-and-execute: the plan, then every status change and revision
         planFirst: req.planFirst,
-        onPlan: (plan) => push({ type: 'plan', plan: redactOutput(plan) }),
+        ...(req.resumePlan ? { resumePlan: req.resumePlan } : {}),
+        onPlan: (plan) => {
+          latestPlan = redactOutput(plan);
+          push({ type: 'plan', plan: latestPlan });
+        },
         ...(req.requirePlanApproval
           ? {
               approvePlan: async (plan) => {
@@ -432,4 +441,31 @@ function orchestratedResumeContext(record: ExecutionRecord): string {
     remaining.length ? `Steps still to do:\n${remaining.join('\n')}` : 'All planned steps had completed.',
     'Continue from where it stopped. Reuse the ids above instead of recreating those objects; if you are unsure whether a change took effect, check with a read tool first. In your final answer, cover the whole request, including what the earlier attempt did.',
   ].join('\n\n');
+}
+
+/**
+ * The plan an orchestrated run resumes with (Requirement 12.4): done steps
+ * kept with their WorkerResults, every other step reset to pending so the
+ * coordinator runs only those. Undefined for single-agent records, records
+ * with no stored plan, or plans with nothing done.
+ */
+export function resumePlanFrom(record: ExecutionRecord): ResumePlan | undefined {
+  const plan = record.result?.plan;
+  if (!record.result?.orchestrated || !plan) return undefined;
+  const byWorker = new Map<string, NonNullable<WorkerRecord['result']>>();
+  for (const w of record.result.workers ?? []) if (w.result) byWorker.set(w.workerId, w.result);
+
+  const results: ResumePlan['results'] = [];
+  const steps = plan.steps.map((step) => {
+    if (step.status === 'done') {
+      const r = step.workerId ? byWorker.get(step.workerId) : undefined;
+      if (r) results.push({ ...r, stepId: step.id });
+      return { ...step };
+    }
+    const { workerId: _w, ...rest } = step;
+    void _w;
+    return { ...rest, status: 'pending' as const };
+  });
+  if (!steps.some((s) => s.status === 'done')) return undefined;
+  return { plan: { ...plan, steps }, results };
 }

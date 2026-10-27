@@ -74,6 +74,7 @@ import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type Approval
 import { acquireLoopSlot } from './agent-slots';
 import { orchestrationConfig, runOrchestrated, shouldOrchestrate } from './coordinator';
 import { orchestrationFlag } from './orchestration-config';
+import type { ResumePlan } from '../types';
 import type { WorkerRecord } from './worker';
 import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../tracing';
 import { promptVersion, toolsetVersion, appVersion } from '../version';
@@ -251,6 +252,13 @@ export interface RunAgentOptions {
   actor?: string;
   /** Plan before acting (planner.ts). */
   planFirst?: boolean;
+  /**
+   * Resuming an orchestrated run (Requirement 12.4): the stored plan (done
+   * steps kept, the rest pending) and the done steps' WorkerResults. Used as
+   * the run's plan instead of planning again; the coordinator starts with
+   * these results so only the unfinished steps run.
+   */
+  resumePlan?: ResumePlan;
   /** Called with the plan when it's made and whenever a step's status or the plan changes. */
   onPlan?: (plan: Plan) => void;
   /** Ask a person to approve the plan before anything runs. A denial ends the run without tool calls. */
@@ -1012,11 +1020,14 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   // request's orchestrate option is ignored entirely (Requirement 2.2).
   const orchestrationRequested =
     orchestrationFlag() !== 'off' && (orchestrationFlag() === 'always' ? opts.orchestrate !== false : opts.orchestrate === true);
-  const planFirst = opts.planFirst || orchestrationRequested;
+  const planFirst = opts.planFirst || orchestrationRequested || Boolean(opts.resumePlan);
   let planTracker: PlanTracker | undefined;
   if (planFirst) {
     const planModel = startModelKey || getDefaultModelKey();
-    if (launchMode) {
+    if (opts.resumePlan) {
+      // Continue the interrupted run's plan rather than planning again.
+      planTracker = new PlanTracker(structuredClone(opts.resumePlan.plan), (p) => opts.onPlan?.(p));
+    } else if (launchMode) {
       // Launch-tagging runs follow a fixed grounding backbone (read property
       // state -> ground against the KB -> generate -> validate -> populate the
       // library), so the plan is seeded deterministically from the Launch
@@ -1502,6 +1513,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
     const orchestrated = await runOrchestrated({
       tracker: planTracker,
       config,
+      ...(opts.resumePlan ? { seedResults: opts.resumePlan.results } : {}),
       tools: ctx.tools,
       catalog,
       ...(planningRetrieval?.context ? { knowledge: planningRetrieval.context } : {}),

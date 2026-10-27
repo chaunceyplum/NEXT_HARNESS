@@ -133,6 +133,14 @@ export interface BuildRequest {
   resumeContext?: string;
   /** Server-set: the interrupted run this one resumes. */
   resumedFrom?: string;
+  /**
+   * Server-set when the interrupted run was orchestrated (Requirement 12.4):
+   * its plan with the done steps kept and every other step reset to pending,
+   * plus the WorkerResults of the done steps. The resumed run executes this
+   * plan instead of making a new one, so only the unfinished steps run.
+   * Never read from the body.
+   */
+  resumePlan?: ResumePlan;
   /** Set by the server from the authenticated user; ignored if sent in the body. */
   requestedBy?: string;
   /** Token budget for this run. Can only tighten RUN_MAX_TOKENS. */
@@ -333,6 +341,12 @@ export type BuildStreamEvent =
   | { type: 'error'; error: string; code?: string };
 
 /** Mirrors lib/llm/planner.ts Plan, for client code. */
+/** A stored orchestrated plan to continue (BuildRequest.resumePlan). */
+export interface ResumePlan {
+  plan: PlanInfo;
+  results: WorkerResult[];
+}
+
 export interface PlanInfo {
   goal: string;
   version: number;

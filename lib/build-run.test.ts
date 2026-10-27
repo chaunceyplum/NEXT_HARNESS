@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resumeContextFrom } from './build-run';
+import { resumeContextFrom, resumePlanFrom } from './build-run';
 import type { ExecutionRecord } from './types';
 
 const record = (steps: ExecutionRecord['result'] extends infer R ? (R extends { steps: infer S } ? S : never) : never): ExecutionRecord => ({
@@ -106,5 +106,61 @@ describe('resumeContextFrom', () => {
     // The not-done step is listed as still to do.
     expect(text).toMatch(/Steps still to do:[\s\S]*Step 3 \(create rule\)/);
     expect(text).toMatch(/do not redo these/);
+  });
+});
+
+describe('resumePlanFrom (Requirement 12.4)', () => {
+  const record = (over: Partial<NonNullable<ExecutionRecord['result']>> = {}): ExecutionRecord => ({
+    id: 'run-3',
+    createdAt: '2026-09-29T00:00:00Z',
+    description: 'd',
+    model: 'm',
+    allowFullBuild: false,
+    status: 'interrupted',
+    durationMs: 1,
+    request: { description: 'd' },
+    result: {
+      runId: 'run-3',
+      finalText: '',
+      steps: [],
+      toolsConsidered: [],
+      finishReason: 'running',
+      usage: {},
+      orchestrated: true,
+      plan: {
+        goal: 'g',
+        version: 1,
+        steps: [
+          { id: 1, description: 'a', tool: 't', expectedOutput: 'e', dependsOn: [], status: 'done', workerId: 'run-3:w1:1' },
+          { id: 2, description: 'b', tool: 't', expectedOutput: 'e', dependsOn: [1], status: 'running', workerId: 'run-3:w2:1' },
+          { id: 3, description: 'c', tool: 't', expectedOutput: 'e', dependsOn: [], status: 'failed', workerId: 'run-3:w3:1' },
+        ],
+      },
+      workers: [
+        {
+          workerId: 'run-3:w1:1', stepId: 1, attempt: 1, modelKey: 'm', status: 'done', steps: [],
+          startedAt: '2026-09-29T00:00:00Z', budgetUsage: { tokens: 1, durationMs: 1 },
+          result: { stepId: 1, status: 'done', summary: 'did a', ids: { x: 'X1' } },
+        },
+      ],
+      ...over,
+    },
+  });
+
+  it('keeps done steps with their results and resets the rest to pending', () => {
+    const resume = resumePlanFrom(record());
+    expect(resume?.plan.steps.map((s) => [s.id, s.status, s.workerId])).toEqual([
+      [1, 'done', 'run-3:w1:1'],
+      [2, 'pending', undefined],
+      [3, 'pending', undefined],
+    ]);
+    expect(resume?.results).toEqual([{ stepId: 1, status: 'done', summary: 'did a', ids: { x: 'X1' } }]);
+  });
+
+  it('is undefined for single-agent records and plans with nothing done', () => {
+    expect(resumePlanFrom(record({ orchestrated: undefined }))).toBeUndefined();
+    const none = record();
+    none.result!.plan!.steps[0].status = 'pending';
+    expect(resumePlanFrom(none)).toBeUndefined();
   });
 });
