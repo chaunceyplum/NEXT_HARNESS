@@ -27,11 +27,12 @@ export function shortHash(input: string): string {
  * path does not. `launchMode` adds the Launch/Reactor object-model block, only
  * on Launch-tagging runs. `publishEnabled` (only meaningful with launchMode)
  * swaps in the publish state machine for a run started with a publishTarget.
+ * `segmentMode` adds the segment/audience grounding (segment-context.ts).
  * Each defaults false, keeping the eval's historical value stable — a
  * non-publish/non-launch run's fingerprint does not shift.
  */
 export function promptVersion(
-  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean } = {}
+  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean } = {}
 ): string {
   return shortHash(
     systemPrompt({
@@ -39,6 +40,7 @@ export function promptVersion(
       memory: opts.memory ?? false,
       launchMode: opts.launchMode ?? false,
       publishEnabled: opts.publishEnabled ?? false,
+      segmentMode: opts.segmentMode ?? false,
     })
   );
 }

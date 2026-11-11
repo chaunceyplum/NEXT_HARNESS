@@ -1,0 +1,87 @@
+{
+  "id": "segment-field-check-rejection-recovery",
+  "note": "The pre-write field check (lib/llm/segment-validation.ts) rejects a create whose PQL names a field the sandbox lacks, and names the real one. The scripted first response is that rejection; the agent must fix the field from the error and create once more, not drop the condition or give up.",
+  "category": "recovery",
+  "request": "Create a segment called \"CBM members\" for Comcast Business Mobile customers.",
+  "tools": [
+    {
+      "name": "aep_find_profile_fields",
+      "description": "Find AEP profile fields by business words before writing a segment's PQL. Searches the sandbox's full profile schema (every field group in the profile union) by field title, name and description, and returns real field paths with their type, title, description and allowed values. Use the returned paths in PQL exactly as given.",
+      "responses": [
+        {
+          "result": {
+            "fieldCount": 742,
+            "complete": true,
+            "matches": [
+              {
+                "path": "_taplondonptrsd.isCBMmember",
+                "type": "string",
+                "title": "Is CBM member",
+                "description": "Y/N flag"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_segments",
+      "description": "List AEP segment definitions in the configured sandbox.",
+      "responses": [
+        {
+          "result": {
+            "segments": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_create_segment",
+      "description": "Create a new AEP segment definition.",
+      "responses": [
+        {
+          "error": "Pre-write segment check failed (validation error) — no segment was created. The PQL references field(s) not in the sandbox's profile schema:\n- _taplondonptrsd.cbmMember (did you mean: _taplondonptrsd.isCBMmember?)\nLook the fields up with aep_find_profile_fields and use only paths it returns.",
+          "when": {
+            "pql_expression": "cbmMember"
+          }
+        },
+        {
+          "result": {
+            "id": "seg-901",
+            "name": "CBM members",
+            "expression": {
+              "type": "PQL",
+              "format": "pql/text",
+              "value": "_taplondonptrsd.isCBMmember = \"Y\""
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "adobe_create_segment"
+    ],
+    "maxCallsPerTool": {
+      "adobe_create_segment": 2
+    },
+    "argsContain": [
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.isCBMmember"
+      },
+      {
+        "tool": "adobe_create_segment",
+        "contains": "CBM members"
+      }
+    ],
+    "finishReasons": [
+      "stop"
+    ],
+    "criteria": [
+      "The answer reports the segment as created (seg-901) using the isCBMmember field.",
+      "The answer does not claim success for a segment that was rejected."
+    ]
+  }
+}

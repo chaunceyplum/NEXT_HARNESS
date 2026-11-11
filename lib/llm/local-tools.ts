@@ -19,6 +19,8 @@
 
 import type { McpToolDefinition } from './tool-catalog';
 import { envTimeoutMs, fetchWithTimeout } from '../fetch-timeout';
+import { loadProfileCatalog } from './profile-catalog';
+import { searchProfileFields } from './segment-context';
 
 const READ_FILE_SCHEMA = {
   type: 'object',
@@ -42,7 +44,28 @@ const LIST_DIRECTORY_SCHEMA = {
   required: ['owner', 'repo'],
 };
 
+const FIND_PROFILE_FIELDS_SCHEMA = {
+  type: 'object',
+  properties: {
+    query: {
+      type: 'string',
+      description: 'Business words for the fields you need, e.g. "CBM member", "SEP eligible", "company size", "do not contact".',
+    },
+    sandbox: { type: 'string', description: 'AEP sandbox name. Omit for the default sandbox.' },
+    limit: { type: 'number', description: 'Most matches to return (default 15, max 50).' },
+  },
+  required: ['query'],
+};
+
 export const LOCAL_TOOL_DEFINITIONS: McpToolDefinition[] = [
+  {
+    // Not an MCP tool: built from adobe_get_union_schema + the field groups it
+    // lists (profile-catalog.ts), the same catalog segment writes are checked against.
+    name: 'aep_find_profile_fields',
+    description:
+      "Find AEP profile fields by business words before writing a segment's PQL. Searches the sandbox's full profile schema (every field group in the profile union) by field title, name and description, and returns real field paths with their type, title, description and allowed values. Use the returned paths in PQL exactly as given.",
+    inputSchema: FIND_PROFILE_FIELDS_SCHEMA,
+  },
   {
     name: 'github_read_file',
     description:
@@ -149,12 +172,34 @@ async function githubListDirectory(args: Record<string, unknown>, signal?: Abort
   });
 }
 
+async function findProfileFields(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const query = requireString(args, 'query');
+  const sandbox = typeof args.sandbox === 'string' && args.sandbox.trim() ? args.sandbox.trim() : undefined;
+  const limit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? args.limit : 15;
+  const catalog = await loadProfileCatalog(sandbox, { signal });
+  if (catalog.fields.length === 0) {
+    throw new Error(`Could not read the profile schema${sandbox ? ` for sandbox "${sandbox}"` : ''}: ${catalog.error ?? 'no fields found'}`);
+  }
+  const matches = searchProfileFields(catalog.fields, query, limit);
+  return {
+    query,
+    fieldCount: catalog.fields.length,
+    // A partial read can miss a field: say so rather than imply "no such field".
+    complete: catalog.complete,
+    ...(catalog.complete ? {} : { warning: `Some field groups could not be read (${catalog.error}); a field missing here may still exist.` }),
+    matches,
+    ...(matches.length === 0 ? { note: 'No field matches these words. Try other words, or treat the condition as having no field.' } : {}),
+  };
+}
+
 export async function executeLocalTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   switch (name) {
     case 'github_read_file':
       return githubReadFile(args, signal);
     case 'github_list_directory':
       return githubListDirectory(args, signal);
+    case 'aep_find_profile_fields':
+      return findProfileFields(args, signal);
     default:
       throw new Error(`Unknown local tool: ${name}`);
   }

@@ -1,0 +1,7 @@
+{
+  "id": "business-language-audience-fields",
+  "request": "Which profile fields can I use to target companies with more than 50 employees?",
+  "expectedTools": [
+    "aep_find_profile_fields"
+  ]
+}

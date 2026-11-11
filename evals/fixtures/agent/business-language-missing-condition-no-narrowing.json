@@ -1,0 +1,100 @@
+{
+  "id": "business-language-missing-condition-no-narrowing",
+  "note": "One condition (region) has no field in the sandbox. The segment grounding forbids silently narrowing: a segment of every CB Internet member would be a wrong (broader) audience that looks right. The agent must create nothing and name the condition it cannot express.",
+  "category": "business-language",
+  "request": "Create an audience of CB Internet members in the Northeast region who we're allowed to email.",
+  "tools": [
+    {
+      "name": "aep_find_profile_fields",
+      "description": "Find AEP profile fields by business words before writing a segment's PQL. Searches the sandbox's full profile schema (every field group in the profile union) by field title, name and description, and returns real field paths with their type, title, description and allowed values. Use the returned paths in PQL exactly as given.",
+      "responses": [
+        {
+          "result": {
+            "fieldCount": 742,
+            "complete": true,
+            "matches": [
+              {
+                "path": "_taplondonptrsd.isCBMmember",
+                "type": "string",
+                "title": "Is CBM member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.isCBInternetMember",
+                "type": "string",
+                "title": "Is CB Internet Member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.hasSEP",
+                "type": "string",
+                "title": "Has SEP",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.SEPeligible",
+                "type": "string",
+                "title": "SEP eligible",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.doNotContact",
+                "type": "string",
+                "title": "Do not contact",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.validEmailFlag",
+                "type": "string",
+                "title": "Valid email address flag",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.companySize",
+                "type": "integer",
+                "title": "Company Size",
+                "description": "Number of employees at the customer company"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_segments",
+      "description": "List AEP segment definitions in the configured sandbox.",
+      "responses": [
+        {
+          "result": {
+            "segments": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_create_segment",
+      "description": "Create a new AEP segment definition."
+    },
+    {
+      "name": "destination_create_dataflow",
+      "description": "Create a destination dataflow that activates AEP audiences to a connected destination."
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "aep_find_profile_fields"
+    ],
+    "mustNotCall": [
+      "adobe_create_segment",
+      "destination_create_dataflow"
+    ],
+    "finishReasons": [
+      "stop"
+    ],
+    "criteria": [
+      "The answer says no segment was created.",
+      "The answer names the region / Northeast condition as the one with no matching field.",
+      "The answer asks how to handle the region condition (or offers options such as dropping it or naming a field) rather than guessing."
+    ]
+  }
+}

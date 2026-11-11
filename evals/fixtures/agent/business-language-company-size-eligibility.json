@@ -1,0 +1,136 @@
+{
+  "id": "business-language-company-size-eligibility",
+  "note": "\"Companies with more than 50 employees\" names no field and sounds like a company-level entity; on this tenant company size is a profile attribute. The glossary context says so. Also \"eligible for SEP\" is the SEP eligibility flag, not Has SEP.",
+  "category": "business-language",
+  "request": "Create a segment of companies with more than 50 employees that are eligible for SEP but don't have it yet.",
+  "tools": [
+    {
+      "name": "aep_find_profile_fields",
+      "description": "Find AEP profile fields by business words before writing a segment's PQL. Searches the sandbox's full profile schema (every field group in the profile union) by field title, name and description, and returns real field paths with their type, title, description and allowed values. Use the returned paths in PQL exactly as given.",
+      "responses": [
+        {
+          "result": {
+            "fieldCount": 742,
+            "complete": true,
+            "matches": [
+              {
+                "path": "_taplondonptrsd.isCBMmember",
+                "type": "string",
+                "title": "Is CBM member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.isCBInternetMember",
+                "type": "string",
+                "title": "Is CB Internet Member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.hasSEP",
+                "type": "string",
+                "title": "Has SEP",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.SEPeligible",
+                "type": "string",
+                "title": "SEP eligible",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.doNotContact",
+                "type": "string",
+                "title": "Do not contact",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.validEmailFlag",
+                "type": "string",
+                "title": "Valid email address flag",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.companySize",
+                "type": "integer",
+                "title": "Company Size",
+                "description": "Number of employees at the customer company"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_segments",
+      "description": "List AEP segment definitions in the configured sandbox.",
+      "responses": [
+        {
+          "result": {
+            "segments": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_create_segment",
+      "description": "Create a new AEP segment definition.",
+      "responses": [
+        {
+          "result": {
+            "id": "seg-901",
+            "name": "SEP upsell, 50+ employees",
+            "expression": {
+              "type": "PQL",
+              "format": "pql/text",
+              "value": "_taplondonptrsd.companySize > 50 and _taplondonptrsd.SEPeligible = \"Y\" and _taplondonptrsd.hasSEP = \"N\""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "destination_create_dataflow",
+      "description": "Create a destination dataflow that activates AEP audiences to a connected destination."
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "aep_find_profile_fields",
+      "adobe_create_segment"
+    ],
+    "mustNotCall": [
+      "destination_create_dataflow"
+    ],
+    "callOrder": [
+      [
+        "aep_find_profile_fields",
+        "adobe_create_segment"
+      ]
+    ],
+    "maxCallsPerTool": {
+      "adobe_create_segment": 1
+    },
+    "argsContain": [
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.companySize"
+      },
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.SEPeligible"
+      },
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.hasSEP"
+      }
+    ],
+    "finishReasons": [
+      "stop"
+    ],
+    "criteria": [
+      "The segment's PQL requires companySize greater than 50.",
+      "It requires SEPeligible = \"Y\" and excludes current SEP holders (hasSEP = \"N\" or hasSEP != \"Y\").",
+      "The answer does not claim the audience was activated or sent anywhere."
+    ]
+  }
+}

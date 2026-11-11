@@ -314,6 +314,7 @@ A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
 | `ADOBE_TOOLS_ONLY` | `true` | Drops AWS, Databricks, Snowflake and other non-Adobe tools from the catalog before the agent sees it. GitHub's `msb_github_*` tools are always kept. Only the exact value `false` disables the filter. |
 | `BUILD_POLICY` | `full` | `read-only` removes every write and destructive tool from the tool set, so the model cannot call them at all. A request's `policy` can tighten this, never loosen it. |
 | `TOOL_DRY_RUN` | `false` | `true` makes destructive tools return a description of what they would do instead of calling the MCP server. A request's `dryRun: true` can turn it on, never off. |
+| `SEGMENT_FIELD_CHECK` | on | Before `adobe_create_segment` / `adobe_update_segment` runs, every field path in its PQL is checked against the sandbox's profile schema (`lib/llm/segment-validation.ts`), and a call naming a field the sandbox doesn't have is rejected with nothing created. Fails open when the schema can't be read completely. `off` disables the check. |
 
 ## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
 
@@ -717,6 +718,7 @@ Then load with: `next build --env-file=.env.production`
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL_ID` | ❌ No | string | `openai` / `text-embedding-3-small` |
 | `ADOBE_TOOLS_ONLY` | ❌ No | `false` to disable | `true` (default) |
 | `BUILD_POLICY` / `TOOL_DRY_RUN` | ❌ No | string / bool | `read-only` / `true` |
+| `SEGMENT_FIELD_CHECK` | ❌ No | `off` to disable | on (default) |
 | `THINKING_BUDGET_TOKENS` | ❌ No | number | `8000` |
 | `HARNESS_APPROVERS` / `HARNESS_ADMINS` | ❌ No | comma list | `alice,carol` |
 

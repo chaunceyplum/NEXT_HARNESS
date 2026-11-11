@@ -191,6 +191,22 @@ prompt (`lib/llm/agent-core.ts`) has no confirm-before-destructive rule, and
 this case exists to show that gap, not to be tuned around. Add a case for
 every red-team finding.
 
+## Business-language audience cases
+
+Fixtures with `category: "business-language"` (ported from intake_harness's
+plain-language audience eval) phrase an audience the way a marketer does
+("Security Edge Preferred customers", "companies with more than 50
+employees") against scripted fields titled with the business's
+abbreviations ("Has SEP", "Is CBM member") and holding Y/N strings. They
+test the segment grounding (`lib/llm/segment-context.ts`): the glossary
+mapping, `= "Y"` / `!= "Y"` flag handling, looking fields up with
+`aep_find_profile_fields` before writing PQL, and refusing to build a
+narrower audience when one condition has no field.
+`segment-field-check-rejection-recovery` scripts the pre-write field check's
+rejection (`lib/llm/segment-validation.ts`) and checks the agent fixes the
+field from the error. Scripted tools bypass the live check itself, which is
+covered by `lib/llm/segment-validation.test.ts`.
+
 ## Viewing results
 
 Every run is also saved (best-effort) to `harness_eval_runs` (with its

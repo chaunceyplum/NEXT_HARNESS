@@ -72,6 +72,28 @@ up to a configurable step budget.
   specific, narrow tool calls the agent chooses itself
 - Runs on AWS EC2 under PM2; also ships to Vercel or Docker
 
+## Segment / audience grounding
+
+AEP segments get the same kind of domain grounding Launch runs do, ported
+from intake_harness, which built noticeably better audiences:
+
+- **Prompt** (`lib/llm/segment-context.ts`): a request that mentions
+  segments, audiences or PQL (or sets `segmentMode`) adds a block to the
+  cached system prompt: real-fields-only and don't-narrow-the-audience rules,
+  the business glossary (CBM, SEP, how Y/N flags read), and Adobe's PQL
+  function reference (`docs/pql-reference.md`, compiled into
+  `lib/llm/pql-reference.ts`; the knowledge base has no PQL syntax).
+- **Field lookup**: the local tool `aep_find_profile_fields` searches the
+  sandbox's full profile catalog by business words. The catalog
+  (`lib/llm/profile-catalog.ts`) is built from the field groups the profile
+  union lists, since the union view itself carries no inline fields.
+- **Pre-write check** (`lib/llm/segment-validation.ts`): before
+  `adobe_create_segment` / `adobe_update_segment` runs, each field path in
+  its PQL is checked against that catalog; one the sandbox provably doesn't
+  have rejects the call with nothing created. It fails open when the catalog
+  can't be read completely, and doesn't judge paths it can't resolve
+  statically (array filters, `select ... from xEvent`, map keys).
+
 ## Orchestrator-worker mode (optional)
 
 Off by default (`ORCHESTRATION=off`). When it's on and a run's plan has

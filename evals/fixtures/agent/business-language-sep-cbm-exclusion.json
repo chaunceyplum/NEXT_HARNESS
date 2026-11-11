@@ -1,0 +1,136 @@
+{
+  "id": "business-language-sep-cbm-exclusion",
+  "note": "Ported from intake_harness's plain-language audience eval. The request names products by their spelled-out names and an exclusion; the fields are titled with abbreviations (Has SEP, Is CBM member) and hold Y/N strings. Grounding under test: the business glossary (SEP, CBM), Y/N flags compared to \"Y\", exclusions written != \"Y\", and looking fields up before writing PQL.",
+  "category": "business-language",
+  "request": "Build an audience of Security Edge Preferred customers who also have Comcast Business Mobile, excluding anyone on the do-not-contact list.",
+  "tools": [
+    {
+      "name": "aep_find_profile_fields",
+      "description": "Find AEP profile fields by business words before writing a segment's PQL. Searches the sandbox's full profile schema (every field group in the profile union) by field title, name and description, and returns real field paths with their type, title, description and allowed values. Use the returned paths in PQL exactly as given.",
+      "responses": [
+        {
+          "result": {
+            "fieldCount": 742,
+            "complete": true,
+            "matches": [
+              {
+                "path": "_taplondonptrsd.isCBMmember",
+                "type": "string",
+                "title": "Is CBM member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.isCBInternetMember",
+                "type": "string",
+                "title": "Is CB Internet Member",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.hasSEP",
+                "type": "string",
+                "title": "Has SEP",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.SEPeligible",
+                "type": "string",
+                "title": "SEP eligible",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.doNotContact",
+                "type": "string",
+                "title": "Do not contact",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.validEmailFlag",
+                "type": "string",
+                "title": "Valid email address flag",
+                "description": "Y/N flag"
+              },
+              {
+                "path": "_taplondonptrsd.companySize",
+                "type": "integer",
+                "title": "Company Size",
+                "description": "Number of employees at the customer company"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_list_segments",
+      "description": "List AEP segment definitions in the configured sandbox.",
+      "responses": [
+        {
+          "result": {
+            "segments": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "adobe_create_segment",
+      "description": "Create a new AEP segment definition.",
+      "responses": [
+        {
+          "result": {
+            "id": "seg-901",
+            "name": "SEP + CBM, contactable",
+            "expression": {
+              "type": "PQL",
+              "format": "pql/text",
+              "value": "_taplondonptrsd.hasSEP = \"Y\" and _taplondonptrsd.isCBMmember = \"Y\" and _taplondonptrsd.doNotContact != \"Y\""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "destination_create_dataflow",
+      "description": "Create a destination dataflow that activates AEP audiences to a connected destination."
+    }
+  ],
+  "expected": {
+    "mustCall": [
+      "aep_find_profile_fields",
+      "adobe_create_segment"
+    ],
+    "mustNotCall": [
+      "destination_create_dataflow"
+    ],
+    "callOrder": [
+      [
+        "aep_find_profile_fields",
+        "adobe_create_segment"
+      ]
+    ],
+    "maxCallsPerTool": {
+      "adobe_create_segment": 1
+    },
+    "argsContain": [
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.hasSEP"
+      },
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.isCBMmember"
+      },
+      {
+        "tool": "adobe_create_segment",
+        "contains": "_taplondonptrsd.doNotContact"
+      }
+    ],
+    "finishReasons": [
+      "stop"
+    ],
+    "criteria": [
+      "The created segment's PQL compares the SEP and CBM flags to the string \"Y\" (not to true).",
+      "The do-not-contact exclusion is written as doNotContact != \"Y\" (so profiles with no value stay in), not as = \"N\" or != \"N\".",
+      "The answer states the rule in plain English alongside the PQL or segment id."
+    ]
+  }
+}

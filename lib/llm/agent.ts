@@ -57,6 +57,7 @@ import { applyActionGuards } from './guardrails';
 import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
 import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from './launch-plan';
+import { resolveSegmentMode, SEGMENT_ALWAYS_ON_TOOLS } from './segment-context';
 import { launchExamplesPreamble, selectLaunchExamples } from './launch-examples';
 import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
 import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from './launch-validation';
@@ -231,6 +232,13 @@ export interface RunAgentOptions {
    */
   launchMode?: boolean;
   /**
+   * Segment/audience grounding (segment-context.ts): the PQL reference, the
+   * business glossary and the real-fields-only rules in the system prompt,
+   * plus the field-lookup and segment tools always on. Unset → inferred from
+   * a request that mentions segments, audiences or PQL; false forces it off.
+   */
+  segmentMode?: boolean;
+  /**
    * Publish target for a Launch run (lib/types.ts BuildRequest.publishTarget).
    * ABSENT → the run stops at a populated library (byte-identical to today).
    * PRESENT → the run may publish the library, but ONLY to a development or
@@ -329,10 +337,15 @@ function buildSystemMessage(
   toolDiscovery: boolean,
   memory = false,
   launchMode = false,
-  publishEnabled = false
+  publishEnabled = false,
+  segmentMode = false
 ): SystemModelMessage {
   const providerOptions = cacheMarker(modelKey);
-  return { role: 'system', content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled }), ...(providerOptions ? { providerOptions } : {}) };
+  return {
+    role: 'system',
+    content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled, segmentMode }),
+    ...(providerOptions ? { providerOptions } : {}),
+  };
 }
 
 /** The provider's cache breakpoint for a message, or undefined when the model can't cache. */
@@ -633,7 +646,8 @@ async function selectLiveTools(
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
   ragJudgmentSink: RagJudgmentSink,
   platformFilter?: string[],
-  launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate }
+  launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate },
+  segmentMode = false
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   // Knowledge tools are always kept in the catalog, whatever platforms are
@@ -648,9 +662,13 @@ async function selectLiveTools(
   // always-on set (launch-plan.ts) so they don't have to win a shortlist slot
   // on embedding similarity, and expand the shortlist query with the parsed
   // requirements so the rest of the relevant tools still get ranked.
-  const alwaysOnNames = launch?.enabled
-    ? [...ALWAYS_ON_TOOLS, ...launchAlwaysOnTools(launch.publishEnabled === true)]
-    : ALWAYS_ON_TOOLS;
+  // Segment runs likewise keep the profile-field lookup and the segment tools
+  // always on (segment-context.ts), so the "only real fields" rule is usable.
+  const alwaysOnNames = [
+    ...ALWAYS_ON_TOOLS,
+    ...(launch?.enabled ? launchAlwaysOnTools(launch.publishEnabled === true) : []),
+    ...(segmentMode ? SEGMENT_ALWAYS_ON_TOOLS : []),
+  ];
   const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name) && !isKnowledgeTool(name));
   const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
@@ -963,6 +981,9 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   // (both via launch-plan.ts). Explicit opts.launchMode wins; otherwise it's
   // inferred from a Launch/Reactor platform filter.
   const launchMode = resolveLaunchMode(opts);
+  // Segment/audience run: grounds the prompt with the PQL reference + glossary
+  // and keeps the field lookup + segment tools always on (segment-context.ts).
+  const segmentMode = resolveSegmentMode(opts, userInput);
   // A Launch run started with a publishTarget may publish the populated
   // library to a dev/staging environment. This flag swaps the grounding to
   // the publish state machine, widens the seed plan + always-on tools to the
@@ -1018,7 +1039,8 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
       opts.platformFilter,
-      { enabled: launchMode, publishEnabled, requirements, gate: launchGate }
+      { enabled: launchMode, publishEnabled, requirements, gate: launchGate },
+      segmentMode
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {
@@ -1164,7 +1186,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   // how the prompt is actually built: live runs include the find_tools rule.
   const toolDiscovery = 'find_tools' in tools;
   const versions = {
-    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode, publishEnabled }),
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode, publishEnabled, segmentMode }),
     toolset: toolsetVersion(
       Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
     ),
@@ -1187,6 +1209,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       tools,
       launchMode,
       publishEnabled,
+      segmentMode,
       userMessage,
       startModelKey,
       // A pinned model (opts.modelKey, not "auto"/routed) disables same-tier fallback.
@@ -1233,6 +1256,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
     tools,
     launchMode,
     publishEnabled,
+    segmentMode,
     userMessage,
     startModelKey,
     isPinned,
@@ -1308,7 +1332,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled),
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled, segmentMode === true),
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
@@ -1592,6 +1616,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         // tool set calls through the same instance); passing it here also tells
         // each worker it is in a gated Launch run (worker launchMode grounding).
         ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
+        ...(ctx.segmentMode ? { segmentMode: true } : {}),
         ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
         ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
         approvalReasons: ctx.approvalReasons,

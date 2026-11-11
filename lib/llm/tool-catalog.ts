@@ -23,6 +23,7 @@ import {
 } from './tool-call-cache';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from './commit-validation';
+import { validateBeforeSegmentWrite } from './segment-validation';
 import type { LaunchValidationGate } from './launch-validation';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from './rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
@@ -82,7 +83,7 @@ export function isAdobeScoped(name: string): boolean {
  * others are exact name matches. All groups are enabled by default.
  */
 export const PLATFORM_GROUPS: Record<string, string[]> = {
-  'AEP Core': ['adobe_'],
+  'AEP Core': ['adobe_', 'aep_find_profile_fields'],
   'CJA': ['cja_'],
   'Tags (Reactor)': ['reactor_'],
   'Data Prep': ['dataprep_'],
@@ -132,12 +133,17 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
   return catalogPromise;
 }
 
-/** Local tools first (no network round-trip), then the MCP server — with the pre-commit syntax check gating msb_github_commit_code either way. */
+/**
+ * Local tools first (no network round-trip), then the MCP server — with the
+ * pre-commit syntax check gating msb_github_commit_code, and the profile-field
+ * check gating adobe_create_segment / adobe_update_segment (segment-validation.ts).
+ */
 async function callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (isLocalTool(toolName)) {
     return executeLocalTool(toolName, args, signal);
   }
   await validateBeforeCommit(toolName, args);
+  await validateBeforeSegmentWrite(toolName, args, { signal });
   return callMcpTool(toolName, args, { signal });
 }
 
