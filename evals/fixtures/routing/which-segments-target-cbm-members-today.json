@@ -1,0 +1,5 @@
+{
+  "id": "which-segments-target-cbm-members-today",
+  "request": "Which segments do we already have that target CBM members?",
+  "expected": "lookup"
+}

@@ -150,4 +150,5 @@ add fixtures.
 - [`OPERATIONS.md`](./OPERATIONS.md): the weekly habits that keep the agent good in production
 - [`evals/README.md`](./evals/README.md): the eval suites and how to add fixtures
 - [`docs/reactor-tools-context.md`](./docs/reactor-tools-context.md): full reference for the Reactor/Launch tools (a compact version is injected in Launch mode)
+- [`docs/pql-reference.md`](./docs/pql-reference.md): Adobe's PQL function reference, injected on segment/audience runs (regenerate `lib/llm/pql-reference.ts` with `node scripts/gen-pql-reference.mjs` after editing)
 - `.kiro/`: product/tech steering and the orchestrator-workers spec

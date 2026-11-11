@@ -19,6 +19,7 @@ import type { RagJudgmentSink, RagJudgmentEntry } from './tool-catalog';
 import type { RouteDecision } from './model-router';
 import type { AttrValue, SpanRef } from '../tracing';
 import type { LaunchValidationGate } from './launch-validation';
+import { segmentDomainContext } from './segment-context';
 
 /**
  * Tools always available regardless of the shortlist, because the requests
@@ -143,9 +144,13 @@ function launchToolsContext(publishEnabled: boolean): string {
  *   build→poll→transition-to-dev/staging state machine (production refused).
  *   Defaults false, so a non-publish Launch run's prompt is byte-identical to
  *   before and its promptVersion fingerprint does not shift.
+ * @param opts.segmentMode inject the segment/audience grounding (PQL reference,
+ *   business glossary, real-fields-only rules; segment-context.ts) — only for
+ *   runs about segments, audiences or PQL. Defaults false, so every other
+ *   run's prompt and fingerprint are unchanged.
  */
 export function systemPrompt(
-  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean } = {}
+  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean } = {}
 ): string {
   const envCtx = getEnvironmentContext();
 
@@ -169,6 +174,13 @@ export function systemPrompt(
     // historical text byte-identical.
     const publishEnabled = opts.publishEnabled === true;
     lines.push('', launchDomainContext(publishEnabled), '', launchToolsContext(publishEnabled));
+  }
+
+  // Segment/audience runs only: the PQL reference and the business glossary
+  // (segment-context.ts), gated like the Launch block so other runs keep the
+  // lean prefix.
+  if (opts.segmentMode) {
+    lines.push('', segmentDomainContext());
   }
 
   lines.push(
@@ -290,6 +302,8 @@ export interface LoopContext {
   launchMode: boolean;
   /** A Launch run that may publish to dev/staging: swaps the grounding + handoff lines. */
   publishEnabled: boolean;
+  /** Segment/audience run: adds the PQL reference + business glossary to the system prompt. */
+  segmentMode?: boolean;
   /** First user message (memory preamble, plan preamble, knowledge and examples already folded in). */
   userMessage: string;
   /** Resolved start model for the first attempt. */

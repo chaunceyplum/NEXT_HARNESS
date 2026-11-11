@@ -1,0 +1,7 @@
+{
+  "id": "business-language-audience-create",
+  "request": "Build an audience of Security Edge Preferred customers excluding anyone on the do-not-contact list",
+  "expectedTools": [
+    "adobe_create_segment"
+  ]
+}

@@ -227,6 +227,8 @@ export interface SharedRunState {
   ledger: RunLedger;
   /** One LaunchValidationGate per run, shared by every worker (Requirement 9.1). */
   launchGate?: LaunchValidationGate;
+  /** Segment/audience run: workers get the segment grounding (segment-context.ts). */
+  segmentMode?: boolean;
   /** Set when writes must run one at a time (Launch, LAUNCH_PARALLEL_WRITES off) (Requirement 3.4). */
   writeLock?: WriteLock;
   /** The run's abort signal; each worker links a child controller to it (Requirement 9.3). */
@@ -433,6 +435,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     tools,
     launchMode: Boolean(shared.launchGate),
     publishEnabled: false,
+    segmentMode: shared.segmentMode === true,
     userMessage: buildWorkerBrief(input),
     startModelKey: input.modelKey || getDefaultModelKey(),
     isPinned: Boolean(input.isPinned),

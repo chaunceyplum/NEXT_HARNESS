@@ -157,6 +157,8 @@ export interface OrchestratorInput {
   budgetLimits: RunBudgetLimits;
   modelHealth: ModelHealthTracker;
   launchGate?: LaunchValidationGate;
+  /** Segment/audience run: each worker gets the segment grounding too. */
+  segmentMode?: boolean;
   abortSignal?: AbortSignal;
   toolApproval?: ToolApprovalFn;
   approvalReasons?: Map<string, ApprovalReason>;
@@ -219,6 +221,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     tracerParent: coordinatorRef,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.launchGate ? { launchGate: input.launchGate } : {}),
+    ...(input.segmentMode ? { segmentMode: true } : {}),
     // Requirement 3.4: serialise the write calls themselves, not only the
     // workers whose declared step tool writes.
     ...(config.serialWrites ? { writeLock: new WriteLock() } : {}),
