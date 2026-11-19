@@ -29,7 +29,7 @@ import type { AgentStepTrace, LoopContext, ToolApprovalFn, ToolOutcome } from '.
 import type { ApprovalReason } from '../tools/approval-policy';
 import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
-import { executeLoop } from './agent';
+import { executeLoop } from './agent-loop';
 import { getDefaultModelKey } from '../models/model-registry';
 import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from '../tools/tool-catalog';
 import type { PlanStep } from './planner';

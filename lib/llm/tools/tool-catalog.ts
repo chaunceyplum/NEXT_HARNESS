@@ -13,7 +13,7 @@
 
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { classifyTool } from './tool-policy';
-import { isAdobeScoped, isAdobeToolsOnlyEnabled, isKnowledgeTool, RAG_TOOLS } from './tool-taxonomy';
+import { isAdobeScoped, isAdobeToolsOnlyEnabled, RAG_TOOLS } from './tool-taxonomy';
 
 export { isAdobeScoped, isKnowledgeTool, PLATFORM_GROUPS, toolMatchesPlatforms } from './tool-taxonomy';
 import { withRetrievalHint } from './retrieval-hints';

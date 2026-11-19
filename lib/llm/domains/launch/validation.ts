@@ -61,7 +61,7 @@
  */
 
 import { z } from 'zod';
-import { classifyTool } from '../../tools/tool-policy';
+import { classifyTool } from '../../tools/tool-taxonomy';
 
 // ── The handoff tools this gate covers ─────────────────────────────────────────
 

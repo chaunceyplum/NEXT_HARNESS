@@ -54,3 +54,10 @@ scripts/                  Eval baseline check, run-to-fixture
 ```
 
 Unit tests live next to the module they cover as `*.test.ts`.
+
+Layer rules (enforced by `npm run lint`, see eslint.config.mjs): `models/` imports no
+other layer; `tools/` never imports `runtime/`; `quality/` uses only the pure
+tool taxonomy; `domains/` packs never import each other and use only the
+planner from `runtime/`; everything outside `domains/` reaches a domain only
+through `lib/llm/domains` (the registry). Type-only imports are allowed, and
+`import/no-cycle` forbids import cycles.
