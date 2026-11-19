@@ -1,11 +1,11 @@
 /**
  * GET /api/runs?limit=20&offset=0
  *
- * Lists persisted agent runs (execution history), newest first. Backed by
- * lib/execution-store.ts. Used by app/results/page.tsx.
+ * Lists persisted agent runs (run history), newest first. Backed by
+ * lib/run-store.ts. Used by app/results/page.tsx.
  */
 
-import { listExecutions } from '@/lib/execution-store';
+import { listRuns } from '@/lib/run-store';
 import { ApiError, RunsListResponse } from '@/lib/types';
 
 export async function GET(request: Request): Promise<Response> {
@@ -14,7 +14,7 @@ export async function GET(request: Request): Promise<Response> {
     const limit = Math.min(Number(searchParams.get('limit')) || 20, 100);
     const offset = Math.max(Number(searchParams.get('offset')) || 0, 0);
 
-    const { runs, total } = await listExecutions({ limit, offset });
+    const { runs, total } = await listRuns({ limit, offset });
     return Response.json({ runs, total } as RunsListResponse, { status: 200 });
   } catch (error) {
     console.error('[RUNS] Failed to list runs:', error);

@@ -239,7 +239,7 @@ export interface RunAgentOptions {
    */
   segmentMode?: boolean;
   /**
-   * Publish target for a Launch run (lib/types.ts BuildRequest.publishTarget).
+   * Publish target for a Launch run (lib/types.ts RunRequest.publishTarget).
    * ABSENT → the run stops at a populated library (byte-identical to today).
    * PRESENT → the run may publish the library, but ONLY to a development or
    * staging environment (resolved from server truth); a production or

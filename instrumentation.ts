@@ -10,7 +10,7 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  const { markInterruptedRuns } = await import('./lib/execution-store');
+  const { markInterruptedRuns } = await import('./lib/run-store');
   markInterruptedRuns()
     .then((n) => {
       if (n > 0) console.warn(`[startup] Marked ${n} run(s) left running by a previous process as interrupted.`);

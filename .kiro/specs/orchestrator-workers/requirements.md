@@ -147,7 +147,7 @@ the same time, so that multi-step runs finish sooner.
 
 1. WHEN a step becomes ready, THE SYSTEM SHALL start a worker for it, as long
    as fewer than `MAX_WORKERS` (default 3) workers of this run are running.
-2. WHEN `BuildRequest.maxWorkers` is set, THE SYSTEM SHALL use the smaller of
+2. WHEN `RunRequest.maxWorkers` is set, THE SYSTEM SHALL use the smaller of
    it and `MAX_WORKERS`.
 3. THE SYSTEM SHALL start no worker for a step until every step in its
    `dependsOn` has status `done`.

@@ -11,12 +11,12 @@ app/                      Next.js App Router
   results/, evals/, metrics/, memory/   UI pages
 components/               React components (AgentTrace, PlanView, KillSwitch, ...)
 lib/
-  build-run.ts            Starts a run as a job: kill switch, agent, events, checkpoints, critic, judge
+  start-run.ts            Starts a run as a job: kill switch, agent, events, checkpoints, critic, judge
   run-jobs.ts             Detached jobs and event buffers (in-process)
-  execution-store.ts      Run records in harness_agent_runs via execute_sql
+  run-store.ts      Run records in harness_agent_runs via execute_sql
   kill-switch.ts, audit-log.ts, memory-store.ts, online-judge.ts, tracing.ts
   mcp-client.ts, mcp-sql.ts   MCP transport and SQL escaping
-  types.ts                Shared DTOs: BuildRequest, BuildStreamEvent, ExecutionRecord, ...
+  types.ts                Shared DTOs: RunRequest, RunStreamEvent, RunRecord, ...
   llm/
     agent.ts              runAgent: setup + the streamText tool loop
     agent-core.ts         System prompt pieces and shared agent types

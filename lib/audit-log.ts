@@ -3,7 +3,7 @@
  * and how it turned out. The guide's "incident response foundation" (§6.4).
  *
  * Stored in harness_audit_log in the MCP server's Postgres (via execute_sql,
- * like lib/execution-store.ts). Rows are only ever inserted; nothing here
+ * like lib/run-store.ts). Rows are only ever inserted; nothing here
  * updates or deletes them.
  *
  * What's recorded:

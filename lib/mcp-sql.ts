@@ -1,7 +1,7 @@
 /**
  * Thin wrapper over the MCP server's `execute_sql` tool (full read/write/DDL
  * access to the server's own database, unlike the read-only query_rag_db) —
- * shared by every harness-owned table: lib/execution-store.ts
+ * shared by every harness-owned table: lib/run-store.ts
  * (harness_agent_runs) and lib/eval-store.ts (harness_eval_runs /
  * harness_eval_results).
  *

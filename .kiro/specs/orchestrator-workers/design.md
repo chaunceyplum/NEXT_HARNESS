@@ -22,7 +22,7 @@ behaviour-preserving refactor; phases 2–6 sit behind `ORCHESTRATION`.
 
 ```mermaid
 flowchart TD
-  A[POST /api/build] --> B[startBuildRun<br/>lib/build-run.ts]
+  A[POST /api/build] --> B[startRun<br/>lib/start-run.ts]
   B --> C[runAgent<br/>lib/llm/agent.ts]
   C --> R[routeRequest<br/>model-router.ts]
   C --> S[Tools, memory, knowledge<br/>in parallel]
@@ -36,7 +36,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A[POST /api/build] --> B[startBuildRun]
+  A[POST /api/build] --> B[startRun]
   B --> P[prepareRun<br/>route, tools, memory, knowledge, plan]
   P --> D{Orchestrate?<br/>flag on and 2+ parallel steps}
   D -- no --> E[executeLoop<br/>single agent, as today]
@@ -61,7 +61,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-  participant Job as startBuildRun
+  participant Job as startRun
   participant Prep as prepareRun
   participant Co as Coordinator
   participant W as Workers (up to MAX_WORKERS)
@@ -82,7 +82,7 @@ sequenceDiagram
   Job->>Job: critic, record, judge
 ```
 
-1. `startBuildRun` starts the job, as today.
+1. `startRun` starts the job, as today.
 2. `prepareRun` routes, selects tools, loads memory and knowledge, and makes
    the plan (Launch: the template). Plan approval works as today.
 3. If orchestration is off, or fewer than two steps can run together,
@@ -312,22 +312,22 @@ export interface SharedRunState {
 | Launch validation gate | One per run, shared | `launch-validation.ts` (no API change) |
 | Model fallback | Restart only the failed worker; side-effect check per worker | `agent.ts` (`executeLoop`) |
 | Abort | Child `AbortController` per worker, linked to the run's | `worker.ts` |
-| Approvals | Unchanged registry; events gain `workerId` | `approvals.ts`, `build-run.ts` |
-| Audit | `workerId` on events | `build-run.ts` |
+| Approvals | Unchanged registry; events gain `workerId` | `approvals.ts`, `start-run.ts` |
+| Audit | `workerId` on events | `start-run.ts` |
 | Tracing | Run span → coordinator span → worker spans | `tracing.ts` |
 | Read cache | Unchanged, shared across workers | `tool-call-cache.ts` |
 | Memory | Coordinator only | `worker.ts` |
 
 ### Phase 4: events, record, resume
 
-- `lib/build-run.ts`: pass `orchestrate` to `runAgent`; forward
+- `lib/start-run.ts`: pass `orchestrate` to `runAgent`; forward
   `worker_start`/`worker_done`; tag `step`, `approval_request`, `restart` and
   audit events with `workerId`; on a worker `restart`, drop only that
   worker's steps from the checkpoint; checkpoint after worker start/end.
-- `resumeContextFrom` (`lib/build-run.ts:297`): for a version-2 record with
+- `resumeContextFrom` (`lib/start-run.ts:297`): for a version-2 record with
   `orchestrated: true`, return the plan and `WorkerResult`s so the resumed run
   starts the coordinator with `done` steps kept.
-- `lib/execution-store.ts`: `CHECKPOINT_SCHEMA_VERSION = 2`. Workers are
+- `lib/run-store.ts`: `CHECKPOINT_SCHEMA_VERSION = 2`. Workers are
   stored inside the existing `result` JSONB column; no DDL change.
 - `app/api/build/route.ts`: accept and validate `orchestrate` and
   `maxWorkers`; return 429 when `activeJobCount() >= MAX_ACTIVE_RUNS`.
@@ -392,12 +392,12 @@ export interface WorkerRecord {
 
 | Type | Change |
 | --- | --- |
-| `BuildRequest` | `orchestrate?: boolean`; `maxWorkers?: number` |
+| `RunRequest` | `orchestrate?: boolean`; `maxWorkers?: number` |
 | `AgentStepDTO` | `workerId?: string` |
-| `BuildResponse`, `AgentRunResult` | `workers?: WorkerRecord[]`; `orchestrated?: boolean`; `replans?: number` |
+| `RunResult`, `AgentRunResult` | `workers?: WorkerRecord[]`; `orchestrated?: boolean`; `replans?: number` |
 | `PlanStep` | `workerId?: string`; `dependsOn` kept on revision |
 | `RunAgentOptions` | `orchestrate?: boolean`; `maxWorkers?: number`; `onWorker?: (w: WorkerRecord) => void` |
-| `BuildStreamEvent` | new `worker_start`, `worker_done`; `workerId?` on `step`, `approval_request`, `restart` |
+| `RunStreamEvent` | new `worker_start`, `worker_done`; `workerId?` on `step`, `approval_request`, `restart` |
 
 ### Configuration
 
@@ -442,7 +442,7 @@ Unit tests (vitest, `npm test`):
 | `lib/llm/planner.test.ts` (existing) | `revise` keeps `dependsOn`; cycle rejection; `readySteps`; `parallelWidth` |
 | `lib/llm/run-budget.test.ts` (existing) | Child charges parent; ledger exhaustion |
 | `lib/llm/agent-slots.test.ts` (new) | FIFO order; release on error and abort |
-| `lib/build-run.test.ts`, `app/api/build/route.test.ts` (existing) | Worker events; per-worker restart; 429; resume |
+| `lib/start-run.test.ts`, `app/api/build/route.test.ts` (existing) | Worker events; per-worker restart; 429; resume |
 | `lib/kill-switch.test.ts` (existing) | Trip aborts all workers |
 
 Concurrency tests use scripted tools with controlled delays (promises

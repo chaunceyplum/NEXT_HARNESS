@@ -57,10 +57,10 @@ vi.mock('@/lib/llm/agent', () => ({
     };
   },
 }));
-vi.mock('@/lib/execution-store', () => ({
+vi.mock('@/lib/run-store', () => ({
   CHECKPOINT_SCHEMA_VERSION: 2,
   newRunId: () => `run-${Math.random().toString(36).slice(2)}`,
-  saveExecution: async (r: { status: string; result?: { steps: unknown[] } }) => {
+  saveRun: async (r: { status: string; result?: { steps: unknown[] } }) => {
     saved.push({ status: r.status, steps: r.result?.steps.length ?? 0, result: r.result as Record<string, unknown> | undefined });
   },
 }));

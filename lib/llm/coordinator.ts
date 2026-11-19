@@ -24,7 +24,7 @@
  *   - stopping on ledger exhaustion and on abort (Requirements 8.4, 9.4).
  *
  * The critic, the online judge and the stored run record stay in the job
- * wrapper (lib/build-run.ts), exactly as for single-agent runs — the
+ * wrapper (lib/start-run.ts), exactly as for single-agent runs — the
  * coordinator only produces the AgentRunResult those steps already consume
  * (Requirement 7.3 is wired in Task 8.6).
  */

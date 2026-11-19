@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { AgentStepDTO, ApiError, BuildResponse, ExecutionRecord, WorkerRecord } from '@/lib/types';
+import { AgentStepDTO, ApiError, RunResult, RunRecord, WorkerRecord } from '@/lib/types';
 import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
@@ -68,7 +68,7 @@ export default function RunDetailPage() {
   }
   const id = params.id as string;
 
-  const [record, setRecord] = useState<ExecutionRecord | null>(null);
+  const [record, setRecord] = useState<RunRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [replaying, setReplaying] = useState(false);
@@ -82,7 +82,7 @@ export default function RunDetailPage() {
         }
         return res.json();
       })
-      .then((data: ExecutionRecord) => setRecord(data))
+      .then((data: RunRecord) => setRecord(data))
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load run'))
       .finally(() => setLoading(false));
   }, [id]);
@@ -103,7 +103,7 @@ export default function RunDetailPage() {
         throw new Error(errData.error || `HTTP ${res.status}`);
       }
 
-      const data: BuildResponse = await res.json();
+      const data: RunResult = await res.json();
       router.push(`/results/${data.runId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Replay failed');

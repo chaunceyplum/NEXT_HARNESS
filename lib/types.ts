@@ -115,7 +115,7 @@ export interface TokenUsage {
   cacheWriteTokens?: number;
 }
 
-export interface BuildRequest {
+export interface RunRequest {
   description: string;
   /** Model registry key, e.g. "anthropic:sonnet". Omit to use the server default. */
   model?: string;
@@ -235,7 +235,7 @@ export interface RagJudgmentDTO {
   judgment: import('./llm/rag-judge').RagJudgment;
 }
 
-export interface BuildResponse {
+export interface RunResult {
   /** Persisted run id — GET /api/runs/:runId to view this later, or replay it from /results. */
   runId: string;
   finalText: string;
@@ -278,12 +278,12 @@ export interface BuildResponse {
 
 // ── TASK 8: Streaming event types ─────────────────────────────────────────────
 // POST /api/build returns a streaming response of newline-delimited JSON events.
-// Each line is one BuildStreamEvent. The client accumulates step events and
+// Each line is one RunStreamEvent. The client accumulates step events and
 // replaces the trace on each update; 'restart' means a fallback model is
 // re-running from scratch, so discard steps so far; 'approval_request' means
 // the run is paused until POST /api/build/approve; 'done' carries the final summary.
 
-export type BuildStreamEvent =
+export type RunStreamEvent =
   | { type: 'run_start'; runId: string; toolsConsidered: string[] }
   // `workerId` is set when the step came from an orchestrated worker, so the
   // client can file it under that worker's lane (Requirement 11.3); absent on
@@ -346,7 +346,7 @@ export type BuildStreamEvent =
   | { type: 'error'; error: string; code?: string };
 
 /** Mirrors lib/llm/planner.ts Plan, for client code. */
-/** A stored orchestrated plan to continue (BuildRequest.resumePlan). */
+/** A stored orchestrated plan to continue (RunRequest.resumePlan). */
 export interface ResumePlan {
   plan: PlanInfo;
   results: WorkerResult[];
@@ -400,7 +400,7 @@ export interface ModelOption {
 }
 
 // ============================================================================
-// Execution history / replay (lib/execution-store.ts)
+// Run history / replay (lib/run-store.ts)
 // ============================================================================
 
 export interface RunSummary {
@@ -408,7 +408,6 @@ export interface RunSummary {
   createdAt: string;
   description: string;
   model: string;
-  allowFullBuild: boolean;
   /**
    * running: in progress (checkpointed after every step). interrupted: the
    * server stopped while it was running (marked on the next start); it can
@@ -417,14 +416,13 @@ export interface RunSummary {
   status: 'completed' | 'failed' | 'running' | 'interrupted';
   durationMs: number;
   toolsConsidered?: string[];
-  executionId?: string;
   /** Absent on runs persisted before token tracking was added, and on failed runs (the agent never got a usage figure). */
   usage?: TokenUsage;
 }
 
-export interface ExecutionRecord extends RunSummary {
-  request: BuildRequest;
-  result?: BuildResponse;
+export interface RunRecord extends RunSummary {
+  request: RunRequest;
+  result?: RunResult;
   error?: string;
 }
 

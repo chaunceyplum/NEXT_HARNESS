@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { normaliseResult } from './execution-store';
-import type { ExecutionRecord } from './types';
+import { normaliseResult } from './run-store';
+import type { RunRecord } from './types';
 
-type Result = NonNullable<ExecutionRecord['result']>;
+type Result = NonNullable<RunRecord['result']>;
 
 const base: Result = { runId: 'r', finalText: '', steps: [], toolsConsidered: [], finishReason: 'stop', usage: {} };
 const orchestration = { orchestrated: true, replans: 1, workers: [] } satisfies Partial<Result>;

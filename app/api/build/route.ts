@@ -28,7 +28,7 @@
  * The client reads the stream with a ReadableStream reader, parsing each
  * newline-delimited JSON line as it arrives. Every event carries a `seq`.
  *
- * The run is a job (lib/run-jobs.ts, lib/build-run.ts), not part of this
+ * The run is a job (lib/run-jobs.ts, lib/start-run.ts), not part of this
  * request: if the client disconnects, the run keeps going, and the client
  * can reconnect with GET /api/runs/:id/events (buffered events replay).
  * Stop it with POST /api/runs/:id/cancel (or the kill switch). The run
@@ -46,12 +46,12 @@ import { PLATFORM_GROUPS } from '@/lib/llm/tool-catalog';
 import { runsBlockedReason } from '@/lib/kill-switch';
 import { maxActiveRuns } from '@/lib/llm/orchestration-config';
 import { activeJobCount, streamJob } from '@/lib/run-jobs';
-import { startBuildRun } from '@/lib/build-run';
-import { ApiError, BuildRequest } from '@/lib/types';
+import { startRun } from '@/lib/start-run';
+import { ApiError, RunRequest } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
-function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok: false; error: ApiError; status: number } {
+function validateRequest(body: unknown): { ok: true; req: RunRequest } | { ok: false; error: ApiError; status: number } {
   if (!body || typeof body !== 'object') {
     return { ok: false, error: { error: 'Invalid JSON in request body', code: 'INVALID_JSON' }, status: 400 };
   }
@@ -285,9 +285,9 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
 }
 
 /** Pick only the known string members off a validated publishTarget object. */
-function normalisePublishTarget(value: unknown): BuildRequest['publishTarget'] {
+function normalisePublishTarget(value: unknown): RunRequest['publishTarget'] {
   const pt = (value ?? {}) as Record<string, unknown>;
-  const out: NonNullable<BuildRequest['publishTarget']> = {};
+  const out: NonNullable<RunRequest['publishTarget']> = {};
   if (typeof pt.environmentId === 'string') out.environmentId = pt.environmentId;
   if (typeof pt.environmentName === 'string') out.environmentName = pt.environmentName;
   if (typeof pt.propertyId === 'string') out.propertyId = pt.propertyId;
@@ -326,5 +326,5 @@ export async function POST(request: Request): Promise<Response> {
   }
   const req = validation.req;
 
-  return streamJob(startBuildRun(req, request.headers.get('x-harness-user') || 'anonymous'));
+  return streamJob(startRun(req, request.headers.get('x-harness-user') || 'anonymous'));
 }

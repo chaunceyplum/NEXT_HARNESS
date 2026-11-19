@@ -390,7 +390,7 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
-## Durable runs (`lib/run-jobs.ts`, `lib/build-run.ts`)
+## Durable runs (`lib/run-jobs.ts`, `lib/start-run.ts`)
 
 Runs are jobs, not HTTP requests:
 
@@ -523,7 +523,7 @@ Without `runId`, only `HARNESS_ADMINS` may query when it's set.
 `AUDIT_READS=true` also records read calls (noisy). Writes are
 best-effort: a failed insert is logged and never breaks a run.
 
-## Execution history / replay (lib/execution-store.ts)
+## Run history / replay (lib/run-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
 listed and replayed from `/results`. Storage is a `harness_agent_runs`

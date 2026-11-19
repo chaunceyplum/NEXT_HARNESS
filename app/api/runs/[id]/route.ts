@@ -5,7 +5,7 @@
  * used by app/results/[id]/page.tsx for the detail/replay view.
  */
 
-import { getExecution } from '@/lib/execution-store';
+import { getRun } from '@/lib/run-store';
 import { ApiError } from '@/lib/types';
 
 export async function GET(
@@ -21,7 +21,7 @@ export async function GET(
       );
     }
 
-    const record = await getExecution(id.trim());
+    const record = await getRun(id.trim());
     if (!record) {
       return Response.json({ error: `Run not found: ${id}`, code: 'NOT_FOUND' } as ApiError, { status: 404 });
     }

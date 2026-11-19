@@ -1,5 +1,5 @@
 /**
- * Execution history / replayability — backed by the MCP server's own
+ * Run history / replayability — backed by the MCP server's own
  * database via the `execute_sql` tool (full read/write/DDL access, unlike
  * the read-only query_rag_db), not local files.
  *
@@ -13,7 +13,7 @@
  * the connected MCP server's catalog (verified against its live tools/list,
  * Aug 2026), so every run now persists with allow_full_build = false and
  * execution_id = NULL. Kept rather than dropped to avoid a schema migration
- * against a live table.
+ * against a live table; the app model (RunSummary) no longer carries them.
  *
  * execute_sql takes a raw SQL string with no parameter binding, so every
  * value below is escaped by hand (sqlStr/sqlJson/etc., lib/mcp-sql.ts)
@@ -21,8 +21,8 @@
  */
 
 import { randomUUID } from 'crypto';
-import { execSql, sqlBool, sqlInt, sqlJson, sqlJsonOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
-import type { ExecutionRecord, RunSummary } from './types';
+import { execSql, sqlInt, sqlJson, sqlJsonOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
+import type { RunRecord, RunSummary } from './types';
 
 const TABLE = 'harness_agent_runs';
 
@@ -59,7 +59,7 @@ function ensureTable(): Promise<void> {
 }
 
 /**
- * Version of the checkpoint shape saved mid-run (BuildResponse.checkpoint);
+ * Version of the checkpoint shape saved mid-run (RunResult.checkpoint);
  * bump when it changes.
  *
  * v2 (orchestrator-workers): the result JSONB may carry `orchestrated`,
@@ -90,23 +90,21 @@ export function newRunId(): string {
   return randomUUID();
 }
 
-// ── Row <-> ExecutionRecord mapping ───────────────────────────────────────
+// ── Row <-> RunRecord mapping ───────────────────────────────────────
 
-function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
-  const result = normaliseResult((row.result as ExecutionRecord['result'] | null) ?? undefined);
+function rowToRecord(row: Record<string, unknown>): RunRecord {
+  const result = normaliseResult((row.result as RunRecord['result'] | null) ?? undefined);
   return {
     id: row.id as string,
     createdAt: new Date(row.created_at as string).toISOString(),
     description: row.description as string,
     model: row.model as string,
-    allowFullBuild: row.allow_full_build as boolean,
-    status: row.status as ExecutionRecord['status'],
+    status: row.status as RunRecord['status'],
     durationMs: row.duration_ms as number,
     toolsConsidered: (row.tools_considered as string[] | null) ?? undefined,
-    executionId: (row.execution_id as string | null) ?? undefined,
     // Absent on rows persisted before token tracking was added (result has no `usage` key) — never a schema concern since it's read out of the existing `result` JSONB column, not a dedicated one.
     usage: result?.usage,
-    request: row.request as ExecutionRecord['request'],
+    request: row.request as RunRecord['request'],
     result,
     error: (row.error as string | null) ?? undefined,
   };
@@ -122,7 +120,7 @@ function rowToRecord(row: Record<string, unknown>): ExecutionRecord {
  * record has none. A record with no checkpoint is returned as-is: v1 code
  * never wrote orchestration fields, so any it carries came from v2+.
  */
-export function normaliseResult(result: ExecutionRecord['result'] | undefined): ExecutionRecord['result'] | undefined {
+export function normaliseResult(result: RunRecord['result'] | undefined): RunRecord['result'] | undefined {
   if (!result) return result;
   const version = result.checkpoint?.schemaVersion;
   if (version === undefined || version >= ORCHESTRATION_SCHEMA_VERSION) return result;
@@ -138,21 +136,20 @@ export function normaliseResult(result: ExecutionRecord['result'] | undefined): 
 
 // ── Public API (same shape as the old file-based store) ──────────────────
 
-export async function saveExecution(record: ExecutionRecord): Promise<void> {
+export async function saveRun(record: RunRecord): Promise<void> {
   await ensureTable();
   const sql = `
     INSERT INTO ${TABLE}
       (id, created_at, description, model, allow_full_build, status, duration_ms, tools_considered, execution_id, request, result, error)
     VALUES
       (${sqlStr(record.id)}, ${sqlStr(record.createdAt)}, ${sqlStr(record.description)}, ${sqlStr(record.model)},
-       ${sqlBool(record.allowFullBuild)}, ${sqlStr(record.status)}, ${sqlInt(record.durationMs)},
-       ${sqlJsonOrNull(record.toolsConsidered)}, ${sqlStrOrNull(record.executionId)},
+       FALSE, ${sqlStr(record.status)}, ${sqlInt(record.durationMs)},
+       ${sqlJsonOrNull(record.toolsConsidered)}, NULL,
        ${sqlJson(record.request)}, ${sqlJsonOrNull(record.result)}, ${sqlStrOrNull(record.error)})
     ON CONFLICT (id) DO UPDATE SET
       status = EXCLUDED.status,
       duration_ms = EXCLUDED.duration_ms,
       tools_considered = EXCLUDED.tools_considered,
-      execution_id = EXCLUDED.execution_id,
       result = EXCLUDED.result,
       error = EXCLUDED.error
   `.replace(/\s+/g, ' ');
@@ -160,20 +157,20 @@ export async function saveExecution(record: ExecutionRecord): Promise<void> {
   await execSql(sql);
 }
 
-export async function getExecution(id: string): Promise<ExecutionRecord | null> {
+export async function getRun(id: string): Promise<RunRecord | null> {
   await ensureTable();
   const result = await execSql(`SELECT * FROM ${TABLE} WHERE id = ${sqlStr(id)} LIMIT 1`);
   const row = result.rows?.[0];
   return row ? rowToRecord(row) : null;
 }
 
-export interface ListExecutionsOptions {
+export interface ListRunsOptions {
   limit?: number;
   offset?: number;
 }
 
-/** Newest-first, paginated. Excludes request/result/error (fetched in full via getExecution). */
-export async function listExecutions(opts: ListExecutionsOptions = {}): Promise<{ runs: RunSummary[]; total: number }> {
+/** Newest-first, paginated. Excludes request/result/error (fetched in full via getRun). */
+export async function listRuns(opts: ListRunsOptions = {}): Promise<{ runs: RunSummary[]; total: number }> {
   await ensureTable();
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
@@ -184,7 +181,7 @@ export async function listExecutions(opts: ListExecutionsOptions = {}): Promise<
       // result JSONB column (NULL on rows from before token tracking was
       // added, or on failed runs) — no schema change, unlike adding a
       // dedicated column would have needed.
-      `SELECT id, created_at, description, model, allow_full_build, status, duration_ms, tools_considered, execution_id, result->'usage' AS usage
+      `SELECT id, created_at, description, model, status, duration_ms, tools_considered, result->'usage' AS usage
        FROM ${TABLE} ORDER BY created_at DESC LIMIT ${sqlInt(limit)} OFFSET ${sqlInt(offset)}`.replace(/\s+/g, ' ')
     ),
     execSql(`SELECT count(*) AS total FROM ${TABLE}`),
@@ -195,11 +192,9 @@ export async function listExecutions(opts: ListExecutionsOptions = {}): Promise<
     createdAt: new Date(row.created_at as string).toISOString(),
     description: row.description as string,
     model: row.model as string,
-    allowFullBuild: row.allow_full_build as boolean,
     status: row.status as RunSummary['status'],
     durationMs: row.duration_ms as number,
     toolsConsidered: (row.tools_considered as string[] | null) ?? undefined,
-    executionId: (row.execution_id as string | null) ?? undefined,
     usage: (row.usage as RunSummary['usage']) ?? undefined,
   }));
 

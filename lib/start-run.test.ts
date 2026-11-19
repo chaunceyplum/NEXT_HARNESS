@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { resumeContextFrom, resumePlanFrom } from './build-run';
-import type { ExecutionRecord } from './types';
+import { resumeContextFrom, resumePlanFrom } from './start-run';
+import type { RunRecord } from './types';
 
-const record = (steps: ExecutionRecord['result'] extends infer R ? (R extends { steps: infer S } ? S : never) : never): ExecutionRecord => ({
+const record = (steps: RunRecord['result'] extends infer R ? (R extends { steps: infer S } ? S : never) : never): RunRecord => ({
   id: 'run-1',
   createdAt: '2026-09-29T00:00:00Z',
   description: 'create gold segment and dataset',
   model: 'm',
-  allowFullBuild: false,
   status: 'interrupted',
   durationMs: 1,
   request: { description: 'create gold segment and dataset' },
@@ -53,12 +52,11 @@ describe('resumeContextFrom', () => {
   // context keeps the done steps and their WorkerResults (summary + ids) and
   // lists the steps that still have to run.
   it('resumes an orchestrated run from its done steps and their worker results', () => {
-    const orchestratedRecord: ExecutionRecord = {
+    const orchestratedRecord: RunRecord = {
       id: 'run-2',
       createdAt: '2026-09-29T00:00:00Z',
       description: 'build two data elements and a rule',
       model: 'm',
-      allowFullBuild: false,
       status: 'interrupted',
       durationMs: 1,
       request: { description: 'build two data elements and a rule' },
@@ -110,12 +108,11 @@ describe('resumeContextFrom', () => {
 });
 
 describe('resumePlanFrom (Requirement 12.4)', () => {
-  const record = (over: Partial<NonNullable<ExecutionRecord['result']>> = {}): ExecutionRecord => ({
+  const record = (over: Partial<NonNullable<RunRecord['result']>> = {}): RunRecord => ({
     id: 'run-3',
     createdAt: '2026-09-29T00:00:00Z',
     description: 'd',
     model: 'm',
-    allowFullBuild: false,
     status: 'interrupted',
     durationMs: 1,
     request: { description: 'd' },

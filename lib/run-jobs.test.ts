@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { cancelJob, getJob, startJob, streamJob } from './run-jobs';
-import type { BuildStreamEvent } from './types';
+import type { RunStreamEvent } from './types';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 /** A job whose execute() waits for `release()` before finishing. */
 function controllableJob(id: string) {
-  let emit!: (e: BuildStreamEvent) => void;
+  let emit!: (e: RunStreamEvent) => void;
   let release!: () => void;
   const finished = new Promise<void>((r) => (release = r));
   const abort = new AbortController();
@@ -14,10 +14,10 @@ function controllableJob(id: string) {
     emit = e;
     await Promise.race([finished, new Promise((r) => signal.addEventListener('abort', r))]);
   });
-  return { job, emit: (e: BuildStreamEvent) => emit(e), release, abort };
+  return { job, emit: (e: RunStreamEvent) => emit(e), release, abort };
 }
 
-async function readAll(res: Response): Promise<Array<BuildStreamEvent & { seq: number }>> {
+async function readAll(res: Response): Promise<Array<RunStreamEvent & { seq: number }>> {
   const text = await res.text();
   return text.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }

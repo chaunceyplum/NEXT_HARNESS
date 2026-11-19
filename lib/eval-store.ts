@@ -1,7 +1,7 @@
 /**
  * Eval history — what `npm run eval:*` (evals/lib/report.ts) writes and what
  * /evals reads. Backed by the MCP server's database via execute_sql, the
- * same way lib/execution-store.ts persists agent runs, so eval history
+ * same way lib/run-store.ts persists agent runs, so eval history
  * lives next to the run history it's grading instead of needing a second
  * database.
  *

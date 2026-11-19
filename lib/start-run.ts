@@ -9,19 +9,19 @@ import { runAgent } from '@/lib/llm/agent';
 import { waitForApproval } from '@/lib/llm/approvals';
 import { APPROVAL_REASON_TEXT } from '@/lib/llm/approval-policy';
 import { getDefaultModelKey } from '@/lib/llm/model-registry';
-import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveExecution } from '@/lib/execution-store';
+import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
 import { createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
 import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
 import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { AgentStepDTO, BuildRequest, ExecutionRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
+import type { AgentStepDTO, RunRequest, RunRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
 
-export function startBuildRun(req: BuildRequest, actor: string): RunJob {
+export function startRun(req: RunRequest, actor: string): RunJob {
   console.log('[BUILD] Running agent for:', req.description.slice(0, 80));
 
   const runId = newRunId();
@@ -75,15 +75,15 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
     // rather than sent. Without this, a slow store queued one full-record
     // write per step and fell further behind as the run went on.
     let saving: Promise<void> = Promise.resolve();
-    let queued: ExecutionRecord | undefined;
-    const save = (record: ExecutionRecord) => {
+    let queued: RunRecord | undefined;
+    const save = (record: RunRecord) => {
       const waiting = queued !== undefined;
       queued = record;
       if (waiting) return;
       saving = saving.then(async () => {
         const next = queued!;
         queued = undefined;
-        await saveExecution(next).catch((err) => console.error(`[BUILD] Failed to save run ${runId} (${next.status}):`, err));
+        await saveRun(next).catch((err) => console.error(`[BUILD] Failed to save run ${runId} (${next.status}):`, err));
       });
     };
     const checkpoint = () =>
@@ -92,7 +92,6 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        allowFullBuild: false,
         status: 'running',
         durationMs: Date.now() - startedAt,
         request: req,
@@ -308,7 +307,6 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: agentResult.modelKey,
-        allowFullBuild: false,
         status: 'completed',
         durationMs: Date.now() - startedAt,
         toolsConsidered: agentResult.toolsConsidered,
@@ -358,7 +356,6 @@ export function startBuildRun(req: BuildRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        allowFullBuild: false,
         status: 'failed',
         durationMs: Date.now() - startedAt,
         request: req,
@@ -408,7 +405,7 @@ const MAX_RESUME_CHARS = 6_000;
  * the finished work and only does what is left. A single-agent record (or a v1
  * record read as single-agent) falls back to the tool-call history below.
  */
-export function resumeContextFrom(record: ExecutionRecord): string {
+export function resumeContextFrom(record: RunRecord): string {
   const result = record.result;
   if (result?.orchestrated && result.plan) {
     return orchestratedResumeContext(record);
@@ -436,7 +433,7 @@ export function resumeContextFrom(record: ExecutionRecord): string {
  * plan steps and their WorkerResults, and list the steps that are not done so
  * the resumed run only does what is left.
  */
-function orchestratedResumeContext(record: ExecutionRecord): string {
+function orchestratedResumeContext(record: RunRecord): string {
   const plan = record.result?.plan;
   const workers = record.result?.workers ?? [];
   // A done step names the worker that did it. Match on that first: a replan
@@ -478,7 +475,7 @@ function orchestratedResumeContext(record: ExecutionRecord): string {
  * coordinator runs only those. Undefined for single-agent records, records
  * with no stored plan, or plans with nothing done.
  */
-export function resumePlanFrom(record: ExecutionRecord): ResumePlan | undefined {
+export function resumePlanFrom(record: RunRecord): ResumePlan | undefined {
   const plan = record.result?.plan;
   if (!record.result?.orchestrated || !plan) return undefined;
   const byWorker = new Map<string, NonNullable<WorkerRecord['result']>>();

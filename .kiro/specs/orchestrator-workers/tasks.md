@@ -100,9 +100,9 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 5.1, 11.1, 11.2, 11.3, 12.1_
 - [x] 8.2 Accept and validate `orchestrate` and `maxWorkers` in `app/api/build/route.ts`
   - _Requirements: 2.3, 2.4, 3.2_
-- [x] 8.3 In `lib/build-run.ts`: forward `worker_start` / `worker_done`; tag events and audit entries with `workerId`; per-worker restart in checkpoints; checkpoint on worker start and end
+- [x] 8.3 In `lib/start-run.ts`: forward `worker_start` / `worker_done`; tag events and audit entries with `workerId`; per-worker restart in checkpoints; checkpoint on worker start and end
   - _Requirements: 9.6, 11.1, 11.2, 11.3, 11.5, 12.2_
-- [x] 8.4 Bump `CHECKPOINT_SCHEMA_VERSION` to 2 in `lib/execution-store.ts`; store workers in `result` JSONB; load version 1 records as single-agent
+- [x] 8.4 Bump `CHECKPOINT_SCHEMA_VERSION` to 2 in `lib/run-store.ts`; store workers in `result` JSONB; load version 1 records as single-agent
   - _Requirements: 12.1, 12.3_
 - [x] 8.5 Resume orchestrated runs from `done` steps in `resumeContextFrom`
   - _Requirements: 12.4_
@@ -110,7 +110,7 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 7.3_
 - [x] 8.7 Add orchestration fields to the run record and `/api/metrics`
   - _Requirements: 14.2_
-- [x] 8.8 Tests in `lib/build-run.test.ts` and `app/api/build/route.test.ts`
+- [x] 8.8 Tests in `lib/start-run.test.ts` and `app/api/build/route.test.ts`
   - _Requirements: 11.1, 11.3, 12.2, 12.4_
 
 - [x] 9. User interface
