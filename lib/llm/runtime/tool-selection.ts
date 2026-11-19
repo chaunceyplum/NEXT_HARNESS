@@ -13,10 +13,8 @@ import { shortlistTools } from '../tools/tool-retrieval';
 import { ALWAYS_ON_TOOLS, stage } from './agent-core';
 import { applyToolPolicy, type PolicyMode } from '../tools/tool-policy';
 import { applyActionGuards } from '../quality/guardrails';
-import { launchShortlistQuery } from '../domains/launch/plan';
-import { domainAlwaysOnTools } from '../domains';
-import { LaunchValidationGate } from '../domains/launch/validation';
-import { type LaunchRequirements } from '../domains/launch/brief';
+import { domainAlwaysOnTools, type ActiveDomains } from '../domains';
+import type { ToolCallGate } from '../tools/tool-policy';
 
 // ── Tool selection ────────────────────────────────────────────────────────────
 
@@ -34,8 +32,13 @@ export async function selectLiveTools(
   policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
   ragJudgmentSink: RagJudgmentSink,
   platformFilter?: string[],
-  launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate },
-  segmentMode = false
+  domains: {
+    active: Partial<ActiveDomains>;
+    publishEnabled?: boolean;
+    /** The domain session's shortlist query (Launch: request + parsed requirements). */
+    shortlistQuery?: string;
+    toolGate?: ToolCallGate;
+  } = { active: {} }
 ): Promise<LiveToolSelection> {
   const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
   // Knowledge tools are always kept in the catalog, whatever platforms are
@@ -54,10 +57,10 @@ export async function selectLiveTools(
   // always on (segment-context.ts), so the "only real fields" rule is usable.
   const alwaysOnNames = [
     ...ALWAYS_ON_TOOLS,
-    ...domainAlwaysOnTools({ launch: launch?.enabled === true, segments: segmentMode }, { publishEnabled: launch?.publishEnabled === true }),
+    ...domainAlwaysOnTools(domains.active, { publishEnabled: domains.publishEnabled === true }),
   ];
   const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name) && !isKnowledgeTool(name));
-  const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
+  const shortlistQuery = domains.shortlistQuery ?? userInput;
   const shortlisted = await stage('tool-shortlisting embedding call', () =>
     shortlistTools(shortlistQuery, {
       k: toolShortlistSize,
@@ -73,9 +76,9 @@ export async function selectLiveTools(
   // Action guardrails (write cap, protected ids, result redaction) wrap the
   // same objects call_tool executes.
   const callable = applyActionGuards(
-    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink, launchGate: launch?.gate }), {
+    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink, toolGate: domains.toolGate }), {
       ...policy,
-      launchGate: launch?.gate,
+      toolGate: domains.toolGate,
     })
   );
   // Built over the whole catalog so each tool's error grounding can still

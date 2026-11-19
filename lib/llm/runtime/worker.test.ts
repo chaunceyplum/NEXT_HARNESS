@@ -424,14 +424,14 @@ describe('runWorker', () => {
         step,
         tools: { reactor_create_library: handoff },
         catalog: makeCatalog(['reactor_create_library']),
-        shared: makeShared({ launchGate: gate }),
+        shared: makeShared({ toolGate: gate, launchMode: true }),
       })
     );
 
     // The gate blocked the write (it never completed) and the step is failed.
     expect(handoffSucceeded).toBe(false);
     expect(rec.status).toBe('failed');
-    // The worker ran as a Launch worker because the shared gate was present.
+    // The worker ran as a Launch worker (gated Launch run).
     const launchCall = calls.find((c) => (c.tools ?? []).some((t) => t.name === 'reactor_create_library'));
     expect(launchCall).toBeDefined();
   });

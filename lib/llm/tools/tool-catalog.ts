@@ -23,8 +23,8 @@ import {
 } from './tool-call-cache';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from '../quality/commit-validation';
-import { validateBeforeSegmentWrite } from '../domains/segments/validation';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import { checkDomainToolCall } from '../domains';
+import type { ToolCallGate } from './tool-policy';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from '../quality/rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
@@ -135,15 +135,16 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
 
 /**
  * Local tools first (no network round-trip), then the MCP server — with the
- * pre-commit syntax check gating msb_github_commit_code, and the profile-field
- * check gating adobe_create_segment / adobe_update_segment (segment-validation.ts).
+ * pre-commit syntax check gating msb_github_commit_code, and every domain
+ * pack's pre-call check (lib/llm/domains; e.g. the profile-field check gating
+ * adobe_create_segment / adobe_update_segment).
  */
 async function callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (isLocalTool(toolName)) {
     return executeLocalTool(toolName, args, signal);
   }
   await validateBeforeCommit(toolName, args);
-  await validateBeforeSegmentWrite(toolName, args, { signal });
+  await checkDomainToolCall(toolName, args, { signal });
   return callMcpTool(toolName, args, { signal });
 }
 
@@ -498,13 +499,12 @@ export interface BuildAiToolsOptions {
    */
   ragJudgmentSink?: RagJudgmentSink;
   /**
-   * Phase 4: Launch-mode validation gate (launch-validation.ts). When present,
-   * each tool call is observed to build property state, and the library handoff
-   * (reactor_create_library / reactor_update_library) is validated and BLOCKED
-   * before it reaches the MCP server if a check fails. Omit (non-Launch runs)
-   * and this is a no-op.
+   * The run's domain gate (lib/llm/domains; Launch's validation gate). When
+   * present, each tool call is observed (Launch builds property state from
+   * results) and may be BLOCKED before it reaches the MCP server (Launch: a
+   * library handoff that fails validation). Omit and this is a no-op.
    */
-  launchGate?: LaunchValidationGate;
+  toolGate?: ToolCallGate;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
@@ -743,20 +743,20 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       inputSchema: jsonSchema(def.inputSchema as never),
       execute: async (input: unknown, { abortSignal }) => {
         const args = (input as Record<string, unknown>) ?? {};
-        // Phase 4: block the library handoff BEFORE the MCP write when the
-        // Launch validation gate is active and a check fails. Throwing here
-        // reuses the loop's tool-error feedback path (the model sees the
-        // reasons and retries) — see launch-validation.ts. No-op off Launch mode.
-        opts.launchGate?.gate(def.name, args);
+        // Block the call BEFORE the MCP write when the run's domain gate
+        // refuses it (Launch: a library handoff that fails validation).
+        // Throwing here reuses the loop's tool-error feedback path (the model
+        // sees the reasons and retries). No-op when the run has no gate.
+        opts.toolGate?.gate(def.name, args);
         const result = await executeMcpToolWithRetry(
           def.name,
           args,
           { maxRetries, availableNames, grounding, deduper, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
         );
-        // Observe the successful result so property state (installed
-        // extensions, known data elements) and created resources are available
-        // for a later handoff's reference check.
-        opts.launchGate?.observe(def.name, args, result);
+        // Let the gate observe the successful result (Launch: installed
+        // extensions, known data elements and created resources feed a later
+        // handoff's reference check).
+        opts.toolGate?.observe(def.name, args, result);
         return capToolResult(def.name, result);
       },
     });

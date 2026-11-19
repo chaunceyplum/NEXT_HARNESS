@@ -6,7 +6,7 @@ import { type AgentStepTrace, type TokenUsage, type ToolOutcome } from './agent-
 import { ModelHealthTracker } from '../models/model-health';
 import { type PolicyMode } from '../tools/tool-policy';
 import { type Plan } from './planner';
-import { type LaunchRequirements } from '../domains/launch/brief';
+import type { LaunchRequirements } from '../domains';
 import { type RouteDecision } from '../models/model-router';
 import { type BudgetStopReason, type BudgetUsage, type RunBudgetLimits } from './run-budget';
 import { type ApprovalReason, type RolloutMode } from '../tools/approval-policy';

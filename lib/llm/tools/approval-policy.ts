@@ -22,7 +22,6 @@
  */
 
 import { classifyTool } from './tool-policy';
-import { PUBLISH_TRANSITION_TOOL, type ResolvedStage } from '../domains/launch/validation';
 
 export type RolloutMode = 'autonomous' | 'assisted' | 'shadow';
 
@@ -121,18 +120,18 @@ function sqlOf(input: unknown): unknown {
  * `toolName`/`input` are the effective call (call_tool already unwrapped).
  * `dryRun` means destructive tools are wrapped and won't execute.
  *
- * `transitionStage` is the resolved target stage of a reactor_transition_library
- * call, from server truth (launch-validation.ts, via the run's gate). A
- * transition whose target stage is a VERIFIED "development" or "staging" is
- * exempt from the outbound-approval gate (the user asked for an ungated
- * dev/staging publish); production stays blocked in code (the gate refuses it
- * before it ever reaches here), and an "unknown"/absent stage stays gated —
- * a publish that can't be proven safe is not exempted.
+ * `verifiedOutbound` means the run's domain session has verified this
+ * outbound call is safe to run without a person (Launch: a publish
+ * transition whose target is a server-verified development or staging
+ * environment — see isVerifiedDevPublish in lib/llm/domains/launch/pack.ts).
+ * It is exempt from the outbound-approval gate; production stays blocked in
+ * code (the Launch gate refuses it before it ever reaches here), and anything
+ * the domain could not verify stays gated.
  */
 export function approvalReason(
   toolName: string,
   input: unknown,
-  opts: { mode?: RolloutMode; dryRun?: boolean; transitionStage?: ResolvedStage } = {}
+  opts: { mode?: RolloutMode; dryRun?: boolean; verifiedOutbound?: boolean } = {}
 ): ApprovalReason | undefined {
   const mode = opts.mode ?? 'autonomous';
   const level = classifyTool(toolName);
@@ -143,14 +142,11 @@ export function approvalReason(
   if (neutralised) return undefined;
   if (level === 'destructive') return 'destructive';
   if (SQL_TOOLS.has(toolName) && !isReadOnlySql(sqlOf(input))) return 'sql-write';
-  // A publish transition to a server-verified dev/staging environment is NOT
-  // gated — the user asked for an ungated dev/staging publish, and the
-  // production block (launch-validation.ts) independently refuses prod. Every
-  // other outbound tool, and a transition with an unknown stage, stays gated.
-  if (
-    toolName === PUBLISH_TRANSITION_TOOL &&
-    (opts.transitionStage === 'development' || opts.transitionStage === 'staging')
-  ) {
+  // An outbound call the domain verified (Launch: a publish transition to a
+  // server-verified dev/staging environment) is NOT gated — the user asked for
+  // an ungated dev/staging publish, and the production block independently
+  // refuses prod. Every other outbound call stays gated.
+  if (opts.verifiedOutbound === true && OUTBOUND_TOOLS.has(toolName)) {
     return mode === 'assisted' && level === 'write' ? 'assisted-mode' : undefined;
   }
   if (OUTBOUND_TOOLS.has(toolName)) return 'outbound';

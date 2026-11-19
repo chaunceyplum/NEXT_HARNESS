@@ -18,7 +18,7 @@ import type { PlanningRetrieval } from './planning-retrieval';
 import type { RagJudgmentSink, RagJudgmentEntry } from '../tools/tool-catalog';
 import type { RouteDecision } from '../models/model-router';
 import type { AttrValue, SpanRef } from '../../tracing';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import type { ToolCallGate } from '../tools/tool-policy';
 import { domainPromptBlocks } from '../domains';
 
 /**
@@ -268,13 +268,13 @@ export interface LoopContext {
   /** Approval reason per tool-call id, filled by toolApproval and read when reporting outcomes. */
   approvalReasons: Map<string, ApprovalReason>;
   /**
-   * Phase 3 (workers): the run's single LaunchValidationGate (Requirement
-   * 9.1). The gate is already embedded in `tools` (buildAiTools wraps each
-   * tool's execute with it), so a single-agent loop doesn't read this field —
-   * it is carried here so the coordinator can hand the SAME instance to every
-   * worker and so a worker's loop knows it is in a gated Launch run.
+   * Phase 3 (workers): the run's single domain tool gate (Launch's validation
+   * gate, Requirement 9.1). The gate is already embedded in `tools`
+   * (buildAiTools wraps each tool's execute with it), so a single-agent loop
+   * doesn't read this field — it is carried here so the coordinator can hand
+   * the SAME instance to every worker.
    */
-  launchGate?: LaunchValidationGate;
+  toolGate?: ToolCallGate;
   /** Base attributes for the run trace span. */
   baseTracerAttrs: Record<string, AttrValue>;
   /**

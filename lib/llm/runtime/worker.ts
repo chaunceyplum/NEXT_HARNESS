@@ -27,7 +27,7 @@
 import { tool, jsonSchema, type Tool, type ToolSet } from 'ai';
 import type { AgentStepTrace, LoopContext, ToolApprovalFn, ToolOutcome } from './agent-core';
 import type { ApprovalReason } from '../tools/approval-policy';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
 import { executeLoop } from './agent';
 import { getDefaultModelKey } from '../models/model-registry';
@@ -225,8 +225,10 @@ export interface SharedRunState {
   runId?: string;
   /** The run's budget ledger; each worker gets a child slice that also charges it. */
   ledger: RunLedger;
-  /** One LaunchValidationGate per run, shared by every worker (Requirement 9.1). */
-  launchGate?: LaunchValidationGate;
+  /** One domain tool gate per run (Launch's validation gate), shared by every worker (Requirement 9.1). */
+  toolGate?: ToolCallGate;
+  /** Gated Launch run: workers get the Launch grounding. */
+  launchMode?: boolean;
   /** Segment/audience run: workers get the segment grounding (segment-context.ts). */
   segmentMode?: boolean;
   /** Set when writes must run one at a time (Launch, LAUNCH_PARALLEL_WRITES off) (Requirement 3.4). */
@@ -433,7 +435,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
 
   const ctx: LoopContext = {
     tools,
-    launchMode: Boolean(shared.launchGate),
+    launchMode: shared.launchMode === true,
     publishEnabled: false,
     segmentMode: shared.segmentMode === true,
     userMessage: buildWorkerBrief(input),
@@ -448,7 +450,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     baseTracerAttrs: tracerAttrs,
     // Requirement 14.1: nest the worker's trace under the coordinator span.
     ...(shared.tracerParent ? { tracerParent: shared.tracerParent } : {}),
-    ...(shared.launchGate ? { launchGate: shared.launchGate } : {}),
+    ...(shared.toolGate ? { toolGate: shared.toolGate } : {}),
     // Tag each approval with this worker so the request names it (Requirements 11.3, 15.3).
     ...(shared.toolApproval
       ? { toolApproval: ((approval) => shared.toolApproval!({ ...approval, workerId })) as ToolApprovalFn }

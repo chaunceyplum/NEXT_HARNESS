@@ -36,12 +36,14 @@
 import { tool, jsonSchema, type ToolSet } from 'ai';
 
 /**
- * Structural view of the Phase 4 Launch validation gate (launch-validation.ts
- * LaunchValidationGate), typed here to avoid importing that module (which
- * imports classifyTool from this one — the interface keeps the dependency
- * one-way). Its gate() throws to block a library handoff that fails validation.
+ * A per-run gate around every tool call, supplied by a domain session
+ * (lib/llm/domains). gate() runs before the call and throws to refuse it;
+ * observe() sees each result (or undefined for a dry-run description).
+ * Launch's validation gate is one: it blocks a library handoff that fails
+ * validation. Defined here, in the tool layer, so this layer never imports a
+ * domain.
  */
-export interface LaunchHandoffGate {
+export interface ToolCallGate {
   gate(toolName: string, args: unknown): void;
   observe(toolName: string, args: unknown, result: unknown): void;
 }
@@ -138,12 +140,12 @@ export function resolvePolicy(opts: { mode?: PolicyMode; dryRun?: boolean } = {}
 
 export function applyToolPolicy(
   tools: ToolSet,
-  opts: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean; launchGate?: LaunchHandoffGate } = {}
+  opts: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean; toolGate?: ToolCallGate } = {}
 ): ToolSet {
   const { mode, dryRun } = resolvePolicy(opts);
   // Shadow rollout (approval-policy.ts): writes are intercepted too, not just destructive calls.
   const dryRunWrites = opts.dryRunWrites === true;
-  const launchGate = opts.launchGate;
+  const toolGate = opts.toolGate;
 
   const result: ToolSet = {};
 
@@ -171,12 +173,12 @@ export function applyToolPolicy(
           // for it — validating the handoff against the structural/reference
           // invariants and throwing (so the model fixes it) before this
           // returns the "would do" description. No-op for a non-handoff tool.
-          launchGate?.gate(name, input);
+          toolGate?.gate(name, input);
           // Still observe the (not-executed) call so a dry-run/shadow create
           // of a rule component / data element is remembered for a later
           // handoff's reference check — there's no server result, so only the
           // arguments are read (see LaunchValidationGate.observe).
-          launchGate?.observe(name, input, undefined);
+          toolGate?.observe(name, input, undefined);
           return {
             _dryRun: true,
             tool: name,
