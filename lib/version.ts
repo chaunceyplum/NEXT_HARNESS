@@ -5,13 +5,13 @@
  *
  * These are short, stable hashes — not secrets and not collision-proof — meant
  * only to answer "did the prompt / tools / code change between these two runs?"
- * The eval suite (evals/agent.eval.ts) and runAgent (lib/llm/agent.ts) both
+ * The eval suite (evals/agent.eval.ts) and runAgent (lib/llm/runtime/agent.ts) both
  * compute promptVersion the same way through shortHash(), so an eval score and
  * a production run are directly comparable.
  */
 
 import { createHash } from 'node:crypto';
-import { systemPrompt } from './llm/agent-core';
+import { systemPrompt } from './llm/runtime/agent-core';
 
 /** First 12 hex chars of the sha256 of `input`. The project-wide version-hash convention. */
 export function shortHash(input: string): string {

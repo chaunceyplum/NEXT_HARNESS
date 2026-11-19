@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, BuildStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, RunVersions, TokenUsage } from '@/lib/types';
+import { AgentStepDTO, RunStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, RunVersions, TokenUsage } from '@/lib/types';
 import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
@@ -183,7 +183,7 @@ export default function Home() {
     const processLine = (line: string) => {
       const trimmed = line.trim();
       if (!trimmed) return;
-      let event: BuildStreamEvent;
+      let event: RunStreamEvent;
       try { event = JSON.parse(trimmed); } catch { return; }
 
       if (event.type === 'done' || event.type === 'error') terminal = true;

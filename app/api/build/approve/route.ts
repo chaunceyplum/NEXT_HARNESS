@@ -10,7 +10,7 @@
  * is set and doesn't include the caller.
  */
 
-import { resolveApproval } from '@/lib/llm/approvals';
+import { resolveApproval } from '@/lib/llm/tools/approvals';
 import { mayApprove, requestUser } from '@/lib/auth';
 import { ApiError } from '@/lib/types';
 

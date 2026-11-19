@@ -12,7 +12,7 @@ flowchart TD
     subgraph Harness["Harness — Next.js on EC2 (PM2)"]
         direction TB
         UI["UI<br/>app/page.tsx"]
-        Agent["Agent loop<br/>POST /api/build → lib/llm/agent.ts<br/>shortlists tools, loops the model up to maxSteps,<br/>retries failed calls, skips permission errors outright"]
+        Agent["Agent loop<br/>POST /api/build → lib/llm/runtime/agent.ts<br/>shortlists tools, loops the model up to maxSteps,<br/>retries failed calls, skips permission errors outright"]
         Catalog["Tool catalog<br/>tool-catalog.ts — drops non-Adobe<br/>tools by default"]
         Coordinator["Coordinator (optional)<br/>coordinator.ts — runs independent<br/>plan steps as concurrent workers"]
         UI --> Agent
@@ -77,17 +77,17 @@ up to a configurable step budget.
 AEP segments get the same kind of domain grounding Launch runs do, ported
 from intake_harness, which built noticeably better audiences:
 
-- **Prompt** (`lib/llm/segment-context.ts`): a request that mentions
+- **Prompt** (`lib/llm/domains/segments/context.ts`): a request that mentions
   segments, audiences or PQL (or sets `segmentMode`) adds a block to the
   cached system prompt: real-fields-only and don't-narrow-the-audience rules,
   the business glossary (CBM, SEP, how Y/N flags read), and Adobe's PQL
   function reference (`docs/pql-reference.md`, compiled into
-  `lib/llm/pql-reference.ts`; the knowledge base has no PQL syntax).
+  `lib/llm/domains/segments/pql-reference.ts`; the knowledge base has no PQL syntax).
 - **Field lookup**: the local tool `aep_find_profile_fields` searches the
   sandbox's full profile catalog by business words. The catalog
-  (`lib/llm/profile-catalog.ts`) is built from the field groups the profile
+  (`lib/llm/domains/segments/profile-catalog.ts`) is built from the field groups the profile
   union lists, since the union view itself carries no inline fields.
-- **Pre-write check** (`lib/llm/segment-validation.ts`): before
+- **Pre-write check** (`lib/llm/domains/segments/validation.ts`): before
   `adobe_create_segment` / `adobe_update_segment` runs, each field path in
   its PQL is checked against that catalog; one the sandbox provably doesn't
   have rejects the call with nothing created. It fails open when the catalog
@@ -97,12 +97,12 @@ from intake_harness, which built noticeably better audiences:
 ## Orchestrator-worker mode (optional)
 
 Off by default (`ORCHESTRATION=off`). When it's on and a run's plan has
-steps whose dependencies are done, the coordinator (`lib/llm/coordinator.ts`)
-runs them as concurrent worker agents (`lib/llm/worker.ts`), each with its
+steps whose dependencies are done, the coordinator (`lib/llm/runtime/coordinator.ts`)
+runs them as concurrent worker agents (`lib/llm/runtime/worker.ts`), each with its
 own narrowed tool set, step cap and share of the run's budget. A failed
 step triggers a bounded replan, and one synthesis call writes the final
 answer. Everything stays in the same Node process: a process-wide slot pool
-(`lib/llm/agent-slots.ts`, `MAX_AGENT_LOOPS`) caps concurrent agent loops
+(`lib/llm/runtime/agent-slots.ts`, `MAX_AGENT_LOOPS`) caps concurrent agent loops
 across all runs, and traces nest run → coordinator → worker.
 
 ## MCP Server (AEC_MCP, separate system)

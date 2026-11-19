@@ -35,11 +35,11 @@ Unit tests, typecheck, lint and build run on every PR (`.github/workflows/ci.yml
 | --- | --- | --- | --- |
 | `npm run eval:shortlist` | Tool | `shortlistTools()` against the **live** MCP catalog: does the shortlist the agent would get contain the tools the task needs? A tool that misses the shortlist can't be called at all. | `MCP_ENDPOINT_URL` (+ an embedding provider, else the lexical fallback is graded — the run records which) |
 | `npm run eval:agent` | Tool, trajectory, outcome, safety | The real `runAgent()` loop and system prompt with a real model, against **scripted** tools. Scope, recovery, and adversarial (`category: "safety"`) cases. | Credentials for `EVAL_MODEL` and the judge model |
-| `npm run eval:rag-judge` | Judge calibration | The production RAG judge (`lib/llm/rag-judge.ts`) on canned retrievals: does its verdict agree with a human's? | Credentials for `RAG_JUDGE_MODEL` (default `DEFAULT_MODEL`) |
+| `npm run eval:rag-judge` | Judge calibration | The production RAG judge (`lib/llm/quality/rag-judge.ts`) on canned retrievals: does its verdict agree with a human's? | Credentials for `RAG_JUDGE_MODEL` (default `DEFAULT_MODEL`) |
 | `npm run eval:judge` | Judge calibration | The eval's own rubric judge against human-labelled answers. Run this before trusting `eval:agent` outcome grades, and again whenever the judge prompt or model changes. | Credentials for the judge model |
-| `npm run eval:critic` | Critic calibration | The production answer critic (`lib/llm/answer-critic.ts`) against the judge-calibration answers that carry a `criticVerdict`. Reports agreement plus catch rate and false-flag rate. Run it before switching `CRITIC_MODE` to `revise`, and whenever the critic prompt or `CRITIC_MODEL` changes. | Credentials for the critic model |
-| `npm run eval:launch` | Trajectory, outcome, safety | The real agent loop in Launch mode against **scripted** Reactor tools. Beyond the agent suite's trajectory checks, it replays the run's rule components and data elements through the Launch validation gate (`lib/llm/launch-validation.ts`): they must validate and every reference must resolve. Also checks that publishing to production is refused. | Credentials for `EVAL_MODEL` and the judge model |
-| `npm run eval:routing` | Routing accuracy | `lib/llm/model-router.ts` on labelled requests in `fixtures/routing/`: is each sent to the right category (lookup/change/build), and do ambiguous ones come back "unclear"? | Credentials for the cheap-tier router model |
+| `npm run eval:critic` | Critic calibration | The production answer critic (`lib/llm/quality/answer-critic.ts`) against the judge-calibration answers that carry a `criticVerdict`. Reports agreement plus catch rate and false-flag rate. Run it before switching `CRITIC_MODE` to `revise`, and whenever the critic prompt or `CRITIC_MODEL` changes. | Credentials for the critic model |
+| `npm run eval:launch` | Trajectory, outcome, safety | The real agent loop in Launch mode against **scripted** Reactor tools. Beyond the agent suite's trajectory checks, it replays the run's rule components and data elements through the Launch validation gate (`lib/llm/domains/launch/validation.ts`): they must validate and every reference must resolve. Also checks that publishing to production is refused. | Credentials for `EVAL_MODEL` and the judge model |
+| `npm run eval:routing` | Routing accuracy | `lib/llm/models/model-router.ts` on labelled requests in `fixtures/routing/`: is each sent to the right category (lookup/change/build), and do ambiguous ones come back "unclear"? | Credentials for the cheap-tier router model |
 | `npm run eval:all` | | All of the above. | |
 
 Before any fixture runs, each suite prints which model it will use for
@@ -97,7 +97,7 @@ Every run prints, and saves, these (`lib/eval-metrics.ts`):
 | Safety violation rate | Share of trials that made a call a fixture marks unsafe. Target is zero. |
 | Steps to completion | Mean agent-loop steps. Rising counts mean confusion, weak tools, or missing context. |
 | p50 / p95 latency | Per trial. Agents have long tails. |
-| Cost per success | Estimated dollars (and tokens) divided by *successful* trials, not all runs. Uses list prices in `lib/llm/pricing.ts`. Bedrock bills separately, so set `MODEL_PRICING_JSON` for exact figures. Shown only when every trial could be priced. |
+| Cost per success | Estimated dollars (and tokens) divided by *successful* trials, not all runs. Uses list prices in `lib/llm/models/pricing.ts`. Bedrock bills separately, so set `MODEL_PRICING_JSON` for exact figures. Shown only when every trial could be priced. |
 
 Agent runs also record a short hash of the system prompt they ran against,
 so a score change can be tied to a prompt change.
@@ -171,7 +171,7 @@ order) and only the model is real. `runAgent()` takes the scripted tool set
 via its `tools` option and otherwise runs exactly as `/api/build` does.
 
 Fixture tools may leave out `description`/`inputSchema` to use the real
-definition, from `lib/llm/local-tools.ts` for the `github_*` tools or from
+definition, from `lib/llm/tools/local-tools.ts` for the `github_*` tools or from
 the live MCP catalog when `MCP_ENDPOINT_URL` is set. Prefer that, or copy the
 live description, so the model sees what it sees in production.
 
@@ -187,7 +187,7 @@ counted separately from ordinary scope misses. Any fixture can declare
 them.
 
 `safety-ambiguous-bulk-delete` is **expected to fail today**. The system
-prompt (`lib/llm/agent-core.ts`) has no confirm-before-destructive rule, and
+prompt (`lib/llm/runtime/agent-core.ts`) has no confirm-before-destructive rule, and
 this case exists to show that gap, not to be tuned around. Add a case for
 every red-team finding.
 
@@ -198,14 +198,14 @@ plain-language audience eval) phrase an audience the way a marketer does
 ("Security Edge Preferred customers", "companies with more than 50
 employees") against scripted fields titled with the business's
 abbreviations ("Has SEP", "Is CBM member") and holding Y/N strings. They
-test the segment grounding (`lib/llm/segment-context.ts`): the glossary
+test the segment grounding (`lib/llm/domains/segments/context.ts`): the glossary
 mapping, `= "Y"` / `!= "Y"` flag handling, looking fields up with
 `aep_find_profile_fields` before writing PQL, and refusing to build a
 narrower audience when one condition has no field.
 `segment-field-check-rejection-recovery` scripts the pre-write field check's
-rejection (`lib/llm/segment-validation.ts`) and checks the agent fixes the
+rejection (`lib/llm/domains/segments/validation.ts`) and checks the agent fixes the
 field from the error. Scripted tools bypass the live check itself, which is
-covered by `lib/llm/segment-validation.test.ts`.
+covered by `lib/llm/domains/segments/validation.test.ts`.
 
 ## Viewing results
 
@@ -254,7 +254,7 @@ touched a tool it wasn't asked to, missed the tool it needed), turn the tool
 results it saw into scripted `responses`, write down what *should* have
 happened, and check it in. A fixture records the correct behavior, not what
 happened. The current fixtures encode the system prompt's own rules
-(`lib/llm/agent-core.ts`) plus common attack patterns, and are synthetic
+(`lib/llm/runtime/agent-core.ts`) plus common attack patterns, and are synthetic
 until real regressions replace them.
 
 ## Grading philosophy

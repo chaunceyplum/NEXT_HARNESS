@@ -16,7 +16,7 @@
  */
 
 import { execSql, sqlStr, sqlStrOrNull } from './mcp-sql';
-import { findPii, findSecrets } from './llm/guardrails';
+import { findPii, findSecrets } from './llm/quality/guardrails';
 
 const TABLE = 'harness_memory';
 export const MAX_FACTS = 100;

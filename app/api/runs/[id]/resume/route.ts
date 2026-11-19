@@ -8,8 +8,8 @@
  * its run_start event and the X-Run-Id header.
  */
 
-import { getExecution } from '@/lib/execution-store';
-import { resumeContextFrom, resumePlanFrom, startBuildRun } from '@/lib/build-run';
+import { getRun } from '@/lib/run-store';
+import { resumeContextFrom, resumePlanFrom, startRun } from '@/lib/start-run';
 import { runsBlockedReason } from '@/lib/kill-switch';
 import { getJob, streamJob } from '@/lib/run-jobs';
 import type { ApiError } from '@/lib/types';
@@ -19,7 +19,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const blocked = runsBlockedReason();
   if (blocked) return Response.json({ error: blocked, code: 'KILL_SWITCH' } as ApiError, { status: 503 });
 
-  const record = await getExecution(id).catch(() => null);
+  const record = await getRun(id).catch(() => null);
   if (!record) return Response.json({ error: `Run not found: ${id}`, code: 'NOT_FOUND' } as ApiError, { status: 404 });
   if (record.status === 'completed' || getJob(id)?.done === false) {
     return Response.json(
@@ -35,7 +35,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // An orchestrated run continues its stored plan, running only the steps
   // that are not done (Requirement 12.4).
   const resumePlan = resumePlanFrom(record);
-  const job = startBuildRun(
+  const job = startRun(
     { ...original, resumeContext: resumeContextFrom(record), resumedFrom: record.id, ...(resumePlan ? { resumePlan } : {}) },
     request.headers.get('x-harness-user') || 'anonymous'
   );

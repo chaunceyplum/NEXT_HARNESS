@@ -1,7 +1,7 @@
 /**
  * Launch-tagging eval — run manually with `npm run eval:launch`.
  *
- * Grades the REAL agent loop (lib/llm/agent.ts runAgent) in Launch mode
+ * Grades the REAL agent loop (lib/llm/runtime/agent.ts runAgent) in Launch mode
  * (launchMode: true, so the Launch/Reactor object-model grounding is in the
  * system prompt) against SCRIPTED Reactor tools (evals/lib/scripted-tools.ts)
  * instead of the live MCP server — the same opts.tools scripted-tool path the
@@ -14,7 +14,7 @@
  * Phase 4 reliability check the whole feature exists for:
  *
  *   - The rule components and data elements the run produced VALIDATE under the
- *     Phase 4 schemas (lib/llm/launch-validation.ts), and
+ *     Phase 4 schemas (lib/llm/domains/launch/validation.ts), and
  *   - every reference RESOLVES — each delegate names an installed extension and
  *     each %data element% reference resolves to one that exists or was created
  *     this run.
@@ -37,10 +37,10 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { runAgent } from '@/lib/llm/agent';
+import { runAgent } from '@/lib/llm/runtime/agent';
 import { promptVersion } from '@/lib/version';
-import { ModelHealthTracker } from '@/lib/llm/model-health';
-import { estimateCostUsd } from '@/lib/llm/pricing';
+import { ModelHealthTracker } from '@/lib/llm/models/model-health';
+import { estimateCostUsd } from '@/lib/llm/models/pricing';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report, reportComparison } from './lib/report';

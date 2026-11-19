@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Regenerates lib/llm/pql-reference.ts from docs/pql-reference.md.
+ * Regenerates lib/llm/domains/segments/pql-reference.ts from docs/pql-reference.md.
  *
  * The reference is compiled into the bundle as a string rather than read
  * from disk at runtime: `output: "standalone"` only ships files the tracer
  * finds, and a runtime fs read of docs/ is not a guaranteed inclusion. The
- * markdown stays the human-edited source; lib/llm/segment-context.test.ts
+ * markdown stays the human-edited source; lib/llm/domains/segments/context.test.ts
  * fails if the two drift.
  *
  *   node scripts/gen-pql-reference.mjs
@@ -22,5 +22,5 @@ const out = [
   `export const PQL_REFERENCE = ${JSON.stringify(md)};`,
   '',
 ].join('\n');
-writeFileSync(join(root, 'lib/llm/pql-reference.ts'), out);
-console.log(`wrote lib/llm/pql-reference.ts (${md.length} chars)`);
+writeFileSync(join(root, 'lib/llm/domains/segments/pql-reference.ts'), out);
+console.log(`wrote lib/llm/domains/segments/pql-reference.ts (${md.length} chars)`);

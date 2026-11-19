@@ -1,4 +1,4 @@
-import { listExecutions } from '@/lib/execution-store';
+import { listRuns } from '@/lib/run-store';
 import type { RunSummary } from '@/lib/types';
 import { ResultsList } from '@/components/ResultsList';
 
@@ -14,7 +14,7 @@ export default async function ResultsPage() {
   let initialRuns: RunSummary[] = [];
   let initialTotal = 0;
   try {
-    const data = await listExecutions({ limit: PAGE_SIZE, offset: 0 });
+    const data = await listRuns({ limit: PAGE_SIZE, offset: 0 });
     initialRuns = data.runs;
     initialTotal = data.total;
   } catch {

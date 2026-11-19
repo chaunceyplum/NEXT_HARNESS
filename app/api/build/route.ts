@@ -14,7 +14,7 @@
  *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...],
  *    "stopReason":"token-budget"?,"budgetUsage":{"tokens":...,"costUsd":...,"durationMs":...}}
  *
- * When a tool call needs a human decision (lib/llm/approval-policy.ts; POST it
+ * When a tool call needs a human decision (lib/llm/tools/approval-policy.ts; POST it
  * to /api/build/approve — the run waits until then, or until it times out):
  *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...},"reason":"outbound","reasonText":"..."}
  *   {"type":"approval_resolved","toolCallId":"...","approved":true,"reason":"..."}
@@ -28,7 +28,7 @@
  * The client reads the stream with a ReadableStream reader, parsing each
  * newline-delimited JSON line as it arrives. Every event carries a `seq`.
  *
- * The run is a job (lib/run-jobs.ts, lib/build-run.ts), not part of this
+ * The run is a job (lib/run-jobs.ts, lib/start-run.ts), not part of this
  * request: if the client disconnects, the run keeps going, and the client
  * can reconnect with GET /api/runs/:id/events (buffered events replay).
  * Stop it with POST /api/runs/:id/cancel (or the kill switch). The run
@@ -37,21 +37,21 @@
  * /results/[id] (POST /api/runs/:id/resume).
  */
 
-import { parseRolloutMode } from '@/lib/llm/approval-policy';
-import { planFirstByDefault } from '@/lib/llm/planner';
-import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
-import { getModelRegistry } from '@/lib/llm/model-registry';
-import { checkInput } from '@/lib/llm/guardrails';
-import { PLATFORM_GROUPS } from '@/lib/llm/tool-catalog';
+import { parseRolloutMode } from '@/lib/llm/tools/approval-policy';
+import { planFirstByDefault } from '@/lib/llm/runtime/planner';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/models/model-router';
+import { getModelRegistry } from '@/lib/llm/models/model-registry';
+import { checkInput } from '@/lib/llm/quality/guardrails';
+import { PLATFORM_GROUPS } from '@/lib/llm/tools/tool-catalog';
 import { runsBlockedReason } from '@/lib/kill-switch';
-import { maxActiveRuns } from '@/lib/llm/orchestration-config';
+import { maxActiveRuns } from '@/lib/llm/runtime/orchestration-config';
 import { activeJobCount, streamJob } from '@/lib/run-jobs';
-import { startBuildRun } from '@/lib/build-run';
-import { ApiError, BuildRequest } from '@/lib/types';
+import { startRun } from '@/lib/start-run';
+import { ApiError, RunRequest } from '@/lib/types';
 
 // ── Validation helpers ────────────────────────────────────────────────────────
 
-function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok: false; error: ApiError; status: number } {
+function validateRequest(body: unknown): { ok: true; req: RunRequest } | { ok: false; error: ApiError; status: number } {
   if (!body || typeof body !== 'object') {
     return { ok: false, error: { error: 'Invalid JSON in request body', code: 'INVALID_JSON' }, status: 400 };
   }
@@ -191,12 +191,14 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     }
   }
 
-  if (b.launchMode !== undefined && typeof b.launchMode !== 'boolean') {
-    return {
-      ok: false,
-      error: { error: '"launchMode" must be a boolean', code: 'VALIDATION_ERROR' },
-      status: 400,
-    };
+  for (const flag of ['launchMode', 'segmentMode'] as const) {
+    if (b[flag] !== undefined && typeof b[flag] !== 'boolean') {
+      return {
+        ok: false,
+        error: { error: `"${flag}" must be a boolean`, code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
   }
 
   // Orchestration opt-in (Requirements 2.3, 2.4): a per-request boolean. Its
@@ -259,7 +261,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
     ok: true,
     req: {
       description,
-      // "auto" routes per request (lib/llm/model-router.ts); MODEL_ROUTING=true makes it the default.
+      // "auto" routes per request (lib/llm/models/model-router.ts); MODEL_ROUTING=true makes it the default.
       model: typeof b.model === 'string' ? b.model : routingEnabledByDefault() ? AUTO_MODEL : undefined,
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,
@@ -277,6 +279,7 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
         ? (b.platformFilter as string[])
         : undefined,
       launchMode: typeof b.launchMode === 'boolean' ? b.launchMode : undefined,
+      segmentMode: typeof b.segmentMode === 'boolean' ? b.segmentMode : undefined,
       ...(b.publishTarget !== undefined ? { publishTarget: normalisePublishTarget(b.publishTarget) } : {}),
       orchestrate: typeof b.orchestrate === 'boolean' ? b.orchestrate : undefined,
       maxWorkers: typeof b.maxWorkers === 'number' ? b.maxWorkers : undefined,
@@ -285,9 +288,9 @@ function validateRequest(body: unknown): { ok: true; req: BuildRequest } | { ok:
 }
 
 /** Pick only the known string members off a validated publishTarget object. */
-function normalisePublishTarget(value: unknown): BuildRequest['publishTarget'] {
+function normalisePublishTarget(value: unknown): RunRequest['publishTarget'] {
   const pt = (value ?? {}) as Record<string, unknown>;
-  const out: NonNullable<BuildRequest['publishTarget']> = {};
+  const out: NonNullable<RunRequest['publishTarget']> = {};
   if (typeof pt.environmentId === 'string') out.environmentId = pt.environmentId;
   if (typeof pt.environmentName === 'string') out.environmentName = pt.environmentName;
   if (typeof pt.propertyId === 'string') out.propertyId = pt.propertyId;
@@ -326,5 +329,5 @@ export async function POST(request: Request): Promise<Response> {
   }
   const req = validation.req;
 
-  return streamJob(startBuildRun(req, request.headers.get('x-harness-user') || 'anonymous'));
+  return streamJob(startRun(req, request.headers.get('x-harness-user') || 'anonymous'));
 }

@@ -24,7 +24,7 @@
 
 import { generateObject, NoObjectGeneratedError } from 'ai';
 import { z } from 'zod';
-import { resolveModel } from '@/lib/llm/model-registry';
+import { resolveModel } from '@/lib/llm/models/model-registry';
 
 /** Minimum 1–5 score every criterion needs for a pass. */
 export const PASS_SCORE = 4;

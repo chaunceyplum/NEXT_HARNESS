@@ -1,0 +1,498 @@
+/**
+ * Starting an agent run as a job (lib/run-jobs.ts), shared by POST
+ * /api/build and POST /api/runs/:id/resume. The request has already been
+ * validated; this owns everything after: kill-switch registration, the
+ * agent loop, streaming events, per-step checkpoints, and the final record.
+ */
+
+import { runAgent } from '@/lib/llm/runtime/agent';
+import { waitForApproval } from '@/lib/llm/tools/approvals';
+import { APPROVAL_REASON_TEXT } from '@/lib/llm/tools/approval-policy';
+import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
+import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
+import { createStreamRedactor, redactOutput } from '@/lib/llm/quality/guardrails';
+import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
+import { critiqueAnswer, type Critique } from '@/lib/llm/quality/answer-critic';
+import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
+import { registerRun } from '@/lib/kill-switch';
+import { startJob, type RunJob } from '@/lib/run-jobs';
+import type { AgentStepDTO, RunRequest, RunRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
+
+/** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
+const PLAN_APPROVAL_ID = 'plan';
+
+export function startRun(req: RunRequest, actor: string): RunJob {
+  console.log('[BUILD] Running agent for:', req.description.slice(0, 80));
+
+  const runId = newRunId();
+  const startedAt = Date.now();
+  const createdAt = new Date(startedAt).toISOString();
+
+  // The run is a job (lib/run-jobs.ts): it keeps going if this request's
+  // client disconnects, and is stopped only by POST /api/runs/:id/cancel,
+  // the kill switch (through this same controller), or its own limits.
+  // Who started the run, persisted with it (server-set, never from the body).
+  req.requestedBy = actor;
+  void recordAudit([{ type: 'run_start', runId, actor, input: { description: req.description, model: req.model } }]);
+  // Tool outcomes are buffered per step and written in one insert.
+  let pendingAudit: AuditEvent[] = [];
+  const flushAudit = () => {
+    const batch = pendingAudit;
+    pendingAudit = [];
+    void recordAudit(batch);
+  };
+
+  const abort = new AbortController();
+  const unregister = registerRun(runId, {
+    abort,
+    startedAt,
+    user: actor,
+    description: req.description,
+  });
+
+  const job = startJob(runId, abort, async (push) => {
+    // Checkpoints: the run record is saved as 'running' after every step,
+    // so a crash or restart leaves the steps so far (marked 'interrupted' on
+    // the next start, and resumable). Saves are chained so the last write wins.
+    const steps: AgentStepDTO[] = [];
+    // Orchestrated runs only (Requirements 11.2, 12.1, 12.2): the worker
+    // records seen so far, keyed by workerId so a later attempt of the same
+    // worker replaces the earlier one. Checkpointed with the run so an
+    // interrupted orchestrated run keeps its finished workers.
+    const workers = new Map<string, WorkerRecord>();
+    let orchestrated = false;
+    // The plan as last emitted, checkpointed so an interrupted orchestrated run
+    // can be resumed from its done steps (Requirement 12.4).
+    let latestPlan: PlanInfo | undefined;
+    // Streamed tokens pass through the output guardrail too. A credential can
+    // span several deltas, so text is held back until it's safe to redact.
+    const textRedactor = createStreamRedactor();
+    const pushDelta = (delta: string) => {
+      if (delta) push({ type: 'text_delta', delta });
+    };
+    // Each record holds the whole run so far, so only the newest one waiting
+    // needs writing: a checkpoint superseded before its turn is dropped
+    // rather than sent. Without this, a slow store queued one full-record
+    // write per step and fell further behind as the run went on.
+    let saving: Promise<void> = Promise.resolve();
+    let queued: RunRecord | undefined;
+    const save = (record: RunRecord) => {
+      const waiting = queued !== undefined;
+      queued = record;
+      if (waiting) return;
+      saving = saving.then(async () => {
+        const next = queued!;
+        queued = undefined;
+        await saveRun(next).catch((err) => console.error(`[BUILD] Failed to save run ${runId} (${next.status}):`, err));
+      });
+    };
+    const checkpoint = () =>
+      save({
+        id: runId,
+        createdAt,
+        description: req.description,
+        model: req.model || getDefaultModelKey(),
+        status: 'running',
+        durationMs: Date.now() - startedAt,
+        request: req,
+        result: {
+          runId,
+          finalText: '',
+          steps: [...steps],
+          toolsConsidered: [],
+          finishReason: 'running',
+          usage: {},
+          // Requirement 12.2: checkpoint the workers mid-run so an orchestrated
+          // run that is interrupted can be resumed with its finished steps.
+          ...(latestPlan ? { plan: latestPlan } : {}),
+          // Only the coordinator revises an orchestrated plan (workers have no
+          // revise_plan), so each version past the first is one replan.
+          ...(orchestrated
+            ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
+            : {}),
+          checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+        },
+      });
+
+    try {
+      // Emit run_start immediately so the client can show a run ID before
+      // any steps. The tool list isn't known until tool selection resolves
+      // inside runAgent, so it's sent on `done` instead.
+      push({ type: 'run_start', runId, toolsConsidered: [] });
+      checkpoint();
+
+      const rawResult = await runAgent({
+        userInput: req.resumeContext ? `${req.description}\n\n${req.resumeContext}` : req.description,
+        modelKey: req.model,
+        toolRetries: req.toolRetries,
+        toolShortlistSize: req.toolShortlistSize,
+        maxSteps: req.maxSteps,
+        budget: { maxTokens: req.maxTokens, maxCostUsd: req.maxCostUsd },
+        policy: req.policy,
+        dryRun: req.dryRun,
+        rolloutMode: req.rolloutMode,
+        thinkingBudget: req.thinkingBudget,
+        platformFilter: req.platformFilter,
+        launchMode: req.launchMode,
+        segmentMode: req.segmentMode,
+        publishTarget: req.publishTarget,
+        // Orchestrator-worker mode (Requirements 2.3, 2.4, 3.2): the coordinator
+        // is used only when ORCHESTRATION is on/always and the plan parallelises.
+        orchestrate: req.orchestrate,
+        maxWorkers: req.maxWorkers,
+        abortSignal: abort.signal,
+        // TASK 8: stream each step as it completes, and checkpoint it.
+        // Requirement 11.3: an orchestrated worker's steps arrive with a
+        // workerId; it is stored on the step and sent on the event so the
+        // client (and the per-worker restart below) can file it by lane.
+        onStep: (step, workerId) => {
+          pushDelta(textRedactor.flush());
+          const redacted: AgentStepDTO = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
+          steps.push(redacted);
+          push({ type: 'step', step: redacted, ...(workerId ? { workerId } : {}) });
+          checkpoint();
+          flushAudit();
+        },
+        // Requirement 11.1: a worker started — open its lane and checkpoint.
+        onWorkerStart: ({ workerId, stepId, modelKey, tools }) => {
+          orchestrated = true;
+          push({ type: 'worker_start', workerId, stepId, modelKey, tools });
+          checkpoint();
+        },
+        // Requirements 11.2, 12.2: a worker ended — record it, emit its result
+        // and token spend, and checkpoint.
+        onWorker: (worker) => {
+          const redacted = redactOutput(worker);
+          workers.set(redacted.workerId, redacted);
+          push({
+            type: 'worker_done',
+            workerId: redacted.workerId,
+            stepId: redacted.stepId,
+            status: redacted.status,
+            ...(redacted.result ? { result: redacted.result } : {}),
+            budgetUsage: redacted.budgetUsage,
+            ...(redacted.error ? { error: redacted.error } : {}),
+          });
+          checkpoint();
+        },
+        // Audit log: every write/destructive call's outcome (reads with
+        // AUDIT_READS=true). Requirement 9.6: an orchestrated worker's outcome
+        // carries its workerId, recorded on the audit entry.
+        onToolOutcome: (o, workerId) => {
+          if (o.level === 'read' && !o.approvalReason && !auditReads()) return;
+          pendingAudit.push({
+            type: 'tool_call',
+            runId,
+            actor,
+            tool: o.toolName,
+            level: o.level,
+            reason: o.approvalReason,
+            input: o.input,
+            outcome: o.outcome,
+            error: o.error,
+            ...(workerId ? { workerId } : {}),
+          });
+        },
+        // TASK 1: stream assistant text token-by-token, through the output guardrail
+        onTextDelta: (delta) => pushDelta(textRedactor.push(delta)),
+        // A same-tier restart discards the abandoned attempt's steps. For a
+        // single-agent run (no workerId) that is the whole trace; for an
+        // orchestrated run (Requirement 11.3) only that worker's steps are
+        // dropped so the other workers' steps survive the checkpoint.
+        onRestart: ({ fromModelKey, toModelKey, workerId }) => {
+          if (workerId) {
+            for (let i = steps.length - 1; i >= 0; i--) {
+              if (steps[i].workerId === workerId) steps.splice(i, 1);
+            }
+          } else {
+            steps.length = 0;
+          }
+          push({ type: 'restart', fromModelKey, toModelKey, ...(workerId ? { workerId } : {}) });
+          checkpoint();
+        },
+        // Deployment memory records which run and user saved a fact
+        runId,
+        actor,
+        // Plan-and-execute: the plan, then every status change and revision
+        planFirst: req.planFirst,
+        ...(req.resumePlan ? { resumePlan: req.resumePlan } : {}),
+        onPlan: (plan) => {
+          latestPlan = redactOutput(plan);
+          push({ type: 'plan', plan: latestPlan });
+        },
+        ...(req.requirePlanApproval
+          ? {
+              approvePlan: async (plan) => {
+                push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
+                const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
+                push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
+                return decision;
+              },
+            }
+          : {}),
+        onRoute: (route) => push({ type: 'route', route }),
+        // TASK 9: flagged calls wait here for the user's decision
+        approveTool: async ({ toolCallId, toolName, input, reason, workerId }) => {
+          push({
+            type: 'approval_request',
+            toolCallId,
+            toolName,
+            input: redactOutput(input),
+            reason,
+            reasonText: APPROVAL_REASON_TEXT[reason],
+            ...(workerId ? { workerId } : {}),
+          });
+          const decision = await waitForApproval(runId, toolCallId, abort.signal);
+          push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
+          void recordAudit([
+            {
+              type: 'approval',
+              runId,
+              // Who decided; timeouts and cancellations are the system's call.
+              actor: decision.decidedBy ?? 'system',
+              tool: toolName,
+              reason,
+              input,
+              outcome: decision.approved ? 'approved' : 'denied',
+              error: decision.approved ? undefined : decision.reason,
+              ...(workerId ? { workerId } : {}),
+            },
+          ]);
+          return decision;
+        },
+      });
+
+      // Grounding check (answer-critic.ts): the final answer is checked
+      // against the tool results; CRITIC_MODE=revise also fixes it once.
+      const critiqued = await critiqueAnswer({
+        task: req.description,
+        answer: rawResult.finalText,
+        steps: rawResult.steps,
+        modelKey: rawResult.modelKey,
+        onCheckStart: () => {
+          pushDelta(textRedactor.flush());
+          push({ type: 'checking' });
+        },
+      });
+      const checked: typeof rawResult & { critique?: Critique } = critiqued
+        ? { ...rawResult, finalText: critiqued.answer, critique: critiqued.critique }
+        : rawResult;
+
+      // Output guardrail: nothing leaves the server (stream or run history) unredacted.
+      const agentResult = redactOutput(checked);
+
+      console.log('[BUILD] Agent finished:', {
+        runId,
+        steps: agentResult.steps.length,
+        finishReason: agentResult.finishReason,
+        usage: agentResult.usage,
+      });
+
+      pushDelta(textRedactor.flush());
+      push({
+        type: 'done',
+        finalText: agentResult.finalText,
+        finishReason: agentResult.finishReason,
+        usage: agentResult.usage,
+        runId,
+        modelKey: agentResult.modelKey,
+        toolsConsidered: agentResult.toolsConsidered,
+        stopReason: agentResult.stopReason,
+        budgetUsage: agentResult.budgetUsage,
+        critique: agentResult.critique,
+        versions: agentResult.versions,
+      });
+
+      save({
+        id: runId,
+        createdAt,
+        description: req.description,
+        model: agentResult.modelKey,
+        status: 'completed',
+        durationMs: Date.now() - startedAt,
+        toolsConsidered: agentResult.toolsConsidered,
+        request: req,
+        result: {
+          runId,
+          finalText: agentResult.finalText,
+          steps: agentResult.steps,
+          toolsConsidered: agentResult.toolsConsidered,
+          finishReason: agentResult.finishReason,
+          usage: agentResult.usage,
+          stopReason: agentResult.stopReason,
+          budgetUsage: agentResult.budgetUsage,
+          ragJudgments: agentResult.ragJudgments,
+          plan: agentResult.plan,
+          critique: agentResult.critique,
+          route: agentResult.route,
+          versions: agentResult.versions,
+          // Requirements 12.1, 14.2: orchestration fields stored inside the
+          // existing result JSONB — no table schema change. Absent on
+          // single-agent runs, so their record shape is unchanged.
+          ...(agentResult.orchestrated
+            ? { orchestrated: true, replans: agentResult.replans ?? 0, workers: agentResult.workers ?? [] }
+            : agentResult.orchestrated === false
+              ? // Requested but run single-agent (Requirement 2.5).
+                { orchestrated: false }
+              : {}),
+        },
+      });
+      // Online eval: grade a sample of real runs with the eval rubric judge, off the request path.
+      if (shouldJudgeRun()) {
+        void saving.then(() => judgeRun({ runId, task: req.description, answer: agentResult.finalText, steps: agentResult.steps }));
+      }
+    } catch (error) {
+      const cancelled = abort.signal.aborted;
+      const abortReason = abort.signal.reason instanceof Error ? abort.signal.reason.message : undefined;
+      const message = redactOutput(
+        cancelled ? (abortReason ?? 'Cancelled') : error instanceof Error ? error.message : String(error)
+      );
+      if (cancelled) console.log(`[BUILD] Agent run ${runId} stopped: ${message}`);
+      else console.error('[BUILD] Agent run failed:', error);
+
+      push({ type: 'error', error: `Agent run failed: ${message}`, code: cancelled ? 'CANCELLED' : 'AGENT_ERROR' });
+
+      save({
+        id: runId,
+        createdAt,
+        description: req.description,
+        model: req.model || getDefaultModelKey(),
+        status: 'failed',
+        durationMs: Date.now() - startedAt,
+        request: req,
+        // Keep the checkpointed steps: they show what ran before the failure.
+        // An orchestrated run also keeps its plan and workers, so resume can
+        // continue it from the done steps (Requirement 12.4).
+        ...(steps.length || orchestrated
+          ? {
+              result: {
+                runId,
+                finalText: '',
+                steps,
+                toolsConsidered: [],
+                finishReason: 'error',
+                usage: {},
+                ...(latestPlan ? { plan: latestPlan } : {}),
+                ...(orchestrated
+                  ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
+                  : {}),
+                checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+              },
+            }
+          : {}),
+        error: message,
+      });
+    } finally {
+      flushAudit();
+      unregister();
+      await saving;
+    }
+  });
+
+  return job;
+}
+
+const MAX_RESUME_CHARS = 6_000;
+
+/**
+ * What an interrupted run already did, for the run that resumes it: every
+ * tool call and its outcome, capped. The new run sees it after the original
+ * request, with instructions not to redo completed changes. Continuation is
+ * by context, not by replaying the model's exact message history.
+ *
+ * Requirement 12.4: an orchestrated run resumes from its DONE steps. The
+ * context lists each done plan step with its worker's WorkerResult (summary +
+ * ids) and names the steps that still have to run, so the resumed run keeps
+ * the finished work and only does what is left. A single-agent record (or a v1
+ * record read as single-agent) falls back to the tool-call history below.
+ */
+export function resumeContextFrom(record: RunRecord): string {
+  const result = record.result;
+  if (result?.orchestrated && result.plan) {
+    return orchestratedResumeContext(record);
+  }
+
+  const lines: string[] = [];
+  for (const step of record.result?.steps ?? []) {
+    step.toolCalls.forEach((call, i) => {
+      const res = step.toolResults[i];
+      const outcome = !res ? 'no result recorded' : res.error ? `ERROR: ${res.error}` : `OK: ${JSON.stringify(res.output ?? null)}`;
+      lines.push(`- ${call.toolName} ${JSON.stringify(call.input)} → ${outcome.slice(0, 400)}`);
+    });
+  }
+  let history = lines.join('\n');
+  if (history.length > MAX_RESUME_CHARS) history = `${history.slice(0, MAX_RESUME_CHARS)}\n… (truncated)`;
+  return [
+    `This request was started before (run ${record.id}) and was interrupted after ${record.result?.steps.length ?? 0} step(s).`,
+    history ? `Tool calls it already made:\n${history}` : 'It had not made any tool calls yet.',
+    'Continue from where it stopped. Do not repeat changes that already succeeded; if you are unsure whether one took effect, check with a read tool first. In your final answer, cover the whole request, including what the earlier attempt did.',
+  ].join('\n\n');
+}
+
+/**
+ * Resume context for an orchestrated run (Requirement 12.4): keep the DONE
+ * plan steps and their WorkerResults, and list the steps that are not done so
+ * the resumed run only does what is left.
+ */
+function orchestratedResumeContext(record: RunRecord): string {
+  const plan = record.result?.plan;
+  const workers = record.result?.workers ?? [];
+  // A done step names the worker that did it. Match on that first: a replan
+  // renumbers step ids, so the step id alone can point at an older worker.
+  const resultByWorker = new Map<string, NonNullable<WorkerRecord['result']>>();
+  const resultByStep = new Map<number, NonNullable<WorkerRecord['result']>>();
+  for (const w of workers) {
+    if (!w.result) continue;
+    resultByWorker.set(w.workerId, w.result);
+    resultByStep.set(w.stepId, w.result);
+  }
+
+  const doneLines: string[] = [];
+  const remaining: string[] = [];
+  for (const step of plan?.steps ?? []) {
+    if (step.status === 'done') {
+      const r = step.workerId ? resultByWorker.get(step.workerId) : resultByStep.get(step.id);
+      const ids = r && Object.keys(r.ids).length ? ` ids=${JSON.stringify(r.ids)}` : '';
+      doneLines.push(`- Step ${step.id} (${step.description}): ${r?.summary ?? 'done'}${ids}`);
+    } else {
+      remaining.push(`- Step ${step.id} (${step.description}) [${step.status}]`);
+    }
+  }
+
+  let done = doneLines.join('\n');
+  if (done.length > MAX_RESUME_CHARS) done = `${done.slice(0, MAX_RESUME_CHARS)}\n… (truncated)`;
+
+  return [
+    `This request was started before (run ${record.id}) as an orchestrated run and was interrupted with ${doneLines.length} step(s) done.`,
+    doneLines.length ? `Steps already completed (do not redo these):\n${done}` : 'No step had completed yet.',
+    remaining.length ? `Steps still to do:\n${remaining.join('\n')}` : 'All planned steps had completed.',
+    'Continue from where it stopped. Reuse the ids above instead of recreating those objects; if you are unsure whether a change took effect, check with a read tool first. In your final answer, cover the whole request, including what the earlier attempt did.',
+  ].join('\n\n');
+}
+
+/**
+ * The plan an orchestrated run resumes with (Requirement 12.4): done steps
+ * kept with their WorkerResults, every other step reset to pending so the
+ * coordinator runs only those. Undefined for single-agent records, records
+ * with no stored plan, or plans with nothing done.
+ */
+export function resumePlanFrom(record: RunRecord): ResumePlan | undefined {
+  const plan = record.result?.plan;
+  if (!record.result?.orchestrated || !plan) return undefined;
+  const byWorker = new Map<string, NonNullable<WorkerRecord['result']>>();
+  for (const w of record.result.workers ?? []) if (w.result) byWorker.set(w.workerId, w.result);
+
+  const results: ResumePlan['results'] = [];
+  const steps = plan.steps.map((step) => {
+    if (step.status === 'done') {
+      const r = step.workerId ? byWorker.get(step.workerId) : undefined;
+      if (r) results.push({ ...r, stepId: step.id });
+      return { ...step };
+    }
+    const { workerId: _w, ...rest } = step;
+    void _w;
+    return { ...rest, status: 'pending' as const };
+  });
+  if (!steps.some((s) => s.status === 'done')) return undefined;
+  return { plan: { ...plan, steps }, results };
+}

@@ -13,18 +13,18 @@
  *     the run's own limits
  *
  * Finished jobs stay reconnectable for RETAIN_MS, then only the persisted
- * record (lib/execution-store.ts) remains. Like approvals and the kill
+ * record (lib/run-store.ts) remains. Like approvals and the kill
  * switch, this assumes one Node process; state lives on globalThis so
  * dev-mode module reloading doesn't split it between route bundles.
  */
 
-import type { BuildStreamEvent } from './types';
+import type { RunStreamEvent } from './types';
 
 const RETAIN_MS = 15 * 60_000;
 /** Buffered events per run. Consecutive text deltas are merged, so this is mostly steps and approvals. */
 const MAX_EVENTS = 2_000;
 
-export type SequencedEvent = BuildStreamEvent & { seq: number };
+export type SequencedEvent = RunStreamEvent & { seq: number };
 type Listener = (event: SequencedEvent | null) => void;
 
 export interface RunJob {
@@ -56,13 +56,13 @@ export function activeJobCount(): number {
 export function startJob(
   runId: string,
   abort: AbortController,
-  execute: (emit: (event: BuildStreamEvent) => void, signal: AbortSignal) => Promise<void>
+  execute: (emit: (event: RunStreamEvent) => void, signal: AbortSignal) => Promise<void>
 ): RunJob {
   const job: RunJob = { runId, abort, events: [], dropped: 0, done: false, startedAt: Date.now(), listeners: new Set() };
   jobs.set(runId, job);
   let seq = 0;
 
-  const emit = (event: BuildStreamEvent) => {
+  const emit = (event: RunStreamEvent) => {
     if (job.done) return;
     const sequenced = { ...event, seq: ++seq } as SequencedEvent;
     const last = job.events[job.events.length - 1];

@@ -1,7 +1,7 @@
 /**
  * Answer-critic calibration — run manually with `npm run eval:critic`.
  *
- * The production critic (lib/llm/answer-critic.ts) checks a run's final
+ * The production critic (lib/llm/quality/answer-critic.ts) checks a run's final
  * answer against its tool results, and in CRITIC_MODE=revise it rewrites
  * answers it fails. Whether that is worth turning on depends on two rates
  * this suite reports against labelled answers:
@@ -24,7 +24,7 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import type { EvalTrialRecord } from '@/lib/types';
-import { checkAnswer, criticModelKey } from '@/lib/llm/answer-critic';
+import { checkAnswer, criticModelKey } from '@/lib/llm/quality/answer-critic';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
 import { evalModelKey, preflight, trialsPerFixture, warnSkip } from './lib/env';

@@ -20,7 +20,7 @@ type WorkerAgentOpts = {
 };
 let orchestratedScript: ((opts: WorkerAgentOpts) => void | Promise<void>) | null = null;
 
-vi.mock('@/lib/llm/agent', () => ({
+vi.mock('@/lib/llm/runtime/agent', () => ({
   runAgent: async (opts: WorkerAgentOpts) => {
     if (orchestratedScript) {
       const script = orchestratedScript;
@@ -57,10 +57,10 @@ vi.mock('@/lib/llm/agent', () => ({
     };
   },
 }));
-vi.mock('@/lib/execution-store', () => ({
+vi.mock('@/lib/run-store', () => ({
   CHECKPOINT_SCHEMA_VERSION: 2,
   newRunId: () => `run-${Math.random().toString(36).slice(2)}`,
-  saveExecution: async (r: { status: string; result?: { steps: unknown[] } }) => {
+  saveRun: async (r: { status: string; result?: { steps: unknown[] } }) => {
     saved.push({ status: r.status, steps: r.result?.steps.length ?? 0, result: r.result as Record<string, unknown> | undefined });
   },
 }));
@@ -78,12 +78,12 @@ vi.mock('@/lib/online-judge', () => ({ shouldJudgeRun: () => false, judgeRun: as
 // actually starting MAX_ACTIVE_RUNS concurrent runs. Defaults high so every
 // other test runs as before.
 let activeCapForTest = 1_000;
-vi.mock('@/lib/llm/orchestration-config', () => ({
+vi.mock('@/lib/llm/runtime/orchestration-config', () => ({
   maxActiveRuns: () => activeCapForTest,
 }));
 
 const { POST } = await import('./route');
-const { resolveApproval } = await import('@/lib/llm/approvals');
+const { resolveApproval } = await import('@/lib/llm/tools/approvals');
 const events = await import('../runs/[id]/events/route');
 const cancel = await import('../runs/[id]/cancel/route');
 
@@ -287,5 +287,20 @@ describe('POST /api/build — publishTarget validation', () => {
     );
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/must name the environment/);
+  });
+});
+
+describe('POST /api/build — domain mode flags', () => {
+  it('rejects a non-boolean launchMode or segmentMode', async () => {
+    for (const flag of ['launchMode', 'segmentMode']) {
+      const res = await POST(
+        new Request('http://x/api/build', {
+          method: 'POST',
+          body: JSON.stringify({ description: 'build an audience of gold members', [flag]: 'yes' }),
+        })
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe(`"${flag}" must be a boolean`);
+    }
   });
 });

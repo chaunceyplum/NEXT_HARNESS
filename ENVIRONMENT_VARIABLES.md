@@ -58,7 +58,7 @@ MCP_AUTH_TOKEN=<your-token>              # sent as Authorization: Bearer <token>
 
 **What it is**: a fine-grained GitHub PAT with read-only "Contents" access
 to whichever repo(s) you want the agent able to read via `github_read_file`/
-`github_list_directory` (`lib/llm/local-tools.ts`) before proposing a change
+`github_list_directory` (`lib/llm/tools/local-tools.ts`) before proposing a change
 to existing code with the MCP server's `msb_github_commit_code` tool.
 These two read tools call GitHub's REST API directly — the MCP server has
 no read tool of its own.
@@ -95,7 +95,7 @@ Both lists restrict nothing unless a proxy in front of the app sets
 ## LLM Provider Variables (agent — lib/llm/)
 
 The `/api/build` route no longer runs a fixed planner→orchestrator pipeline.
-It runs an agent (lib/llm/agent.ts) that shortlists relevant MCP tools and
+It runs an agent (lib/llm/runtime/agent.ts) that shortlists relevant MCP tools and
 lets an LLM decide which ones to call. The model is swappable per request —
 these variables control which providers/models are available to pick from.
 
@@ -137,7 +137,7 @@ Registry key used when a build request doesn't specify `model`. Defaults to
 the cheapest option, or `DEFAULT_MODEL=anthropic:sonnet` to default to
 Anthropic direct instead.
 
-### Model-health circuit breaker (optional — `lib/llm/model-health.ts`)
+### Model-health circuit breaker (optional — `lib/llm/models/model-health.ts`)
 
 When a request does **not** pin a specific `model` (i.e. it uses
 `DEFAULT_MODEL`), the agent now routes around a model that is failing on
@@ -185,7 +185,7 @@ OPENAI_EXPENSIVE_MODEL_ID=<model-id>
 There are no OpenAI defaults: each `openai:<tier>` entry is registered only
 when its `OPENAI_<TIER>_MODEL_ID` is set.
 
-### Model routing (optional — `lib/llm/model-router.ts`)
+### Model routing (optional — `lib/llm/models/model-router.ts`)
 
 Pick **Auto** in the model picker (or send `"model": "auto"`) to route each
 request to a model tier instead of using one model for everything:
@@ -221,7 +221,7 @@ MODEL_REGISTRY_JSON='[{"key":"bedrock:llama","label":"Llama 3.1 70B (Bedrock)","
 ### Tool-shortlisting embeddings (optional — has a no-credentials fallback)
 
 The agent embeds the MCP tool catalog once per process to semantically
-shortlist relevant tools per request (lib/llm/tool-retrieval.ts). This
+shortlist relevant tools per request (lib/llm/tools/tool-retrieval.ts). This
 needs a *second* provider beyond your chat model — Anthropic has no
 embeddings API, so this always goes through OpenAI or Bedrock regardless
 of which chat model you pick. Uses OpenAI if `OPENAI_API_KEY` is set,
@@ -240,7 +240,7 @@ EMBEDDING_PROVIDER=openai        # or "bedrock" — auto-detected if unset
 EMBEDDING_MODEL_ID=text-embedding-3-small   # or a Bedrock Titan embedding model id
 ```
 
-### RAG judge (optional — samples by default, `lib/llm/rag-judge.ts`)
+### RAG judge (optional — samples by default, `lib/llm/quality/rag-judge.ts`)
 
 A sample of the agent's own `search_adobe_knowledge`/`search_all_agents`
 calls (10% by default) is scored by a second LLM call for relevance and
@@ -284,7 +284,7 @@ remaining retries. Retry back-off is jittered (50–100% of 500ms·2ⁿ, or
 | `MCP_LIST_TIMEOUT_MS` | `30000` | MCP `tools/list` |
 | `GITHUB_TIMEOUT_MS` | `30000` | `github_read_file` / `github_list_directory` |
 
-## Run budgets (`lib/llm/run-budget.ts`)
+## Run budgets (`lib/llm/runtime/run-budget.ts`)
 
 Hard limits enforced in code on top of the step cap. When one is hit, the
 next step is forced to be a written wrap-up (no more tool calls), and the
@@ -293,13 +293,13 @@ run's `stopReason` is set so the UI flags the answer as partial.
 | Variable | Default | Limit |
 | --- | --- | --- |
 | `RUN_MAX_TOKENS` | `1500000` | Input + output tokens across all steps |
-| `RUN_MAX_COST_USD` | none | Estimated cost via `lib/llm/pricing.ts` (ignored for unpriced models) |
+| `RUN_MAX_COST_USD` | none | Estimated cost via `lib/llm/models/pricing.ts` (ignored for unpriced models) |
 | `RUN_TIMEOUT_MS` | `1800000` | Wall-clock time; checked between steps, hard abort 5 minutes later |
 | `RUN_MAX_IDENTICAL_CALLS` | `3` | Same tool with identical arguments: the model is warned at this count, and the run stops if it repeats again |
 
 A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
 
-## Extended thinking (`lib/llm/agent.ts`)
+## Extended thinking (`lib/llm/runtime/agent.ts`)
 
 - `THINKING_BUDGET_TOKENS` (unset = off): turns on extended thinking for
   Claude models (Anthropic direct or on Bedrock). Values below `1024` are
@@ -307,16 +307,16 @@ A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
   that reject fixed budgets get adaptive thinking instead. A request's
   `thinkingBudget` takes precedence.
 
-## Tool catalog scope and tool policy (`lib/llm/tool-catalog.ts`, `lib/llm/tool-policy.ts`)
+## Tool catalog scope and tool policy (`lib/llm/tools/tool-catalog.ts`, `lib/llm/tools/tool-policy.ts`)
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `ADOBE_TOOLS_ONLY` | `true` | Drops AWS, Databricks, Snowflake and other non-Adobe tools from the catalog before the agent sees it. GitHub's `msb_github_*` tools are always kept. Only the exact value `false` disables the filter. |
 | `BUILD_POLICY` | `full` | `read-only` removes every write and destructive tool from the tool set, so the model cannot call them at all. A request's `policy` can tighten this, never loosen it. |
 | `TOOL_DRY_RUN` | `false` | `true` makes destructive tools return a description of what they would do instead of calling the MCP server. A request's `dryRun: true` can turn it on, never off. |
-| `SEGMENT_FIELD_CHECK` | on | Before `adobe_create_segment` / `adobe_update_segment` runs, every field path in its PQL is checked against the sandbox's profile schema (`lib/llm/segment-validation.ts`), and a call naming a field the sandbox doesn't have is rejected with nothing created. Fails open when the schema can't be read completely. `off` disables the check. |
+| `SEGMENT_FIELD_CHECK` | on | Before `adobe_create_segment` / `adobe_update_segment` runs, every field path in its PQL is checked against the sandbox's profile schema (`lib/llm/domains/segments/validation.ts`), and a call naming a field the sandbox doesn't have is rejected with nothing created. Fails open when the schema can't be read completely. `off` disables the check. |
 
-## Approvals and rollout mode (`lib/llm/approval-policy.ts`)
+## Approvals and rollout mode (`lib/llm/tools/approval-policy.ts`)
 
 These calls pause for Approve/Deny on the home page before they run:
 
@@ -347,7 +347,7 @@ These calls pause for Approve/Deny on the home page before they run:
   Access control above) may engage or release it. Unset means anyone.
 - `GET /api/admin/kill-switch` lists active runs.
 
-## Guardrails (`lib/llm/guardrails.ts`)
+## Guardrails (`lib/llm/quality/guardrails.ts`)
 
 Cheap, deterministic checks (regexes and counters) at the three points
 where the loop meets the outside world:
@@ -376,7 +376,7 @@ where the loop meets the outside world:
 `PROTECTED_RESOURCE_IDS` only sees ids that appear in the arguments. A
 tool that falls back to a server-side default sandbox isn't caught.
 
-## Write safety and read caching (`lib/llm/tool-call-cache.ts`)
+## Write safety and read caching (`lib/llm/tools/tool-call-cache.ts`)
 
 - **No ambiguous write retries:** a write or destructive call is retried
   only after an error that shows the server refused it (429, 503,
@@ -390,7 +390,7 @@ tool that falls back to a server-side default sandbox isn't caught.
   (default `60000`; `0` disables it). The cache is process-wide and any
   write clears it. Credential/secret reads are never cached.
 
-## Durable runs (`lib/run-jobs.ts`, `lib/build-run.ts`)
+## Durable runs (`lib/run-jobs.ts`, `lib/start-run.ts`)
 
 Runs are jobs, not HTTP requests:
 
@@ -438,7 +438,7 @@ ids, repos, merge policy ids), so the agent doesn't rediscover them:
 `HARNESS_CONTEXT` (static, in the system prompt) still works for facts
 that never change.
 
-## Plan-and-execute (`lib/llm/planner.ts`)
+## Plan-and-execute (`lib/llm/runtime/planner.ts`)
 
 Tick **Plan first** on the home page (or send `"planFirst": true`) for
 multi-step work:
@@ -461,7 +461,7 @@ If planning fails, the run continues without a plan.
 | `PLAN_FIRST` | `false` | Plan every run unless the request says otherwise |
 | `PLAN_APPROVAL` | `false` | Require plan approval for every planned run |
 
-## Grounded answers (`lib/llm/answer-critic.ts`, `lib/llm/retrieval-hints.ts`)
+## Grounded answers (`lib/llm/quality/answer-critic.ts`, `lib/llm/tools/retrieval-hints.ts`)
 
 - **Answer critic:** after a run that used tools, a critic checks the final
   answer against the tool results. Every claim must be supported, the
@@ -523,7 +523,7 @@ Without `runId`, only `HARNESS_ADMINS` may query when it's set.
 `AUDIT_READS=true` also records read calls (noisy). Writes are
 best-effort: a failed insert is logged and never breaks a run.
 
-## Execution history / replay (lib/execution-store.ts)
+## Run history / replay (lib/run-store.ts)
 
 Every `/api/build` run (success or failure) is persisted so it can be
 listed and replayed from `/results`. Storage is a `harness_agent_runs`
@@ -835,7 +835,7 @@ comparable.
 | `TRACE_CAPTURE_CONTENT` | `false` | `true` includes (truncated, 2 000 chars) tool arguments/results and step text in spans. Off by default so payloads/PII don't leave in traces. |
 | `GIT_SHA` / `APP_VERSION` | package version, else `dev` | The `app` version fingerprint; set one in your deploy (a commit SHA or release tag). |
 
-## Orchestrator-worker mode (`lib/llm/orchestration-config.ts`, `lib/llm/agent-slots.ts`)
+## Orchestrator-worker mode (`lib/llm/runtime/orchestration-config.ts`, `lib/llm/runtime/agent-slots.ts`)
 
 Off by default — every run is a single agent loop, exactly as before. When
 `ORCHESTRATION` is on, a deterministic code coordinator runs independent plan
@@ -869,7 +869,7 @@ EVAL_TRIALS=5                     # runs per fixture, for pass@k / pass^k (defau
 EVAL_ORCHESTRATE=both             # off (default) | on | both — eval:agent/eval:launch run single-agent, orchestrated, or both side by side against the rollout bar (requirements.md)
 MODEL_PRICING_JSON='{"bedrock:balanced":{"input":2,"output":10}}'
                                   # USD per 1M tokens, by registry key or model id; overrides the
-                                  # Anthropic list prices in lib/llm/pricing.ts (Bedrock bills separately)
+                                  # Anthropic list prices in lib/llm/models/pricing.ts (Bedrock bills separately)
 ```
 
 `eval:shortlist` needs `MCP_ENDPOINT_URL`; `eval:rag-judge` uses

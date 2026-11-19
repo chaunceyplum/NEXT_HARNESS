@@ -1,7 +1,7 @@
 /**
  * Tool-shortlisting eval — run manually with `npm run eval:shortlist`.
  *
- * Grades lib/llm/tool-retrieval.ts shortlistTools() against the LIVE MCP
+ * Grades lib/llm/tools/tool-retrieval.ts shortlistTools() against the LIVE MCP
  * catalog: for a realistic request, does the shortlist the agent would
  * actually get contain the tool(s) the task needs? A tool that never makes
  * the shortlist is a tool the model literally cannot call (see
@@ -20,10 +20,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ALWAYS_ON_TOOLS } from '@/lib/llm/agent-core';
-import { embedTexts } from '@/lib/llm/embeddings';
-import { getMcpToolCatalog } from '@/lib/llm/tool-catalog';
-import { shortlistTools } from '@/lib/llm/tool-retrieval';
+import { ALWAYS_ON_TOOLS } from '@/lib/llm/runtime/agent-core';
+import { embedTexts } from '@/lib/llm/models/embeddings';
+import { getMcpToolCatalog } from '@/lib/llm/tools/tool-catalog';
+import { shortlistTools } from '@/lib/llm/tools/tool-retrieval';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
 import type { EvalTrialRecord } from '@/lib/types';
