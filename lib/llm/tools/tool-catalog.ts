@@ -13,6 +13,9 @@
 
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { classifyTool } from './tool-policy';
+import { isAdobeScoped, isAdobeToolsOnlyEnabled, isKnowledgeTool, RAG_TOOLS } from './tool-taxonomy';
+
+export { isAdobeScoped, isKnowledgeTool, PLATFORM_GROUPS, toolMatchesPlatforms } from './tool-taxonomy';
 import { withRetrievalHint } from './retrieval-hints';
 import {
   cachedRead,
@@ -32,79 +35,6 @@ export interface McpToolDefinition {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
-}
-
-/**
- * Non-Adobe integrations the harness currently has no use for. As of the
- * last live tools/list check (Aug 2026), the connected MCP server doesn't
- * actually expose any aws_/databricks_/snowflake_-prefixed tools or the
- * named search/pattern tools below — so today this filter is a no-op
- * defensive guard, not an active exclusion. It's kept (rather than deleted)
- * so that if a future server redeploy brings AWS/data-eng tools back into
- * the catalog, they stay excluded by default instead of silently competing
- * for shortlist slots against the Adobe tools every request here actually
- * needs — verify this list against a fresh tools/list before relying on it
- * to hide anything.
- *
- * Filtered out of the catalog entirely (not just excluded from the
- * shortlist) so this is enforced regardless of embedding/keyword scoring,
- * and so an always-on tool from one of these categories would silently
- * become unavailable too — agent.ts already does
- * `ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name))`.
- *
- * Set ADOBE_TOOLS_ONLY=false to disable this filter without a code change.
- */
-const NON_ADOBE_TOOL_PREFIXES = ['aws_', 'databricks_', 'snowflake_'];
-const NON_ADOBE_TOOL_NAMES = new Set([
-  'search_aws_knowledge',
-  'search_data_eng_knowledge',
-  'search_braze_knowledge',
-  'search_zeta_knowledge',
-  'search_all_agents',
-  'aws_architecture_pattern',
-  'aws_recommend_services',
-  'data_sql_pattern',
-  'data_pipeline_pattern',
-  'data_compare_platforms',
-]);
-
-function isAdobeToolsOnlyEnabled(): boolean {
-  return process.env.ADOBE_TOOLS_ONLY !== 'false';
-}
-
-export function isAdobeScoped(name: string): boolean {
-  if (NON_ADOBE_TOOL_NAMES.has(name)) return false;
-  return !NON_ADOBE_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
-
-/**
- * Platform groupings for UI-driven tool filtering. Each entry maps a display
- * label to an array of patterns: strings ending with '_' are prefix matches;
- * others are exact name matches. All groups are enabled by default.
- */
-export const PLATFORM_GROUPS: Record<string, string[]> = {
-  'AEP Core': ['adobe_', 'aep_find_profile_fields'],
-  'CJA': ['cja_'],
-  'Tags (Reactor)': ['reactor_'],
-  'Data Prep': ['dataprep_'],
-  'Sources': ['source_'],
-  'Destinations': ['destination_'],
-  'Flow Service': ['flow_'],
-  'Query Service': ['query_'],
-  'GitHub': ['github_', 'msb_github_'],
-  'Knowledge': ['search_adobe_knowledge', 'query_rag_db', 'knowledge_base_health'],
-};
-
-/** Returns true if `toolName` belongs to any of the named `platforms`. */
-export function toolMatchesPlatforms(toolName: string, platforms: string[]): boolean {
-  for (const platform of platforms) {
-    const patterns = PLATFORM_GROUPS[platform];
-    if (!patterns) continue;
-    for (const pattern of patterns) {
-      if (pattern.endsWith('_') ? toolName.startsWith(pattern) : toolName === pattern) return true;
-    }
-  }
-  return false;
 }
 
 let catalogPromise: Promise<McpToolDefinition[]> | null = null;
@@ -146,27 +76,6 @@ async function callTool(toolName: string, args: Record<string, unknown>, signal?
   await validateBeforeCommit(toolName, args);
   await checkDomainToolCall(toolName, args, { signal });
   return callMcpTool(toolName, args, { signal });
-}
-
-/**
- * Knowledge-search tools used to ground a retry. Never wrapped in their own
- * retry logic (that would recurse) and never chosen as the RAG tool for
- * themselves. Verified present in the live MCP catalog, Aug 2026.
- */
-const RAG_TOOLS = new Set([
-  'search_adobe_knowledge',
-  'search_all_agents',
-  'query_rag_db',
-  'knowledge_base_health',
-]);
-
-/**
- * Whether `name` is a knowledge-search tool. These are never handed to the
- * model: retrieval happens only at the planning stage (planning-retrieval.ts)
- * and on tool errors (executeMcpToolWithRetry), not on the model's say-so.
- */
-export function isKnowledgeTool(name: string): boolean {
-  return RAG_TOOLS.has(name);
 }
 
 /**

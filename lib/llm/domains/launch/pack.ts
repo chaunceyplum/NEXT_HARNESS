@@ -88,4 +88,5 @@ export const launchPack: DomainPack = {
   promptContext: ({ publishEnabled }) => [launchDomainContext(publishEnabled), launchToolsContext(publishEnabled)],
   alwaysOnTools: ({ publishEnabled }) => launchAlwaysOnTools(publishEnabled),
   startSession: startLaunchSession,
+  ownsTool: (toolName) => toolName.startsWith('reactor_'),
 };

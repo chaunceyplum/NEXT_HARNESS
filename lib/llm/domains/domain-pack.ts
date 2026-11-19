@@ -114,6 +114,8 @@ export interface DomainPack {
   checkToolCall?(toolName: string, args: Record<string, unknown>, opts: { signal?: AbortSignal }): Promise<void>;
   /** Tools this domain runs locally. */
   localTools?: readonly DomainLocalTool[];
+  /** Whether a tool belongs to this domain (for the tool registry; no behaviour hangs on it). */
+  ownsTool?(toolName: string): boolean;
 }
 
 /** Which packs are on for a run. */

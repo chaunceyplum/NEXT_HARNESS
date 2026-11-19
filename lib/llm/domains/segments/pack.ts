@@ -14,4 +14,8 @@ export const segmentsPack: DomainPack = {
   // adobe_update_segment on every run, not only detected segment runs.
   checkToolCall: (toolName, args, { signal }) => validateBeforeSegmentWrite(toolName, args, { signal }),
   localTools: [findProfileFieldsTool],
+  // AEP segment tools (adobe_*segment*, including segment jobs and estimates)
+  // and the profile-field lookup. CJA segments are CJA filters, not PQL.
+  ownsTool: (toolName) =>
+    toolName === findProfileFieldsTool.definition.name || (toolName.startsWith('adobe_') && toolName.includes('segment')),
 };

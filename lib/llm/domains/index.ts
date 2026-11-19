@@ -5,6 +5,7 @@
 
 import type {
   ActiveDomains,
+  DomainId,
   DomainLocalTool,
   DomainOptions,
   DomainPack,
@@ -84,6 +85,11 @@ export async function startDomainSessions(active: Partial<ActiveDomains>, input:
 /** Every pack's pre-call check, run before each tool call of every run. Throws to refuse the call. */
 export async function checkDomainToolCall(toolName: string, args: Record<string, unknown>, opts: { signal?: AbortSignal } = {}): Promise<void> {
   for (const pack of DOMAIN_PACKS) await pack.checkToolCall?.(toolName, args, opts);
+}
+
+/** The domain a tool belongs to, if any (first pack that owns it). */
+export function domainOfTool(toolName: string): DomainId | undefined {
+  return DOMAIN_PACKS.find((p) => p.ownsTool?.(toolName))?.id;
 }
 
 /** Tools the domains run locally, in registry order. */

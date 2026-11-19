@@ -34,6 +34,9 @@
  */
 
 import { tool, jsonSchema, type ToolSet } from 'ai';
+import { classifyTool, type ToolAccessLevel } from './tool-taxonomy';
+
+export { classifyTool, type ToolAccessLevel };
 
 /**
  * A per-run gate around every tool call, supplied by a domain session
@@ -46,49 +49,6 @@ import { tool, jsonSchema, type ToolSet } from 'ai';
 export interface ToolCallGate {
   gate(toolName: string, args: unknown): void;
   observe(toolName: string, args: unknown, result: unknown): void;
-}
-
-// ── Classification ────────────────────────────────────────────────────────────
-
-export type ToolAccessLevel = 'read' | 'write' | 'destructive';
-
-/** Exact-name overrides, checked before verb detection. */
-const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
-  msb_github_merge_pr: 'destructive',      // merging a PR is irreversible
-  query_rag_db: 'read',                    // "query" is a verb here, but a server prefix in query_run etc.
-  intake_query: 'read',                    // mcp rejects anything but SELECT/WITH server-side
-  find_tools: 'read',                      // synthetic (agent.ts)
-  call_tool: 'write',                      // synthetic proxy (agent.ts) — classify its target via effectiveToolName
-  policy_info: 'read',                     // synthetic (below)
-  update_plan: 'read',                     // synthetic (planner.ts) — only updates in-memory plan state
-  revise_plan: 'read',                     // synthetic (planner.ts)
-};
-
-const DESTRUCTIVE_VERBS = new Set(['delete', 'abort', 'trash', 'purge']);
-
-const WRITE_VERBS = new Set([
-  'create', 'update', 'upload', 'complete', 'enable', 'disable', 'install',
-  'build', 'transition', 'add', 'remove', 'commit', 'copy', 'cancel',
-  'generate', 'execute', 'run', 'publish', 'share', 'merge',
-]);
-
-const READ_VERBS = new Set([
-  'get', 'list', 'search', 'read', 'preview', 'describe', 'health', 'find', 'info',
-]);
-
-export function classifyTool(name: string): ToolAccessLevel {
-  const exact = EXACT_LEVELS[name];
-  if (exact) return exact;
-  // Submitting a privacy job deletes customer data irreversibly, even though
-  // its verb is "create".
-  if (name.endsWith('create_privacy_job')) return 'destructive';
-
-  for (const token of name.split('_')) {
-    if (DESTRUCTIVE_VERBS.has(token)) return 'destructive';
-    if (WRITE_VERBS.has(token)) return 'write';
-    if (READ_VERBS.has(token)) return 'read';
-  }
-  return 'write';
 }
 
 // ── Policy enforcement ────────────────────────────────────────────────────────

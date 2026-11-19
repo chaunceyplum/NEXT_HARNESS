@@ -22,6 +22,7 @@
  */
 
 import { classifyTool } from './tool-policy';
+import { CREDENTIAL_TOOLS, OUTBOUND_TOOLS, SQL_TOOLS } from './tool-taxonomy';
 
 export type RolloutMode = 'autonomous' | 'assisted' | 'shadow';
 
@@ -43,30 +44,6 @@ export function resolveRolloutMode(requested?: RolloutMode): RolloutMode {
   if (!requested) return env;
   return MODE_STRICTNESS[requested] > MODE_STRICTNESS[env] ? requested : env;
 }
-
-/** Tools that move data, code, or credentials outside the platform. */
-const OUTBOUND_TOOLS = new Set([
-  'msb_github_commit_code',
-  'msb_github_create_pr',
-  'msb_github_create_branch',
-  'adobe_create_export_job',
-  'destination_create_base_connection',
-  'destination_update_base_connection',
-  'destination_create_target_connection',
-  'destination_update_target_connection',
-  'destination_create_dataflow',
-  'destination_update_dataflow',
-  'destination_update_dataflow_audiences',
-  'reactor_create_callback',
-  'reactor_update_callback',
-  'reactor_create_host',
-  'reactor_update_host',
-  'reactor_build_library',
-  'reactor_transition_library',
-]);
-
-/** Reads whose result is a credential. */
-const CREDENTIAL_TOOLS = new Set(['flow_get_landing_zone_credentials', 'reactor_get_secret', 'reactor_list_secrets']);
 
 export type ApprovalReason = 'destructive' | 'sql-write' | 'outbound' | 'credentials' | 'assisted-mode';
 
@@ -107,9 +84,6 @@ export function isReadOnlySql(sql: unknown): boolean {
   if (!first || !SQL_READ_START.has(first)) return false;
   return !SQL_WRITE_WORDS.test(stmt) && !SQL_SIDE_EFFECT_FUNCS.test(stmt);
 }
-
-/** Tools that run caller-supplied SQL: a write statement needs a human decision. */
-const SQL_TOOLS = new Set(['execute_sql', 'intake_execute_sql']);
 
 function sqlOf(input: unknown): unknown {
   return input && typeof input === 'object' ? (input as { sql?: unknown }).sql : undefined;
