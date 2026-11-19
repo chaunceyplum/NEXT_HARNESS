@@ -13,6 +13,7 @@ import { resumeContextFrom, resumePlanFrom, startRun } from '@/lib/start-run';
 import { runsBlockedReason } from '@/lib/kill-switch';
 import { getJob, streamJob } from '@/lib/run-jobs';
 import type { ApiError } from '@/lib/types';
+import { isResumable } from '@/lib/run-lifecycle';
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await params;
@@ -21,9 +22,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
   const record = await getRun(id).catch(() => null);
   if (!record) return Response.json({ error: `Run not found: ${id}`, code: 'NOT_FOUND' } as ApiError, { status: 404 });
-  if (record.status === 'completed' || getJob(id)?.done === false) {
+  const live = getJob(id)?.done === false;
+  if (live || !isResumable(record.status)) {
     return Response.json(
-      { error: `Run ${id} is ${getJob(id)?.done === false ? 'still running' : 'already completed'}; only interrupted or failed runs can be resumed`, code: 'NOT_RESUMABLE' } as ApiError,
+      { error: `Run ${id} is ${live ? 'still running' : record.status}; only failed, cancelled or interrupted runs can be resumed`, code: 'NOT_RESUMABLE' } as ApiError,
       { status: 409 }
     );
   }

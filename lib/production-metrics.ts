@@ -12,6 +12,7 @@
 
 import { percentile } from './eval-metrics';
 import { execSql, sqlInt } from './mcp-sql';
+import type { RunStatus } from './run-lifecycle';
 import { estimateCostUsd } from './llm/models/pricing';
 import { ensureQualityTable, qualityVersion } from './run-quality';
 
@@ -20,7 +21,7 @@ export interface ProductionRunRow {
   createdAt: string;
   description: string;
   model: string;
-  status: 'completed' | 'failed';
+  status: RunStatus;
   durationMs: number;
   finishReason?: string;
   stopReason?: string;
@@ -146,7 +147,7 @@ export function computeProductionMetrics(rows: ProductionRunRow[]): ProductionMe
 
   const stopReasons: Record<string, number> = {};
   for (const r of rows) {
-    const key = r.status === 'failed' ? 'failed' : (r.stopReason ?? (r.finishReason === 'stop' ? 'finished' : `cut off (${r.finishReason ?? 'unknown'})`));
+    const key = r.status === 'failed' || r.status === 'cancelled' ? r.status : (r.stopReason ?? (r.finishReason === 'stop' ? 'finished' : `cut off (${r.finishReason ?? 'unknown'})`));
     stopReasons[key] = (stopReasons[key] ?? 0) + 1;
   }
 

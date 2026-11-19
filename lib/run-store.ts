@@ -21,6 +21,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { ACTIVE_STATUSES } from './run-lifecycle';
 import { execSql, sqlInt, sqlJson, sqlJsonOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
 import type { RunRecord, RunSummary } from './types';
 
@@ -74,14 +75,15 @@ export const CHECKPOINT_SCHEMA_VERSION = 2;
 const ORCHESTRATION_SCHEMA_VERSION = 2;
 
 /**
- * Mark runs left 'running' by a previous server process as 'interrupted'.
+ * Mark runs left active ('running' or 'awaiting_approval', see
+ * lib/run-lifecycle.ts) by a previous server process as 'interrupted'.
  * Called once at startup (instrumentation.ts): with runs executing in
  * this process, nothing else can still be working on them.
  */
 export async function markInterruptedRuns(): Promise<number> {
   await ensureTable();
   const result = await execSql(
-    `UPDATE ${TABLE} SET status = 'interrupted' WHERE status = 'running' RETURNING id`
+    `UPDATE ${TABLE} SET status = 'interrupted' WHERE status IN (${ACTIVE_STATUSES.map(sqlStr).join(', ')}) RETURNING id`
   );
   return result.rows?.length ?? 0;
 }

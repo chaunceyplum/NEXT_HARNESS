@@ -13,6 +13,7 @@ components/               React components (AgentTrace, PlanView, KillSwitch, ..
 lib/
   start-run.ts            Starts a run as a job: kill switch, agent, events, checkpoints, critic, judge
   run-jobs.ts             Detached jobs and event buffers (in-process)
+  run-lifecycle.ts        Run statuses and allowed moves: running ⇄ awaiting_approval → completed | failed | cancelled | interrupted
   run-store.ts            Run records in harness_agent_runs via execute_sql
   kill-switch.ts, audit-log.ts, memory-store.ts, online-judge.ts, tracing.ts
   mcp-client.ts, mcp-sql.ts   MCP transport and SQL escaping

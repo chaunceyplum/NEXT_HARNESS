@@ -10,6 +10,8 @@ const STATUS_BADGE: Record<string, string> = {
   completed: 'bg-green-100 text-green-800',
   failed: 'bg-red-100 text-red-800',
   running: 'bg-blue-100 text-blue-800',
+  awaiting_approval: 'bg-purple-100 text-purple-800',
+  cancelled: 'bg-gray-200 text-gray-800',
   interrupted: 'bg-amber-100 text-amber-800',
 };
 
@@ -76,7 +78,7 @@ export function ResultsList({ initialRuns, initialTotal }: { initialRuns: RunSum
                     STATUS_BADGE[run.status] ?? 'bg-red-100 text-red-800'
                   }`}
                 >
-                  {run.status}
+                  {run.status.replace('_', ' ')}
                 </span>
               </div>
             </Link>

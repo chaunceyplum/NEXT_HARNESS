@@ -7,6 +7,7 @@
 
 import { runAgent } from '@/lib/llm/runtime/agent';
 import { waitForApproval } from '@/lib/llm/tools/approvals';
+import { endStatusOnError, transition, type RunStatus } from '@/lib/run-lifecycle';
 import { APPROVAL_REASON_TEXT } from '@/lib/llm/tools/approval-policy';
 import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
@@ -74,6 +75,15 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     // needs writing: a checkpoint superseded before its turn is dropped
     // rather than sent. Without this, a slow store queued one full-record
     // write per step and fell further behind as the run went on.
+    // The record's lifecycle status (lib/run-lifecycle.ts): running, or
+    // awaiting_approval while any tool call or the plan waits on a person.
+    // Orchestrated workers can wait on several approvals at once, so the run
+    // is awaiting_approval until the last one is decided.
+    let status: RunStatus = 'running';
+    let pendingApprovals = 0;
+    // Read through a function: the approval callbacks change `status`, which
+    // TypeScript's narrowing can't see across the awaits below.
+    const currentStatus = (): RunStatus => status;
     let saving: Promise<void> = Promise.resolve();
     let queued: RunRecord | undefined;
     const save = (record: RunRecord) => {
@@ -92,7 +102,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        status: 'running',
+        status,
         durationMs: Date.now() - startedAt,
         request: req,
         result: {
@@ -113,6 +123,27 @@ export function startRun(req: RunRequest, actor: string): RunJob {
           checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
         },
       });
+
+    const approvalStarted = () => {
+      if (pendingApprovals++ === 0 && status === 'running') {
+        status = transition(status, 'awaiting_approval');
+        checkpoint();
+      }
+    };
+    const approvalEnded = () => {
+      if (--pendingApprovals === 0 && status === 'awaiting_approval') {
+        status = transition(status, 'running');
+        checkpoint();
+      }
+    };
+    const awaitDecision = async (toolCallId: string) => {
+      approvalStarted();
+      try {
+        return await waitForApproval(runId, toolCallId, abort.signal);
+      } finally {
+        approvalEnded();
+      }
+    };
 
     try {
       // Emit run_start immediately so the client can show a run ID before
@@ -224,7 +255,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
           ? {
               approvePlan: async (plan) => {
                 push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
-                const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
+                const decision = await awaitDecision(PLAN_APPROVAL_ID);
                 push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
                 return decision;
               },
@@ -242,7 +273,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
             reasonText: APPROVAL_REASON_TEXT[reason],
             ...(workerId ? { workerId } : {}),
           });
-          const decision = await waitForApproval(runId, toolCallId, abort.signal);
+          const decision = await awaitDecision(toolCallId);
           push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
           void recordAudit([
             {
@@ -308,7 +339,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: agentResult.modelKey,
-        status: 'completed',
+        status: (status = transition(currentStatus() === 'awaiting_approval' ? 'running' : currentStatus(), 'completed')),
         durationMs: Date.now() - startedAt,
         toolsConsidered: agentResult.toolsConsidered,
         request: req,
@@ -357,7 +388,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        status: 'failed',
+        // A run stopped by a person or the kill switch is 'cancelled', not 'failed'.
+        status: (status = transition(currentStatus(), endStatusOnError(cancelled))),
         durationMs: Date.now() - startedAt,
         request: req,
         // Keep the checkpointed steps: they show what ran before the failure.

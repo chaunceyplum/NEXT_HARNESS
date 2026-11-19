@@ -2,6 +2,10 @@
  * TypeScript types for the MCP Harness
  */
 
+import type { RunStatus } from './run-lifecycle';
+
+export type { RunStatus };
+
 // ============================================================================
 // Agent Types (dynamic orchestration — see lib/llm/runtime/agent.ts)
 // ============================================================================
@@ -417,11 +421,13 @@ export interface RunSummary {
   description: string;
   model: string;
   /**
-   * running: in progress (checkpointed after every step). interrupted: the
-   * server stopped while it was running (marked on the next start); it can
-   * be resumed from /results/[id].
+   * The lifecycle status (lib/run-lifecycle.ts). running: in progress
+   * (checkpointed after every step). awaiting_approval: paused on a person.
+   * cancelled: stopped by a person or the kill switch. interrupted: the
+   * server stopped mid-run (marked on the next start). failed, cancelled and
+   * interrupted runs can be resumed from /results/[id].
    */
-  status: 'completed' | 'failed' | 'running' | 'interrupted';
+  status: RunStatus;
   durationMs: number;
   toolsConsidered?: string[];
   /** Absent on runs persisted before token tracking was added, and on failed runs (the agent never got a usage figure). */
