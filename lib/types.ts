@@ -3,7 +3,7 @@
  */
 
 // ============================================================================
-// Agent Types (dynamic orchestration — see lib/llm/agent.ts)
+// Agent Types (dynamic orchestration — see lib/llm/runtime/agent.ts)
 // ============================================================================
 
 export interface AgentToolCallDTO {
@@ -32,7 +32,7 @@ export interface AgentStepDTO {
   /** Chat-model tokens for this step alone. */
   usage?: TokenUsage;
   /**
-   * Orchestrator-worker mode (lib/llm/coordinator.ts): the id of the worker
+   * Orchestrator-worker mode (lib/llm/runtime/coordinator.ts): the id of the worker
    * that produced this step, when the run was orchestrated. Absent on
    * single-agent runs, so their step shape is unchanged (Requirement 11.3).
    */
@@ -40,7 +40,7 @@ export interface AgentStepDTO {
 }
 
 // ============================================================================
-// Orchestrator-worker types (lib/llm/coordinator.ts, lib/llm/worker.ts)
+// Orchestrator-worker types (lib/llm/runtime/coordinator.ts, lib/llm/runtime/worker.ts)
 // ============================================================================
 
 /**
@@ -99,7 +99,7 @@ export interface RunVersions {
 /**
  * Chat-model token usage for one run, summed across every step of the
  * agent loop. Does NOT include the tool-shortlisting embedding call or any
- * RAG-judge calls (lib/llm/rag-judge.ts) — both are real but comparatively
+ * RAG-judge calls (lib/llm/quality/rag-judge.ts) — both are real but comparatively
  * small costs; this covers the dominant one (the actual chat model)
  * without threading usage through every side call. Any field can be
  * `undefined` if the provider didn't report it.
@@ -164,7 +164,7 @@ export interface RunRequest {
    * override TOOL_DRY_RUN=true.
    */
   dryRun?: boolean;
-  /** Plan before acting (lib/llm/planner.ts). Defaults to PLAN_FIRST. */
+  /** Plan before acting (lib/llm/runtime/planner.ts). Defaults to PLAN_FIRST. */
   planFirst?: boolean;
   /** Pause for a person to approve the plan before anything runs. PLAN_APPROVAL=true forces it on. */
   requirePlanApproval?: boolean;
@@ -182,13 +182,13 @@ export interface RunRequest {
   thinkingBudget?: number;
   /**
    * Restrict the tool catalog to tools belonging to these platforms only. Each
-   * entry is a key from PLATFORM_GROUPS (lib/llm/tool-catalog.ts). Omit or
+   * entry is a key from PLATFORM_GROUPS (lib/llm/tools/tool-catalog.ts). Omit or
    * leave empty to include all platforms.
    */
   platformFilter?: string[];
   /**
    * Launch-tagging run: ground the agent on the Adobe Launch/Reactor object
-   * model (injected into the cached system prompt — see lib/llm/agent-core.ts).
+   * model (injected into the cached system prompt — see lib/llm/runtime/agent-core.ts).
    * Omit to infer it from platformFilter targeting the Launch/Reactor group;
    * set false to keep the lean prompt even then. The deliverable stops at a
    * populated library unless publishTarget is set (see below).
@@ -209,7 +209,7 @@ export interface RunRequest {
    */
   publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
   /**
-   * Orchestrator-worker mode (lib/llm/coordinator.ts). Opts this run into the
+   * Orchestrator-worker mode (lib/llm/runtime/coordinator.ts). Opts this run into the
    * coordinator when ORCHESTRATION=on; opts out when ORCHESTRATION=always.
    * Ignored when ORCHESTRATION=off (Requirements 2.2–2.4).
    */
@@ -223,7 +223,7 @@ export interface RunRequest {
 
 /**
  * One knowledge-search quality judgment collected during a run by the
- * fire-and-forget RAG judge (lib/llm/rag-judge.ts), persisted with the run
+ * fire-and-forget RAG judge (lib/llm/quality/rag-judge.ts), persisted with the run
  * record for monitoring. Structural type — see RagJudgmentEntry /
  * RagJudgment in the llm layer for the source shape — kept here so this
  * module doesn't take a hard dependency on the llm layer, matching how
@@ -232,7 +232,7 @@ export interface RunRequest {
 export interface RagJudgmentDTO {
   toolName: string;
   query: string;
-  judgment: import('./llm/rag-judge').RagJudgment;
+  judgment: import('./llm/quality/rag-judge').RagJudgment;
 }
 
 export interface RunResult {
@@ -243,7 +243,7 @@ export interface RunResult {
   toolsConsidered: string[];
   finishReason: string;
   usage: TokenUsage;
-  /** Set when a run budget or loop detection cut the run short (lib/llm/run-budget.ts). */
+  /** Set when a run budget or loop detection cut the run short (lib/llm/runtime/run-budget.ts). */
   stopReason?: string;
   /** Tokens, estimated cost (when the model is priced), and wall-clock time the run used. */
   budgetUsage?: { tokens: number; costUsd?: number; durationMs: number };
@@ -264,7 +264,7 @@ export interface RunResult {
   /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
   versions?: RunVersions;
   /**
-   * Orchestrator-worker fields (lib/llm/coordinator.ts), stored inside the
+   * Orchestrator-worker fields (lib/llm/runtime/coordinator.ts), stored inside the
    * existing `result` JSONB — no table schema change (Requirement 12.1).
    * `orchestrated` is true when the coordinator ran the plan as concurrent
    * workers; `workers` are those workers' records and `replans` counts the
@@ -320,7 +320,7 @@ export type RunStreamEvent =
       toolCallId: string;
       toolName: string;
       input: unknown;
-      /** Why this call needs a person (lib/llm/approval-policy.ts), e.g. 'outbound'. */
+      /** Why this call needs a person (lib/llm/tools/approval-policy.ts), e.g. 'outbound'. */
       reason: string;
       /** Human-readable form of `reason`. */
       reasonText: string;
@@ -345,7 +345,7 @@ export type RunStreamEvent =
     }
   | { type: 'error'; error: string; code?: string };
 
-/** Mirrors lib/llm/planner.ts Plan, for client code. */
+/** Mirrors lib/llm/runtime/planner.ts Plan, for client code. */
 /** A stored orchestrated plan to continue (RunRequest.resumePlan). */
 export interface ResumePlan {
   plan: PlanInfo;
@@ -368,7 +368,7 @@ export interface PlanInfo {
   }>;
 }
 
-/** Grounding check on the final answer (lib/llm/answer-critic.ts). */
+/** Grounding check on the final answer (lib/llm/quality/answer-critic.ts). */
 export interface CritiqueInfo {
   passed: boolean;
   grounded: boolean;
@@ -382,7 +382,7 @@ export interface CritiqueInfo {
   selfCheck?: boolean;
 }
 
-/** Mirrors lib/llm/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
+/** Mirrors lib/llm/models/model-router.ts RouteDecision (kept here so client code needn't import server modules). */
 export interface RouteInfo {
   category: 'lookup' | 'change' | 'build' | 'unclear';
   confidence: number;
@@ -508,7 +508,7 @@ export interface EvalTrialRecord {
   durationMs?: number;
   /** Chat-model tokens spent on this trial (agent suite only). */
   totalTokens?: number;
-  /** Estimated USD at list price (lib/llm/pricing.ts); absent if the model has no known price. */
+  /** Estimated USD at list price (lib/llm/models/pricing.ts); absent if the model has no known price. */
   costUsd?: number;
   /** Agent loop steps taken. */
   steps?: number;

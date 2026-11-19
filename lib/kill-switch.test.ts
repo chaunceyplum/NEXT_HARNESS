@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { tool, jsonSchema, type ToolSet } from 'ai';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
-import type { PlanStep } from './llm/planner';
+import type { PlanStep } from './llm/runtime/planner';
 import { engageKillSwitch, killSwitchStatus, registerRun, releaseKillSwitch, runsBlockedReason } from './kill-switch';
 
 afterEach(() => {
@@ -58,7 +58,7 @@ describe('kill switch', () => {
 
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
 
-vi.mock('./llm/model-registry', () => {
+vi.mock('./llm/models/model-registry', () => {
   const entries = [{ key: 'test:a', label: 'a', provider: 'anthropic', modelId: 'claude-sonnet-5', tier: 'balanced' }];
   return {
     getModelRegistry: () => entries,
@@ -97,9 +97,9 @@ vi.mock('./llm/model-registry', () => {
   };
 });
 
-const { runWorker } = await import('./llm/worker');
-const { ModelHealthTracker } = await import('./llm/model-health');
-const { RunLedger, resolveBudget } = await import('./llm/run-budget');
+const { runWorker } = await import('./llm/runtime/worker');
+const { ModelHealthTracker } = await import('./llm/models/model-health');
+const { RunLedger, resolveBudget } = await import('./llm/runtime/run-budget');
 
 function makeStep(id: number): PlanStep {
   return {

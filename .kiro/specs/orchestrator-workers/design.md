@@ -10,7 +10,7 @@ judge and the job wrapper stay as they are.
 Everything runs in the existing Node process. Workers are async calls to
 `executeLoop`, not processes or containers. That matches the in-process state
 the app already relies on: jobs (`lib/run-jobs.ts`), approvals
-(`lib/llm/approvals.ts`) and the kill switch (`lib/kill-switch.ts`), all kept
+(`lib/llm/tools/approvals.ts`) and the kill switch (`lib/kill-switch.ts`), all kept
 on `globalThis` and documented as assuming one Node process.
 
 The work is split into six phases, each its own PR. Phase 1 is a
@@ -23,7 +23,7 @@ behaviour-preserving refactor; phases 2–6 sit behind `ORCHESTRATION`.
 ```mermaid
 flowchart TD
   A[POST /api/build] --> B[startRun<br/>lib/start-run.ts]
-  B --> C[runAgent<br/>lib/llm/agent.ts]
+  B --> C[runAgent<br/>lib/llm/runtime/agent.ts]
   C --> R[routeRequest<br/>model-router.ts]
   C --> S[Tools, memory, knowledge<br/>in parallel]
   C --> P[makePlan or seedLaunchPlan<br/>planner.ts / launch-plan.ts]
@@ -40,7 +40,7 @@ flowchart TD
   B --> P[prepareRun<br/>route, tools, memory, knowledge, plan]
   P --> D{Orchestrate?<br/>flag on and 2+ parallel steps}
   D -- no --> E[executeLoop<br/>single agent, as today]
-  D -- yes --> C[Coordinator<br/>lib/llm/coordinator.ts]
+  D -- yes --> C[Coordinator<br/>lib/llm/runtime/coordinator.ts]
   C --> W1[Worker: step 2<br/>executeLoop]
   C --> W2[Worker: step 3<br/>executeLoop]
   C --> W3[Worker: step 4<br/>executeLoop]
@@ -99,7 +99,7 @@ sequenceDiagram
 
 ## Components and Interfaces
 
-### Phase 1: split `runAgent` (`lib/llm/agent.ts`)
+### Phase 1: split `runAgent` (`lib/llm/runtime/agent.ts`)
 
 `runAgent` is currently one function of about 500 lines (lines 823–1330).
 The loop (`callModel` and the fallback loop) reads `tools`, `userMessage`,
@@ -107,7 +107,7 @@ The loop (`callModel` and the fallback loop) reads `tools`, `userMessage`,
 `versions`, `planTracker` and the callbacks from closures.
 
 ```ts
-// lib/llm/agent-core.ts (types only, no live MCP imports)
+// lib/llm/runtime/agent-core.ts (types only, no live MCP imports)
 export interface LoopContext {
   tools: ToolSet;
   launchMode: boolean;
@@ -145,7 +145,7 @@ export interface LoopResult {
 ```
 
 ```ts
-// lib/llm/agent.ts
+// lib/llm/runtime/agent.ts
 export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | EarlyResult>;
 export async function executeLoop(ctx: LoopContext): Promise<LoopResult>;
 export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult>; // unchanged signature
@@ -164,7 +164,7 @@ attempt, as today.
 ### Phase 2: coordinator and workers
 
 ```ts
-// lib/llm/coordinator.ts
+// lib/llm/runtime/coordinator.ts
 export interface OrchestrationConfig {
   maxWorkers: number;            // min(MAX_WORKERS, request.maxWorkers)
   maxReplans: number;            // MAX_REPLANS
@@ -207,7 +207,7 @@ A failed step triggers replanning only after `running` drains, so the
 replan sees every finished result.
 
 ```ts
-// lib/llm/worker.ts
+// lib/llm/runtime/worker.ts
 export interface WorkerInput {
   runGoal: string;
   step: PlanStep;
@@ -225,7 +225,7 @@ export function reportResultTool(sink: (r: WorkerResult) => void): Tool;
 ```
 
 Worker tools: the step's tool + every tool in the same `PLATFORM_GROUPS`
-group (`lib/llm/tool-catalog.ts:84`) that is in the run's policy-filtered
+group (`lib/llm/tools/tool-catalog.ts:84`) that is in the run's policy-filtered
 tool set, + `find_tools`, `call_tool`, `report_result`. Grouping by platform
 keeps the number of distinct tool sets (and so prompt-cache prefixes) per run
 at 2–3.
@@ -254,7 +254,7 @@ Results from earlier steps:
 When the step is done, or cannot be done, call report_result.
 ```
 
-Planner changes (`lib/llm/planner.ts`):
+Planner changes (`lib/llm/runtime/planner.ts`):
 
 - `PlanTracker.revise` takes `dependsOn` per new step and remaps it to the
   new ids; today it sets `dependsOn: []` (line 126).
@@ -265,7 +265,7 @@ Planner changes (`lib/llm/planner.ts`):
   largest set of steps with no path between them; used by
   `shouldOrchestrate`).
 
-Launch template (`lib/llm/launch-plan.ts`): set `dependsOn` so that reading
+Launch template (`lib/llm/domains/launch/plan.ts`): set `dependsOn` so that reading
 property state comes first, data-element generation depends on it, rule
 generation depends on data elements, validation depends on both, and library
 population (and publish, when enabled) comes last.
@@ -277,7 +277,7 @@ done. Streamed via `streamText` so `text_delta` keeps working.
 ### Phase 3: shared run state
 
 ```ts
-// lib/llm/run-budget.ts
+// lib/llm/runtime/run-budget.ts
 export class RunLedger {
   constructor(limits: RunBudgetLimits, startedAt: number);
   child(modelKey: string, share: number): RunBudgetTracker; // charges this ledger too
@@ -292,7 +292,7 @@ counts stay on the child. In single-agent mode `executeLoop` gets a tracker
 with no parent, so behaviour is unchanged.
 
 ```ts
-// lib/llm/worker.ts
+// lib/llm/runtime/worker.ts
 export interface SharedRunState {
   runId?: string;
   ledger: RunLedger;
@@ -335,7 +335,7 @@ export interface SharedRunState {
 ### Phase 5: limits and config
 
 ```ts
-// lib/llm/agent-slots.ts
+// lib/llm/runtime/agent-slots.ts
 export function acquireLoopSlot(signal?: AbortSignal): Promise<() => void>; // resolves with release()
 export function loopSlotStats(): { running: number; queued: number; max: number };
 ```
@@ -436,12 +436,12 @@ Unit tests (vitest, `npm test`):
 
 | File | Covers |
 | --- | --- |
-| `lib/llm/agent.test.ts` (existing) | Phase 1 changes nothing |
-| `lib/llm/coordinator.test.ts` (new) | Ready-step scheduling; `MAX_WORKERS`; serial writes; results to dependants; replan cap; synthesis input |
-| `lib/llm/worker.test.ts` (new) | Tool narrowing; forced `report_result`; missing result; per-worker fallback; no restart after a write |
-| `lib/llm/planner.test.ts` (existing) | `revise` keeps `dependsOn`; cycle rejection; `readySteps`; `parallelWidth` |
-| `lib/llm/run-budget.test.ts` (existing) | Child charges parent; ledger exhaustion |
-| `lib/llm/agent-slots.test.ts` (new) | FIFO order; release on error and abort |
+| `lib/llm/runtime/agent.test.ts` (existing) | Phase 1 changes nothing |
+| `lib/llm/runtime/coordinator.test.ts` (new) | Ready-step scheduling; `MAX_WORKERS`; serial writes; results to dependants; replan cap; synthesis input |
+| `lib/llm/runtime/worker.test.ts` (new) | Tool narrowing; forced `report_result`; missing result; per-worker fallback; no restart after a write |
+| `lib/llm/runtime/planner.test.ts` (existing) | `revise` keeps `dependsOn`; cycle rejection; `readySteps`; `parallelWidth` |
+| `lib/llm/runtime/run-budget.test.ts` (existing) | Child charges parent; ledger exhaustion |
+| `lib/llm/runtime/agent-slots.test.ts` (new) | FIFO order; release on error and abort |
 | `lib/start-run.test.ts`, `app/api/build/route.test.ts` (existing) | Worker events; per-worker restart; 429; resume |
 | `lib/kill-switch.test.ts` (existing) | Trip aborts all workers |
 

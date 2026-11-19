@@ -6,12 +6,12 @@ intake_harness, where it was first assembled). The AEP knowledge base that
 query of the whole 16,106-chunk RAG corpus, across all four indexed domains,
 turns up only two segmentation/query-service overview pages and nothing with
 actual syntax. This file is that missing syntax. The agent gets it in its
-system prompt on every segment/audience run (`lib/llm/segment-context.ts`,
-via the generated `lib/llm/pql-reference.ts`), so PQL is written against
+system prompt on every segment/audience run (`lib/llm/domains/segments/context.ts`,
+via the generated `lib/llm/domains/segments/pql-reference.ts`), so PQL is written against
 real documentation instead of from memory.
 
 Edit this file, then run `node scripts/gen-pql-reference.mjs` to regenerate
-`lib/llm/pql-reference.ts`; a unit test fails if the two drift apart.
+`lib/llm/domains/segments/pql-reference.ts`; a unit test fails if the two drift apart.
 
 Source: [PQL overview](https://experienceleague.adobe.com/en/docs/experience-platform/segmentation/pql/overview)
 and its 12 linked function-category pages (listed per section below). Adobe's

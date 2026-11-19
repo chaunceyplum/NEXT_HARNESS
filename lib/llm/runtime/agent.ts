@@ -1,0 +1,1686 @@
+/**
+ * The agent loop that replaces the old fixed pipeline.
+ *
+ * Runtime optimisations layered on top of the basic generateText loop:
+ *
+ *   1. Prompt caching (TASK 1): the system prompt is sent as a SystemModelMessage
+ *      via `instructions` (AI SDK v7 rejects system messages inside `messages`)
+ *      with providerOptions.anthropic.cacheControl so Anthropic
+ *      and Bedrock cache it after the first step. Tool definitions are similarly
+ *      cached via toolOrder stability (shortlist never shuffles). Cache-write on
+ *      the first step, much-cheaper cache-read on every subsequent step.
+ *
+ *   2. Context management (TASK 2): tool results from older steps stop being
+ *      resent at full size. Normally prepareStep swaps them for a one-line
+ *      summary. Models that bind thinking to the exact prior conversation
+ *      (see HISTORY_BOUND_MODEL_RE) reject any rewrite of earlier messages, so
+ *      for those the API's server-side context editing clears them instead.
+ *      The trace keeps the uncompressed results (each already capped at 8K
+ *      chars by capToolResult) — only the in-flight model context shrinks.
+ *
+ *   3. Last-step summary (TASK 3): the final allowed step is steered to a
+ *      written answer so the run doesn't end cut off mid-tool-call when
+ *      stepCountIs fires. (So with maxSteps=1 the run is text-only.)
+ *
+ *   6. Tool discovery (TASK 6): the tool list the model sees is fixed for the
+ *      whole run — the shortlist plus `find_tools` and `call_tool`. find_tools
+ *      searches the rest of the (policy-filtered) catalog and returns schemas;
+ *      call_tool runs any of those by name. Keeping the list fixed preserves
+ *      the prompt cache and never trips the history-binding check above,
+ *      which swapping tools in and out mid-run would.
+ *
+ *   9. Approval (TASK 9): destructive calls wait for a human decision via
+ *      RunAgentOptions.approveTool; without an approver they're denied.
+ */
+
+import { jsonSchema, streamText, stepCountIs, tool, type ModelMessage, type SystemModelMessage, type ToolSet } from 'ai';
+import { getDefaultModelKey, getModelRegistry, resolveModel, getModelEntry } from '../models/model-registry';
+import { buildAiTools, getMcpToolCatalog, createRagJudgmentSink, isKnowledgeTool, toolMatchesPlatforms, type RagJudgmentEntry, type RagJudgmentSink } from '../tools/tool-catalog';
+import { buildDiscoveryTools, effectiveToolCall } from '../tools/tool-discovery';
+import { shortlistTools } from '../tools/tool-retrieval';
+import {
+  ALWAYS_ON_TOOLS,
+  systemPrompt,
+  stage,
+  type AgentStepTrace,
+  type TokenUsage,
+  type ToolOutcome,
+  type LoopContext,
+  type LoopResult,
+  type PreparedRun,
+  type EarlyResult,
+  type ToolApprovalFn,
+} from './agent-core';
+import { classifyProviderFailure, defaultModelHealth, ModelHealthTracker } from '../models/model-health';
+import { applyToolPolicy, classifyTool, resolvePolicy, type PolicyMode } from '../tools/tool-policy';
+import { applyActionGuards } from '../quality/guardrails';
+import { listFacts, memoryEnabled, memoryPreamble, saveFact } from '../../memory-store';
+import { buildPlanTools, makePlan, planPreamble, PlanTracker, type Plan } from './planner';
+import { launchAlwaysOnTools, launchShortlistQuery, seedLaunchPlan } from '../domains/launch/plan';
+import { resolveSegmentMode, SEGMENT_ALWAYS_ON_TOOLS } from '../domains/segments/context';
+import { launchExamplesPreamble, selectLaunchExamples } from '../domains/launch/examples';
+import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
+import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from '../domains/launch/validation';
+import { parseLaunchBrief, type LaunchRequirements } from '../domains/launch/brief';
+import { AUTO_MODEL, routeRequest, type RouteDecision } from '../models/model-router';
+import {
+  budgetFinalNote,
+  resolveBudget,
+  RunBudgetTracker,
+  type BudgetStopReason,
+  type BudgetUsage,
+  type RunBudgetLimits,
+} from './run-budget';
+import { approvalReason, APPROVAL_REASON_TEXT, resolveRolloutMode, type ApprovalReason, type RolloutMode } from '../tools/approval-policy';
+import { acquireLoopSlot } from './agent-slots';
+import { orchestrationConfig, orchestrationRequested, runOrchestrated, shouldOrchestrate } from './coordinator';
+import { orchestrationFlag } from './orchestration-config';
+import type { ResumePlan } from '../../types';
+import { toTokenUsage, type SdkUsage } from '../models/pricing';
+import type { WorkerRecord } from './worker';
+import { RunTracer, exportSpans, type StepSample, type AttrValue } from '../../tracing';
+import { promptVersion, toolsetVersion, appVersion } from '../../version';
+
+export { ALWAYS_ON_TOOLS };
+export type { AgentStepTrace, TokenUsage, ToolOutcome, LoopContext, LoopResult, PreparedRun, EarlyResult };
+
+export interface AgentRunResult {
+  finalText: string;
+  steps: AgentStepTrace[];
+  toolsConsidered: string[];
+  finishReason: string;
+  usage: TokenUsage;
+  /** Model registry key that actually produced the result. Differs from the requested one after a same-tier fallback. */
+  modelKey: string;
+  /**
+   * Set when a run budget or loop detection cut the run short (run-budget.ts).
+   * The final text is then a wrap-up of partial work, not a finished answer.
+   */
+  stopReason?: BudgetStopReason;
+  /** Tokens, estimated cost, and wall-clock time the successful attempt used. */
+  budgetUsage: BudgetUsage;
+  /**
+   * Quality judgments for a sample of the knowledge searches this run made,
+   * scored off the critical path by the fire-and-forget RAG judge
+   * (lib/llm/quality/rag-judge.ts) and drained once the loop finished. Monitoring
+   * data the agent didn't act on — persisted with the run record. Empty when
+   * nothing was sampled, judging is disabled, or the eval path was used.
+   */
+  ragJudgments: RagJudgmentEntry[];
+  /**
+   * Version fingerprints for this run (lib/version.ts), so a stored trace or
+   * score can be tied to the exact prompt, tool set and build it came from.
+   */
+  /** Absent when the run ended before any model call (an unclear request, a denied plan). */
+  versions?: {
+    /** sha256(system prompt), first 12 hex — matches the eval's promptVersion. */
+    prompt: string;
+    /** sha256(sorted tool name+description lines), first 12 hex. */
+    toolset: string;
+    /** GIT_SHA / APP_VERSION / package version, or 'dev'. */
+    app: string;
+  };
+  /** The plan as executed (statuses and revisions included), when planFirst was set. */
+  plan?: Plan;
+  /** Set when the request asked for model "auto": how the model was chosen. */
+  route?: RouteDecision;
+  /**
+   * Orchestrator-worker fields (lib/llm/runtime/coordinator.ts). `orchestrated` is
+   * true when the coordinator ran the plan as concurrent workers instead of a
+   * single agent loop; `workers` are those workers' records and `replans`
+   * counts the replanning calls made. Absent / false for single-agent runs, so
+   * their result shape is unchanged. (Re-homed to lib/types.ts in Task 8.1.)
+   */
+  orchestrated?: boolean;
+  replans?: number;
+  workers?: WorkerRecord[];
+}
+
+export interface RunAgentOptions {
+  userInput: string;
+  /**
+   * Persisted run id (from the route). Recorded on the trace's run span as
+   * `harness.run.id` so a trace can be correlated with the stored run and its
+   * replay view, and on facts the run saves to memory. Omit (e.g. the eval
+   * path) and the trace still works.
+   */
+  runId?: string;
+  /** Model registry key, e.g. "anthropic:haiku". Defaults to DEFAULT_MODEL env var. */
+  modelKey?: string;
+  /** Tool-call round trips before the loop is forced to stop. */
+  maxSteps?: number;
+  /** How many tools the semantic shortlist pulls in, on top of the always-on set. */
+  toolShortlistSize?: number;
+  /** Extra attempts after a transient (5xx/timeout/429) tool failure, with back-off. 0 disables retrying. */
+  toolRetries?: number;
+  /**
+   * Health tracker used to route around models failing on provider-side access/auth/quota errors.
+   * Defaults to the process-wide tracker; inject a fresh one in tests.
+   */
+  modelHealth?: ModelHealthTracker;
+  /**
+   * A pre-built tool set to hand the model instead of shortlisting from the live MCP catalog.
+   * Used by the agent eval (evals/agent.eval.ts) to grade the real loop against scripted tools.
+   * Not exposed via /api/build.
+   */
+  tools?: ToolSet;
+  /**
+   * A knowledge-search result to use as the planning-stage excerpts instead
+   * of a live lookup (planning-retrieval.ts). Used by the evals, whose
+   * scripted runs make no live lookup. Not exposed via /api/build.
+   */
+  knowledge?: unknown;
+  /**
+   * TASK 8 (streaming): called after each agent step completes with the
+   * partial trace for that step. Allows the route to stream step events to
+   * the client as they arrive rather than waiting for the full run to finish.
+   */
+  onStep?: (step: AgentStepTrace, workerId?: string) => void;
+  /**
+   * TASK 1 (token streaming): called with each chunk of assistant text as the
+   * model generates it, so the route can stream the answer to the client token
+   * by token instead of only revealing it once the step finishes. The concrete
+   * win is the final written answer rendering as it's produced; intermediate
+   * steps are usually short text plus a tool call. Reasoning/thinking tokens
+   * are NOT forwarded here (they're hidden by default on current models). Text
+   * for a given step is also still delivered in full via onStep.
+   */
+  onTextDelta?: (delta: string) => void;
+  /**
+   * TASK 9: Tool policy to apply before handing the tool set to the model.
+   * 'read-only' removes all write and destructive tools structurally —
+   * the model cannot call them at all, not just rule-based.
+   * Can only tighten BUILD_POLICY: BUILD_POLICY=read-only wins over 'full' here.
+   */
+  policy?: PolicyMode;
+  /**
+   * TASK 9: When true, wraps destructive tools to return a dry-run description
+   * instead of executing. Can only tighten TOOL_DRY_RUN: false here does not
+   * override TOOL_DRY_RUN=true.
+   */
+  dryRun?: boolean;
+  /**
+   * Rollout stage (approval-policy.ts): 'assisted' asks before every write,
+   * 'shadow' dry-runs every write. Can only tighten ROLLOUT_MODE.
+   */
+  rolloutMode?: RolloutMode;
+  /**
+   * TASK 10: Enable extended thinking (Claude via Anthropic / Bedrock only).
+   * Ignored for other providers and non-Claude Bedrock models.
+   *
+   * Minimum 1 024 tokens. On Haiku 4.5 and older Claude models this is the
+   * thinking token budget (8 000–16 000 is a good start for multi-step
+   * tasks). Newer models (Sonnet 5, Opus 4.7+, Opus 5.x) reject fixed budgets,
+   * so there it just switches on adaptive thinking and the value is unused.
+   *
+   * Can also be set globally via THINKING_BUDGET_TOKENS env var (number).
+   * Per-request value takes precedence over the env var.
+   */
+  thinkingBudget?: number;
+  /**
+   * Restrict the tool catalog to tools belonging to these platforms only. Each
+   * entry is a key from PLATFORM_GROUPS (lib/llm/tools/tool-catalog.ts). Omit or
+   * leave empty to include all platforms.
+   */
+  platformFilter?: string[];
+  /**
+   * Launch-tagging run: inject the Launch/Reactor object-model contract into
+   * the cached system-prompt prefix (agent-core.ts). Omit to infer it from
+   * platformFilter targeting the Launch/Reactor group; set false to force the
+   * lean prefix even then. The deliverable stops at a populated library — there
+   * is no publish-to-environment tool.
+   */
+  launchMode?: boolean;
+  /**
+   * Segment/audience grounding (segment-context.ts): the PQL reference, the
+   * business glossary and the real-fields-only rules in the system prompt,
+   * plus the field-lookup and segment tools always on. Unset → inferred from
+   * a request that mentions segments, audiences or PQL; false forces it off.
+   */
+  segmentMode?: boolean;
+  /**
+   * Publish target for a Launch run (lib/types.ts RunRequest.publishTarget).
+   * ABSENT → the run stops at a populated library (byte-identical to today).
+   * PRESENT → the run may publish the library, but ONLY to a development or
+   * staging environment (resolved from server truth); a production or
+   * unresolvable stage is refused in code (launch-validation.ts). Only takes
+   * effect on a Launch run (publishEnabled = launchMode && Boolean(publishTarget)).
+   */
+  publishTarget?: { environmentId?: string; environmentName?: string; propertyId?: string };
+  /**
+   * Parsed Launch requirements (launch-brief.ts) for a Launch-tagging run.
+   * When present on a Launch-mode run they feed BOTH the tool shortlist query
+   * (so the right Reactor tools get ranked, see launch-plan.ts) AND the seeded
+   * plan (so the template names the real property/library/tag counts). Ignored
+   * outside Launch mode.
+   */
+  requirements?: LaunchRequirements;
+  /** Per-request run limits (tokens, cost, time, identical calls). Can only tighten the RUN_* env limits. */
+  budget?: Partial<RunBudgetLimits>;
+  /** Requesting user, recorded on facts the run saves to memory. */
+  actor?: string;
+  /** Plan before acting (planner.ts). */
+  planFirst?: boolean;
+  /**
+   * Resuming an orchestrated run (Requirement 12.4): the stored plan (done
+   * steps kept, the rest pending) and the done steps' WorkerResults. Used as
+   * the run's plan instead of planning again; the coordinator starts with
+   * these results so only the unfinished steps run.
+   */
+  resumePlan?: ResumePlan;
+  /** Called with the plan when it's made and whenever a step's status or the plan changes. */
+  onPlan?: (plan: Plan) => void;
+  /** Ask a person to approve the plan before anything runs. A denial ends the run without tool calls. */
+  approvePlan?: (plan: Plan) => Promise<{ approved: boolean; reason?: string }>;
+  /** Called once with the routing decision when modelKey is "auto". */
+  onRoute?: (route: RouteDecision) => void;
+  /** Aborts the run (model calls and the step loop) — wired to the client disconnecting / hitting Stop. */
+  abortSignal?: AbortSignal;
+  /**
+   * Called when a provider failure makes the run restart from scratch on a
+   * same-tier fallback model. Steps already reported via onStep belong to the
+   * abandoned attempt and should be discarded.
+   */
+  onRestart?: (info: { fromModelKey: string; toModelKey: string; workerId?: string }) => void;
+  /**
+   * TASK 9: asks a human to approve one tool call before it runs — every call
+   * approval-policy.ts flags: destructive tools, non-read-only SQL, outbound
+   * tools (commits, exports, destinations, publishing), credential reads, and
+   * every write in assisted mode. Calls routed via call_tool are unwrapped
+   * first. Calls that won't execute (dry-run/shadow) aren't gated. On a live
+   * run without an approver, flagged calls are denied. The eval path
+   * (opts.tools) is never gated.
+   */
+  /**
+   * Called once per tool call after it finishes, is denied, or fails — with
+   * the effective tool (call_tool unwrapped), its access level, and why it
+   * needed approval if it did. Feeds the audit log (lib/audit-log.ts).
+   */
+  onToolOutcome?: (outcome: ToolOutcome, workerId?: string) => void;
+  approveTool?: (call: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+    reason: ApprovalReason;
+    /** Set when an orchestrated worker made the call (Requirements 11.3, 15.3). */
+    workerId?: string;
+  }) => Promise<{ approved: boolean; reason?: string }>;
+  /**
+   * Orchestrator-worker mode (lib/llm/runtime/coordinator.ts). When ORCHESTRATION is
+   * `on`, `orchestrate: true` opts this run into the coordinator; when
+   * ORCHESTRATION is `always`, `orchestrate: false` opts out. Ignored when
+   * ORCHESTRATION is `off`, or when the plan has fewer than two steps that
+   * could run at the same time (Requirements 2.2–2.5). Requesting
+   * orchestration forces planning as if `planFirst` were set (Requirement 2.6).
+   */
+  orchestrate?: boolean;
+  /** Cap on concurrent workers for this run; the smaller of it and MAX_WORKERS is used (Requirement 3.2). */
+  maxWorkers?: number;
+  /** Called when a worker starts, so the route can stream a `worker_start` event (Requirement 11.1). */
+  onWorkerStart?: (info: { workerId: string; stepId: number; modelKey: string; tools: string[] }) => void;
+  /** Called when a worker ends, so the route can stream a `worker_done` event (Requirement 11.2). */
+  onWorker?: (worker: WorkerRecord) => void;
+}
+
+// ── TASK 1: Prompt caching ────────────────────────────────────────────────────
+
+/**
+ * Cache markers for the system message, so the system prompt is cached after
+ * the first call. The AI SDK's `toolOrder` stability (tools are never
+ * shuffled) means tool definitions are also cache-eligible without per-tool
+ * markup. Anthropic reads `cacheControl`; @ai-sdk/amazon-bedrock reads
+ * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
+ * support it.
+ */
+function buildSystemMessage(
+  modelKey: string,
+  toolDiscovery: boolean,
+  memory = false,
+  launchMode = false,
+  publishEnabled = false,
+  segmentMode = false
+): SystemModelMessage {
+  const providerOptions = cacheMarker(modelKey);
+  return {
+    role: 'system',
+    content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled, segmentMode }),
+    ...(providerOptions ? { providerOptions } : {}),
+  };
+}
+
+/** The provider's cache breakpoint for a message, or undefined when the model can't cache. */
+function cacheMarker(modelKey: string): SystemModelMessage['providerOptions'] {
+  const entry = tryGetModelEntry(modelKey);
+  return entry?.provider === 'anthropic'
+    ? { anthropic: { cacheControl: { type: 'ephemeral' } } }
+    : entry?.provider === 'bedrock' && isClaudeModelId(entry.modelId)
+      ? { bedrock: { cachePoint: { type: 'default' } } }
+      : undefined;
+}
+
+/**
+ * The conversation's cache breakpoint: the last message gets a marker each
+ * step, so the next step reads the whole history so far from cache instead
+ * of paying full price for it again. Together with the system prompt's
+ * marker that's 2 of the 4 allowed. Moving a marker isn't a history edit, so
+ * it's safe on history-bound models too.
+ */
+function withCacheBreakpoint(messages: ModelMessage[], marker: SystemModelMessage['providerOptions']): ModelMessage[] {
+  if (!marker || messages.length === 0) return messages;
+  // Messages returned here stay in the SDK's history, so earlier steps' markers
+  // are still on their messages: clear them, or they'd pile past the limit and
+  // the provider would drop the newest one.
+  const earlier = messages.slice(0, -1).map(withoutCacheMarker);
+  const last = messages[messages.length - 1];
+  return [...earlier, { ...last, providerOptions: { ...last.providerOptions, ...marker } } as ModelMessage];
+}
+
+function withoutCacheMarker(message: ModelMessage): ModelMessage {
+  const opts = message.providerOptions as Record<string, Record<string, unknown>> | undefined;
+  if (!opts?.anthropic?.cacheControl && !opts?.bedrock?.cachePoint) return message;
+  const cleaned: Record<string, Record<string, unknown>> = {};
+  for (const [provider, values] of Object.entries(opts)) {
+    const { cacheControl: _c, cachePoint: _p, ...rest } = values;
+    void _c;
+    void _p;
+    if (Object.keys(rest).length) cleaned[provider] = rest;
+  }
+  const { providerOptions: _old, ...base } = message;
+  void _old;
+  return (Object.keys(cleaned).length ? { ...base, providerOptions: cleaned } : base) as ModelMessage;
+}
+
+/** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter narrowed to it turns Launch mode on. */
+const LAUNCH_PLATFORM_GROUP = 'Tags (Reactor)';
+/** Groups that may ride along with the Launch group without making the run "not Launch" (grounding + the code-commit handoff). */
+const LAUNCH_COMPANION_GROUPS = new Set(['Knowledge', 'GitHub']);
+
+/**
+ * Whether this run should ground on the Launch/Reactor object model: set
+ * explicitly via opts.launchMode, or implied when the platform filter is
+ * narrowed to the Launch/Reactor tag tools (plus Knowledge/GitHub). A filter
+ * that merely still includes the Tags group alongside other platforms — e.g.
+ * every box ticked but CJA — is not a Launch run. Non-Launch runs keep the
+ * lean cached prefix.
+ */
+export function resolveLaunchMode(opts: Pick<RunAgentOptions, 'launchMode' | 'platformFilter'>): boolean {
+  if (opts.launchMode !== undefined) return opts.launchMode;
+  const filter = opts.platformFilter ?? [];
+  return filter.includes(LAUNCH_PLATFORM_GROUP) && filter.every((p) => p === LAUNCH_PLATFORM_GROUP || LAUNCH_COMPANION_GROUPS.has(p));
+}
+
+function tryGetModelEntry(modelKey: string) {
+  try { return getModelEntry(modelKey); } catch { return undefined; }
+}
+
+function isClaudeModelId(modelId: string): boolean {
+  return /claude/i.test(modelId);
+}
+
+// ── Conversation-bound thinking ───────────────────────────────────────────────
+
+/**
+ * Claude models that bind their thinking blocks to the exact prior
+ * conversation — system prompt, tools array, and every earlier message must
+ * be byte-identical when the blocks are replayed, or the API returns a 400
+ * (enforced by default for accounts created on or after 2026-08-31). These
+ * think by default, so on them the loop must be append-only: no rewriting old
+ * tool results, no dropping the tools array for a text-only last step, and no
+ * forced tool_choice (Sonnet 5.5 and Opus 5.5 reject it, and the provider's
+ * workaround sends only the forced tool, which changes the tools array).
+ */
+const HISTORY_BOUND_MODEL_RE = /claude-(?:opus-5-5|sonnet-5-5|haiku-5-5|fable-5-1|mythos-5-1)/i;
+
+function isHistoryBound(modelKey: string): boolean {
+  const entry = tryGetModelEntry(modelKey);
+  return Boolean(entry && HISTORY_BOUND_MODEL_RE.test(entry.modelId));
+}
+
+/** Server-side clearing of old tool results starts once a request's input passes this many tokens. */
+const CONTEXT_EDIT_TRIGGER_TOKENS = 30_000;
+/** Most recent tool uses kept intact by server-side context editing. */
+const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
+
+/**
+ * Server-side context editing (clear_tool_uses) — the API clears old tool
+ * results itself, which doesn't count as a history edit. Anthropic takes
+ * the typed `contextManagement` option; on Bedrock it's passed through as a
+ * raw request field plus its beta flag.
+ */
+function contextEditingProviderOptions(modelKey: string): ProviderOptions | undefined {
+  const entry = tryGetModelEntry(modelKey);
+  if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
+  const trigger = { type: 'input_tokens', value: CONTEXT_EDIT_TRIGGER_TOKENS };
+  const keep = { type: 'tool_uses', value: CONTEXT_EDIT_KEEP_TOOL_USES };
+  // find_tools results carry the schemas call_tool needs — keep them.
+  const excluded = ['find_tools'];
+  if (entry.provider === 'anthropic') {
+    return {
+      anthropic: {
+        contextManagement: { edits: [{ type: 'clear_tool_uses_20250919', trigger, keep, excludeTools: excluded }] },
+      },
+    };
+  }
+  if (entry.provider === 'bedrock') {
+    return {
+      bedrock: {
+        anthropicBeta: ['context-management-2025-06-27'],
+        additionalModelRequestFields: {
+          context_management: { edits: [{ type: 'clear_tool_uses_20250919', trigger, keep, exclude_tools: excluded }] },
+        },
+      },
+    };
+  }
+  return undefined;
+}
+
+type ProviderOptions = Record<string, Record<string, unknown>>;
+
+/** Merge per-provider option objects (one level deep — provider key, then option). */
+function mergeProviderOptions(...parts: Array<ProviderOptions | undefined>): ProviderOptions | undefined {
+  const merged: ProviderOptions = {};
+  for (const part of parts) {
+    for (const [provider, options] of Object.entries(part ?? {})) {
+      merged[provider] = { ...merged[provider], ...options };
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+/** How far past the time budget a run may go (to finish the step in flight and wrap up) before it's aborted. */
+const HARD_TIMEOUT_GRACE_MS = 5 * 60_000;
+
+/** Appended on the final step for history-bound models, which can't drop the tools array. */
+const FINAL_STEP_NOTE =
+  'This is your last step: do not call any more tools. Write your final answer now, based on what you have done so far.';
+
+// ── TASK 10: Extended thinking ────────────────────────────────────────────────
+
+/** Minimum token budget Anthropic accepts for budget-based extended thinking. */
+const THINKING_MIN_TOKENS = 1_024;
+
+/**
+ * Claude models that still take `{type: 'enabled', budgetTokens}`: Haiku 4.5
+ * and older (Claude 3.x, Sonnet/Opus 4.0–4.5). Everything newer uses adaptive
+ * thinking — Sonnet 5, Opus 4.7/4.8 and Opus 5/5.5 reject budgetTokens with a
+ * 400 — so on those the budget only switches thinking on and the model sizes
+ * it itself.
+ */
+const BUDGET_THINKING_MODEL_RE =
+  /claude-3|claude-(?:haiku|sonnet|opus)-4-[0-5](?:\b|[-.:])|claude-(?:sonnet|opus)-4-\d{8}/i;
+
+/**
+ * Resolve the providerOptions that enable extended thinking for this run, or
+ * undefined when it's off. Per-request budget takes precedence over the
+ * THINKING_BUDGET_TOKENS env var. Only Claude models (Anthropic direct, or
+ * Claude on Bedrock) are eligible.
+ */
+function resolveThinkingProviderOptions(
+  modelKey: string,
+  perRequestBudget?: number
+): ProviderOptions | undefined {
+  const entry = tryGetModelEntry(modelKey);
+  if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
+  if (entry.provider !== 'anthropic' && entry.provider !== 'bedrock') return undefined;
+
+  const budget =
+    perRequestBudget ??
+    (process.env.THINKING_BUDGET_TOKENS ? parseInt(process.env.THINKING_BUDGET_TOKENS, 10) : undefined);
+  if (!budget || isNaN(budget) || budget < THINKING_MIN_TOKENS) return undefined;
+
+  const config = BUDGET_THINKING_MODEL_RE.test(entry.modelId)
+    ? { type: 'enabled', budgetTokens: budget }
+    : { type: 'adaptive' };
+  // Anthropic takes `thinking`; @ai-sdk/amazon-bedrock takes `reasoningConfig`.
+  return entry.provider === 'anthropic'
+    ? { anthropic: { thinking: config } }
+    : { bedrock: { reasoningConfig: config } };
+}
+
+// ── TASK 2: prepareStep context compression ───────────────────────────────────
+
+/**
+ * Steps older than this threshold have their tool results compressed to a
+ * one-line summary. The current step and the one before it are kept at full
+ * fidelity so the model can reason about what it just did.
+ */
+const RESULT_SUMMARY_THRESHOLD = 2;
+
+/**
+ * Old results are compressed this many tool messages at a time. Compressing
+ * changes the history from that message on, which restarts the prompt cache
+ * from there; moving the boundary one message per step would restart it every
+ * step. In batches, the history stays byte-identical (and cached) between moves.
+ */
+const COMPRESS_BATCH = 4;
+
+/**
+ * Compress tool results in the conversation history for steps older than
+ * RESULT_SUMMARY_THRESHOLD. Large list/read payloads otherwise accumulate at
+ * full size in the context that's resent on every turn (the same mechanism
+ * behind the documented 400K-token run). The trace keeps each result as the
+ * tool returned it (after capToolResult's 8K cap) — only the model's
+ * in-flight context is shrunk further.
+ *
+ * Returns a new messages array if anything was compressed, or undefined to
+ * leave the messages untouched (so we only override when it actually helps).
+ *
+ * Strategy: tool messages appear in call order. We keep the tool results from
+ * at least the most recent RESULT_SUMMARY_THRESHOLD tool messages at full
+ * fidelity and summarise the text/JSON output of older ones, COMPRESS_BATCH
+ * at a time. Only outputs above a size
+ * floor are touched, so small confirmation objects are left alone.
+ */
+const COMPRESS_FLOOR_CHARS = 500;
+
+function compressOldToolMessages(
+  messages: readonly ModelMessage[],
+  completedSteps: number
+): ModelMessage[] | undefined {
+  if (completedSteps < RESULT_SUMMARY_THRESHOLD) return undefined;
+
+  // Index of tool messages so we can keep the last N intact.
+  const toolMsgIndexes: number[] = [];
+  messages.forEach((m, i) => {
+    if (m.role === 'tool') toolMsgIndexes.push(i);
+  });
+  const compressible = Math.floor((toolMsgIndexes.length - RESULT_SUMMARY_THRESHOLD) / COMPRESS_BATCH) * COMPRESS_BATCH;
+  if (compressible <= 0) return undefined;
+
+  const keepFrom = toolMsgIndexes[compressible];
+  let changed = false;
+
+  const rewritten = messages.map((m, i) => {
+    if (m.role !== 'tool' || i >= keepFrom) return m;
+    if (!Array.isArray(m.content)) return m;
+
+    const newContent = m.content.map((part) => {
+      if (part.type !== 'tool-result') return part;
+      const out = part.output as { type?: string; value?: unknown };
+      if (!out || (out.type !== 'text' && out.type !== 'json')) return part;
+
+      const serialized = out.type === 'text' ? String(out.value) : JSON.stringify(out.value);
+      if (serialized.length <= COMPRESS_FLOOR_CHARS) return part;
+
+      changed = true;
+      return {
+        ...part,
+        output: {
+          type: 'text' as const,
+          value: `[compressed to save context] ${part.toolName} returned ${serialized.length} chars. ${summariseOutputHint(out.type === 'json' ? out.value : serialized)}`,
+        },
+      };
+    });
+
+    return { ...m, content: newContent };
+  });
+
+  return changed ? (rewritten as ModelMessage[]) : undefined;
+}
+
+/** One-line hint about a compressed output so the model still has a signal. */
+function summariseOutputHint(output: unknown): string {
+  if (Array.isArray(output)) {
+    return `Result was a list of ${output.length} item(s) — call the tool again with narrower arguments to re-fetch specific entries.`;
+  }
+  if (output && typeof output === 'object') {
+    const keys = Object.keys(output as object);
+    return `Result was an object with keys: ${keys.slice(0, 8).join(', ')}${keys.length > 8 ? `, …+${keys.length - 8}` : ''}. Re-fetch if you need the full content.`;
+  }
+  return 'Re-fetch with narrower arguments if you need the full content.';
+}
+
+// ── Tool selection ────────────────────────────────────────────────────────────
+
+interface LiveToolSelection {
+  /** What the model sees all run: always-on + shortlist + policy_info + find_tools + call_tool. */
+  tools: ToolSet;
+  /** Always-on tools plus the semantic shortlist (the directly-visible catalog tools). */
+  toolsConsidered: string[];
+}
+
+async function selectLiveTools(
+  userInput: string,
+  toolShortlistSize: number,
+  toolRetries: number,
+  policy: { mode?: PolicyMode; dryRun?: boolean; dryRunWrites?: boolean },
+  ragJudgmentSink: RagJudgmentSink,
+  platformFilter?: string[],
+  launch?: { enabled: boolean; publishEnabled?: boolean; requirements?: LaunchRequirements; gate?: LaunchValidationGate },
+  segmentMode = false
+): Promise<LiveToolSelection> {
+  const rawCatalog = await stage('MCP tool catalog (tools/list)', () => getMcpToolCatalog());
+  // Knowledge tools are always kept in the catalog, whatever platforms are
+  // selected, so planning and error grounding can reach them — but they're
+  // removed from what the model sees below (planning-retrieval.ts).
+  const catalog = platformFilter && platformFilter.length > 0
+    ? rawCatalog.filter((t) => toolMatchesPlatforms(t.name, ['Knowledge']) || toolMatchesPlatforms(t.name, platformFilter))
+    : rawCatalog;
+  const catalogByName = new Map(catalog.map((t) => [t.name, t]));
+
+  // In Launch mode add the core Reactor/Launch read+write tools to the
+  // always-on set (launch-plan.ts) so they don't have to win a shortlist slot
+  // on embedding similarity, and expand the shortlist query with the parsed
+  // requirements so the rest of the relevant tools still get ranked.
+  // Segment runs likewise keep the profile-field lookup and the segment tools
+  // always on (segment-context.ts), so the "only real fields" rule is usable.
+  const alwaysOnNames = [
+    ...ALWAYS_ON_TOOLS,
+    ...(launch?.enabled ? launchAlwaysOnTools(launch.publishEnabled === true) : []),
+    ...(segmentMode ? SEGMENT_ALWAYS_ON_TOOLS : []),
+  ];
+  const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name) && !isKnowledgeTool(name));
+  const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;
+  const shortlisted = await stage('tool-shortlisting embedding call', () =>
+    shortlistTools(shortlistQuery, {
+      k: toolShortlistSize,
+      exclude: alwaysOn,
+      // Rank only tools the platform filter kept, so filtered-out tools don't
+      // use up shortlist slots and leave the run with fewer usable tools.
+      include: (name) => catalogByName.has(name) && !isKnowledgeTool(name),
+    })
+  );
+
+  // TASK 9: the policy runs over the whole catalog, so a tool reached via
+  // call_tool is filtered/dry-run-wrapped exactly like a shortlisted one.
+  // Action guardrails (write cap, protected ids, result redaction) wrap the
+  // same objects call_tool executes.
+  const callable = applyActionGuards(
+    applyToolPolicy(buildAiTools(catalog, { maxRetries: toolRetries, ragJudgmentSink, launchGate: launch?.gate }), {
+      ...policy,
+      launchGate: launch?.gate,
+    })
+  );
+  // Built over the whole catalog so each tool's error grounding can still
+  // reach the knowledge base, then hidden so call_tool can't run them either.
+  for (const name of Object.keys(callable)) {
+    if (isKnowledgeTool(name)) delete callable[name];
+  }
+
+  const toolsConsidered = [...new Set([...alwaysOn, ...shortlisted])].filter((name) => name in callable);
+  const tools: ToolSet = Object.fromEntries(
+    [...toolsConsidered, 'policy_info'].map((name) => [name, callable[name]])
+  );
+  // TASK 6: discovery over everything the policy allows (see tool-discovery.ts)
+  Object.assign(tools, buildDiscoveryTools(catalog, callable, new Set(toolsConsidered)));
+
+  return { tools, toolsConsidered };
+}
+
+// ── Step trace ────────────────────────────────────────────────────────────────
+
+/**
+ * Build a tracing StepSample from a live SDK step and hand it to the tracer.
+ * Pulls tokens/timing from step.usage / step.performance and per-tool call
+ * data (name, input, output/error, duration) from step.content, keyed to
+ * step.performance.toolExecutionMs by tool call id. Provider/model id come
+ * from the registry entry for the model that actually ran the step.
+ */
+function recordStepSpan(
+  tracer: RunTracer,
+  step: {
+    text: string;
+    finishReason?: string;
+    usage?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+    };
+    content: ReadonlyArray<{ type: string }>;
+    performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
+  },
+  stepNumber: number,
+  modelKey: string
+): void {
+  const entry = tryGetModelEntry(modelKey);
+  const toolMs = step.performance?.toolExecutionMs ?? {};
+
+  type Part = { type: string; toolName?: string; toolCallId?: string; input?: unknown; output?: unknown; result?: unknown; error?: unknown };
+  // Pair each tool-call with its result/error part by call id.
+  const byId = new Map<string, StepSample['tools'][number]>();
+  const order: string[] = [];
+  for (const p of step.content as ReadonlyArray<Part>) {
+    if (!p.toolCallId || !p.toolName) continue;
+    if (p.type === 'tool-call') {
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, { callId: p.toolCallId, toolName: p.toolName, input: p.input, durationMs: toolMs[p.toolCallId] });
+    } else if (p.type === 'tool-result') {
+      const t = byId.get(p.toolCallId) ?? { callId: p.toolCallId, toolName: p.toolName, input: undefined, durationMs: toolMs[p.toolCallId] };
+      t.output = p.output ?? p.result;
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, t);
+    } else if (p.type === 'tool-error') {
+      const t = byId.get(p.toolCallId) ?? { callId: p.toolCallId, toolName: p.toolName, input: undefined, durationMs: toolMs[p.toolCallId] };
+      t.error = p.error instanceof Error ? p.error.message : String(p.error);
+      if (!byId.has(p.toolCallId)) order.push(p.toolCallId);
+      byId.set(p.toolCallId, t);
+    }
+  }
+
+  const sample: StepSample = {
+    stepNumber,
+    modelId: entry?.modelId ?? modelKey,
+    provider: entry?.provider ?? 'unknown',
+    text: step.text,
+    finishReason: step.finishReason ?? '',
+    usage: {
+      inputTokens: step.usage?.inputTokens,
+      outputTokens: step.usage?.outputTokens,
+      cacheReadTokens: step.usage?.inputTokenDetails?.cacheReadTokens,
+      cacheWriteTokens: step.usage?.inputTokenDetails?.cacheWriteTokens,
+    },
+    stepTimeMs: step.performance?.stepTimeMs ?? 0,
+    responseTimeMs: step.performance?.responseTimeMs ?? 0,
+    tools: order.map((id) => byId.get(id)!),
+  };
+  tracer.recordStep(sample);
+}
+
+/** Per-step data the AI SDK reports; only the fields the trace reads. */
+interface StepForTrace {
+  text: string;
+  content: ReadonlyArray<{ type: string }>;
+  /** step.usage — chat-model tokens for this step. */
+  usage?: SdkUsage;
+  /** step.performance — timing the SDK measured for this step (streaming steps only for some fields). */
+  performance?: { stepTimeMs?: number; responseTimeMs?: number; toolExecutionMs?: Readonly<Record<string, number>> };
+}
+
+/**
+ * Walk step.content directly — tool-error parts are NOT in step.toolResults
+ * but we want them visible in the trace.
+ *
+ * When the live SDK step is passed (it carries `usage`/`performance`), the
+ * trace is enriched with per-step timing/tokens and per-tool durations
+ * (step.performance.toolExecutionMs, keyed by tool call id). Re-mapping stored
+ * result steps (no performance) just omits those fields.
+ */
+function toStepTrace(step: StepForTrace, stepNumber: number): AgentStepTrace {
+  const toolCalls: AgentStepTrace['toolCalls'] = [];
+  const toolResults: AgentStepTrace['toolResults'] = [];
+  const toolMs = step.performance?.toolExecutionMs;
+
+  type Part = {
+    type: string;
+    toolName: string;
+    toolCallId?: string;
+    input?: unknown;
+    output?: unknown;
+    result?: unknown;
+    error?: unknown;
+    approved?: boolean;
+    reason?: string;
+    toolCall?: { toolName: string };
+  };
+  for (const part of step.content as ReadonlyArray<Part>) {
+    const durationMs = part.toolCallId ? toolMs?.[part.toolCallId] : undefined;
+    if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
+      // Denied calls never produce a tool-result/tool-error part.
+      toolResults.push({ toolName: part.toolCall.toolName, output: undefined, error: `Not executed: ${part.reason ?? 'denied'}` });
+    } else if (part.type === 'tool-call') {
+      toolCalls.push({ toolName: part.toolName, input: part.input });
+    } else if (part.type === 'tool-result') {
+      // StaticToolResult uses .output; DynamicToolResult uses .result
+      toolResults.push({ toolName: part.toolName, output: part.output ?? part.result, ...(durationMs !== undefined ? { durationMs } : {}) });
+    } else if (part.type === 'tool-error') {
+      const errVal = part.error;
+      toolResults.push({
+        toolName: part.toolName,
+        output: undefined,
+        error: errVal instanceof Error ? errVal.message : String(errVal),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      });
+    }
+  }
+
+  const perf = step.performance;
+  return {
+    stepNumber,
+    text: step.text,
+    toolCalls,
+    toolResults,
+    ...(perf?.stepTimeMs !== undefined ? { durationMs: perf.stepTimeMs } : {}),
+    ...(perf?.responseTimeMs !== undefined ? { modelMs: perf.responseTimeMs } : {}),
+    ...(step.usage ? { usage: toTokenUsage(step.usage) } : {}),
+  };
+}
+
+/** Lets the agent save a verified, stable deployment fact for later runs. */
+function rememberFactTool(runId: string | undefined, actor: string | undefined) {
+  return tool({
+    description:
+      'Save a stable deployment fact for future runs, e.g. key "aep.prod_sandbox", value "prod". Overwrites the same key. Only identifiers you verified with a tool; never credentials or personal data. Lowercase key with letters, digits, "_", "." or "-".',
+    inputSchema: jsonSchema<{ key: string; value: string; note?: string }>({
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'e.g. "launch.web_property_id"' },
+        value: { type: 'string', description: 'The identifier or short fact (max 300 chars).' },
+        note: { type: 'string', description: 'Optional: where it came from.' },
+      },
+      required: ['key', 'value'],
+      additionalProperties: false,
+    }),
+    execute: async ({ key, value, note }) => {
+      const fact = await saveFact({ key, value, note, sourceRunId: runId, updatedBy: `agent (${actor ?? 'anonymous'})` });
+      return { stored: fact.key, value: fact.value };
+    },
+  });
+}
+
+/** One ToolOutcome per finished, failed, or denied call in a step's content. */
+function toolOutcomes(content: ReadonlyArray<{ type: string }>, reasons: Map<string, ApprovalReason>): ToolOutcome[] {
+  type Part = {
+    type: string;
+    toolCallId?: string;
+    toolName?: string;
+    input?: unknown;
+    error?: unknown;
+    approved?: boolean;
+    reason?: string;
+    toolCall?: { toolCallId?: string; toolName: string; input?: unknown };
+  };
+  const out: ToolOutcome[] = [];
+  for (const part of content as ReadonlyArray<Part>) {
+    let id: string | undefined;
+    let raw: { toolName: string; input: unknown } | undefined;
+    let outcome: ToolOutcome['outcome'];
+    let error: string | undefined;
+    if (part.type === 'tool-result' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'ok';
+    } else if (part.type === 'tool-error' && part.toolName) {
+      id = part.toolCallId;
+      raw = { toolName: part.toolName, input: part.input };
+      outcome = 'error';
+      error = part.error instanceof Error ? part.error.message : String(part.error);
+    } else if (part.type === 'tool-approval-response' && part.approved === false && part.toolCall) {
+      id = part.toolCall.toolCallId;
+      raw = { toolName: part.toolCall.toolName, input: part.toolCall.input };
+      outcome = 'denied';
+      error = part.reason;
+    } else {
+      continue;
+    }
+    const call = effectiveToolCall(raw.toolName, raw.input);
+    const approvalReason = id ? reasons.get(id) : undefined;
+    out.push({
+      toolCallId: id ?? '',
+      toolName: call.toolName,
+      input: call.input,
+      level: classifyTool(call.toolName),
+      outcome,
+      ...(error !== undefined ? { error } : {}),
+      ...(approvalReason ? { approvalReason } : {}),
+    });
+  }
+  return out;
+}
+
+// ── Main agent loop ───────────────────────────────────────────────────────────
+
+/**
+ * Setup half of a run (Requirement 1.1): routing, Launch mode resolution,
+ * validation gate creation, Launch brief parsing, tool selection, memory
+ * loading, planning retrieval, planning, plan approval and the approval hook.
+ *
+ * Returns an {@link EarlyResult} when setup itself produced the final answer —
+ * an unclear routed request (a clarifying question) or a denied plan — so no
+ * model loop runs. Otherwise returns a {@link PreparedRun} carrying the
+ * {@link LoopContext} executeLoop() needs plus the extra fields runAgent()
+ * folds into the AgentRunResult (toolsConsidered, plan, route, versions,
+ * planning retrieval and the RAG judgment sink).
+ *
+ * This is a behaviour-preserving extraction of the first half of the old
+ * single runAgent(); nothing here changed except the two early returns now
+ * come back wrapped as EarlyResult.
+ */
+export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | EarlyResult> {
+  const {
+    userInput,
+    maxSteps = 20,
+    toolShortlistSize = 24,
+    toolRetries = 1,
+    modelHealth = defaultModelHealth,
+  } = opts;
+
+  // Model routing (model-router.ts): "auto" picks a tier per request. A
+  // routed model isn't pinned, so the same-tier fallback still applies.
+  let modelKey = opts.modelKey;
+  let route: RouteDecision | undefined;
+  if (modelKey === AUTO_MODEL) {
+    route = await routeRequest(userInput, { health: modelHealth });
+    opts.onRoute?.(route);
+    if (route.category === 'unclear' && route.clarifyingQuestion) {
+      // Don't guess at an unclear request: ask instead of running tools.
+      return {
+        kind: 'early',
+        result: {
+          finalText: route.clarifyingQuestion,
+          steps: [],
+          toolsConsidered: [],
+          finishReason: 'stop',
+          modelKey: route.modelKey,
+          budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+          usage: {},
+          ragJudgments: [],
+          route,
+        },
+      };
+    }
+    modelKey = undefined;
+  }
+  const startModelKey = route?.modelKey ?? modelKey;
+
+  let tools: ToolSet;
+  let toolsConsidered: string[];
+  let userMessage = userInput;
+  const rolloutMode = resolveRolloutMode(opts.rolloutMode);
+  // Launch-tagging run: grounds the prompt (buildSystemMessage), seeds the plan
+  // from the Launch template, and widens tool selection to the Reactor tools
+  // (both via launch-plan.ts). Explicit opts.launchMode wins; otherwise it's
+  // inferred from a Launch/Reactor platform filter.
+  const launchMode = resolveLaunchMode(opts);
+  // Segment/audience run: grounds the prompt with the PQL reference + glossary
+  // and keeps the field lookup + segment tools always on (segment-context.ts).
+  const segmentMode = resolveSegmentMode(opts, userInput);
+  // A Launch run started with a publishTarget may publish the populated
+  // library to a dev/staging environment. This flag swaps the grounding to
+  // the publish state machine, widens the seed plan + always-on tools to the
+  // publish pipeline, and feeds the gate the fallback target. Off → every
+  // publish-related path is byte-identical to today.
+  const publishEnabled =
+    launchMode && Boolean(opts.publishTarget?.environmentId || opts.publishTarget?.environmentName);
+  // Collects fire-and-forget RAG judgments for live runs; drained once the
+  // loop finishes. The eval path (opts.tools) doesn't judge, so it keeps no
+  // sink — there's nothing to drain and no judgments to persist there.
+  let ragJudgmentSink: RagJudgmentSink | undefined;
+  let planningRetrieval: PlanningRetrieval | undefined =
+    opts.knowledge === undefined
+      ? undefined
+      : { tool: PLANNING_RAG_TOOL, query: userInput, context: planningContext(opts.knowledge) };
+  // Phase 4: the validation gate for a Launch-mode run (launch-validation.ts).
+  // It observes tool results to build property state and BLOCKS the library
+  // handoff until the structural / reference / dry-run checks pass. Non-Launch
+  // runs (and the eval path) get none, so the gate wrapper is a no-op there.
+  const resolvedPolicy = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
+  const launchGate =
+    launchMode && !opts.tools
+      ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow', publishTarget: opts.publishTarget })
+      : undefined;
+
+  // Phase 2: parse the free-text brief into typed requirements for a live
+  // Launch run, so the shortlist query, the seeded plan and the few-shot
+  // examples are specialised to it. Callers can pass opts.requirements to skip
+  // the parse; the eval path (opts.tools) doesn't parse. Fail-open: a parse
+  // failure runs the generic Launch flow rather than failing the run.
+  let requirements = opts.requirements;
+  if (launchMode && !opts.tools && !requirements) {
+    try {
+      requirements = await stage('Launch brief parse', () => parseLaunchBrief(userInput, startModelKey));
+    } catch (err) {
+      console.warn('[agent] Launch brief parse failed; running without parsed requirements:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  if (opts.tools) {
+    // Evals pass opts.tools and bypass the tool policy so scripted tool
+    // fixtures aren't accidentally filtered.
+    tools = opts.tools;
+    toolsConsidered = Object.keys(opts.tools);
+  } else {
+    ragJudgmentSink = createRagJudgmentSink();
+    // Kick off the memory fetch in parallel with tool selection — both are
+    // network calls and neither depends on the other's result.
+    const liveFetch = selectLiveTools(
+      userInput,
+      toolShortlistSize,
+      toolRetries,
+      { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
+      ragJudgmentSink,
+      opts.platformFilter,
+      { enabled: launchMode, publishEnabled, requirements, gate: launchGate },
+      segmentMode
+    );
+    const memoryFetch = memoryEnabled()
+      ? listFacts().catch((err) => {
+          console.warn('[agent] Memory unavailable; running without it:', err instanceof Error ? err.message : err);
+          return null;
+        })
+      : Promise.resolve(null);
+
+    // Planning-stage retrieval (planning-retrieval.ts): the run's one
+    // up-front knowledge lookup, shared by the planner and the executor.
+    // Skipped when the caller supplied the excerpts (opts.knowledge).
+    const groundingQuery = launchMode ? launchShortlistQuery(userInput, requirements) : userInput;
+    const lookup = () =>
+      stage('planning knowledge lookup', async () =>
+        retrieveForPlanning(groundingQuery, {
+          available: new Set((await getMcpToolCatalog()).map((t) => t.name)),
+          sink: ragJudgmentSink,
+          abortSignal: opts.abortSignal,
+        })
+      ).catch((err) => {
+        console.warn('[agent] Planning knowledge lookup failed; running without it:', err instanceof Error ? err.message : err);
+        return undefined;
+      });
+    const groundingFetch = planningRetrieval ? Promise.resolve(planningRetrieval) : lookup();
+
+    const [live, facts, grounding] = await Promise.all([liveFetch, memoryFetch, groundingFetch]);
+    tools = live.tools;
+    toolsConsidered = live.toolsConsidered;
+    planningRetrieval = grounding;
+
+    // Deployment memory (memory-store.ts): stored facts lead the first message,
+    // and remember_fact saves new ones (not in read-only runs).
+    if (facts) {
+      userMessage = memoryPreamble(facts) + userInput;
+    }
+    if (memoryEnabled() && resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun }).mode !== 'read-only') {
+      tools = { ...tools, remember_fact: rememberFactTool(opts.runId, opts.actor) };
+    }
+  }
+
+  // Plan-and-execute (planner.ts): plan first, optionally have a person
+  // approve it, then execute with update_plan / revise_plan available.
+  // Requirement 2.6: a run that asks for orchestration needs a plan for the
+  // coordinator to schedule, so planning is forced on (as if planFirst) when
+  // orchestration could actually run — unless the flag is off, where the
+  // request's orchestrate option is ignored entirely (Requirement 2.2).
+  const planFirst = opts.planFirst || orchestrationRequested(orchestrationFlag(), opts.orchestrate) || Boolean(opts.resumePlan);
+  let planTracker: PlanTracker | undefined;
+  if (planFirst) {
+    const planModel = startModelKey || getDefaultModelKey();
+    if (opts.resumePlan) {
+      // Continue the interrupted run's plan rather than planning again.
+      planTracker = new PlanTracker(structuredClone(opts.resumePlan.plan), (p) => opts.onPlan?.(p));
+    } else if (launchMode) {
+      // Launch-tagging runs follow a fixed grounding backbone (read property
+      // state -> ground against the KB -> generate -> validate -> populate the
+      // library), so the plan is seeded deterministically from the Launch
+      // template (launch-plan.ts) and specialised with the Phase 2
+      // requirements, rather than asked of the model.
+      planTracker = new PlanTracker(seedLaunchPlan(requirements, publishEnabled), (p) => opts.onPlan?.(p));
+    } else {
+      try {
+        const plan = await stage(`planner call (${planModel})`, () =>
+          makePlan(userInput, Object.keys(tools), planModel, planningRetrieval?.context)
+        );
+        planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
+      } catch (err) {
+        console.warn('[agent] Planning failed; running without a plan:', err instanceof Error ? err.message : err);
+      }
+    }
+    if (planTracker) {
+      opts.onPlan?.(planTracker.plan);
+      if (opts.approvePlan) {
+        const decision = await opts.approvePlan(planTracker.plan);
+        if (!decision.approved) {
+          return {
+            kind: 'early',
+            result: {
+              finalText: `The plan wasn't approved${decision.reason ? ` (${decision.reason})` : ''}, so nothing was run.`,
+              steps: [],
+              toolsConsidered,
+              finishReason: 'stop',
+              modelKey: planModel,
+              budgetUsage: { tokens: 0, costUsd: 0, durationMs: 0 },
+              usage: {},
+              ragJudgments: ragJudgmentSink ? await ragJudgmentSink.drain() : [],
+              plan: planTracker.plan,
+            },
+          };
+        }
+      }
+      tools = { ...tools, ...buildPlanTools(planTracker) };
+      userMessage = `${planPreamble(planTracker.plan)}\n\nRequest: ${userMessage}`;
+    }
+  }
+
+  if (planningRetrieval) userMessage = `${planningRetrieval.context}\n\n${userMessage}`;
+
+  // Phase 5: few-shot grounding. The agent's only knowledge base is the
+  // MCP-owned search_adobe_knowledge, which this repo can't seed, so a small
+  // curated set of known-good rule/data-element example documents lives in
+  // launch-examples.ts. Retrieve the ones closest to the Phase 2 requirements
+  // and inject them ahead of the request, so the generation step pattern-matches
+  // against validated shapes rather than inventing delegate/settings layouts.
+  // Live Launch runs only (the eval path passes opts.tools); nothing to show
+  // when no requirements were parsed or none overlap.
+  if (launchMode && !opts.tools) {
+    const preamble = launchExamplesPreamble(selectLaunchExamples(requirements));
+    if (preamble) userMessage = `${preamble}\n\n${userMessage}`;
+  }
+
+  // TASK 9: gate risky calls on a human decision (live runs only).
+  // opts.tools marks the eval path, which bypasses gating — UNLESS opts.approveTool
+  // is explicitly provided so the eval can exercise the approval gate itself.
+  const approvalReasons = new Map<string, ApprovalReason>();
+  const { dryRun } = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
+  const toolApproval = (opts.tools && !opts.approveTool)
+    ? undefined
+    : async ({ toolCall, workerId }: Parameters<ToolApprovalFn>[0]) => {
+        const call = effectiveToolCall(toolCall.toolName, toolCall.input);
+        // A publish transition's exemption from the outbound gate is decided
+        // from the gate's server-truth stage (launch-validation.ts): a verified
+        // dev/staging target is not gated, production/unknown stay gated (and
+        // production is independently refused by the gate before it runs). The
+        // gate exists only on live Launch runs; otherwise no stage is passed
+        // and behaviour is unchanged.
+        const transitionStage =
+          launchGate && call.toolName === PUBLISH_TRANSITION_TOOL ? launchGate.resolveStageFor(call.input) : undefined;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun, transitionStage });
+        if (!reason) return 'not-applicable' as const;
+        approvalReasons.set(toolCall.toolCallId, reason);
+        if (!opts.approveTool) {
+          return {
+            type: 'denied' as const,
+            reason: `This call needs a human approver (${APPROVAL_REASON_TEXT[reason]}), and none is attached to this run.`,
+          };
+        }
+        const decision = await opts.approveTool({ toolCallId: toolCall.toolCallId, ...call, reason, ...(workerId ? { workerId } : {}) });
+        return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
+      };
+
+  // Version fingerprints for this run (lib/version.ts). promptVersion matches
+  // how the prompt is actually built: live runs include the find_tools rule.
+  const toolDiscovery = 'find_tools' in tools;
+  const versions = {
+    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode, publishEnabled, segmentMode }),
+    toolset: toolsetVersion(
+      Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
+    ),
+    app: appVersion(),
+  };
+
+  // Base attributes for the run trace span (item #8). executeLoop builds a
+  // fresh RunTracer from these per model attempt, so a same-tier fallback's
+  // abandoned steps don't leak into the exported trace.
+  const baseTracerAttrs: Record<string, AttrValue> = {
+    'harness.prompt.version': versions.prompt,
+    'harness.toolset.version': versions.toolset,
+    'harness.app.version': versions.app,
+    ...(opts.runId ? { 'harness.run.id': opts.runId } : {}),
+  };
+
+  return {
+    kind: 'prepared',
+    ctx: {
+      tools,
+      launchMode,
+      publishEnabled,
+      segmentMode,
+      userMessage,
+      startModelKey,
+      // A pinned model (opts.modelKey, not "auto"/routed) disables same-tier fallback.
+      isPinned: Boolean(modelKey),
+      maxSteps,
+      budgetLimits: resolveBudget(opts.budget),
+      modelHealth,
+      ...(toolApproval ? { toolApproval } : {}),
+      approvalReasons,
+      // Phase 3 (workers): the run's single gate (Requirement 9.1). Already
+      // embedded in `tools`; carried on the ctx so the coordinator hands the
+      // same instance to every worker.
+      ...(launchGate ? { launchGate } : {}),
+      baseTracerAttrs,
+      ...(opts.thinkingBudget !== undefined ? { thinkingBudget: opts.thinkingBudget } : {}),
+      ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+      ...(opts.onStep ? { onStep: opts.onStep } : {}),
+      ...(opts.onTextDelta ? { onTextDelta: opts.onTextDelta } : {}),
+      ...(opts.onToolOutcome ? { onToolOutcome: opts.onToolOutcome } : {}),
+      ...(opts.onRestart ? { onRestart: opts.onRestart } : {}),
+    },
+    toolsConsidered,
+    ...(planTracker ? { planTracker } : {}),
+    ...(route ? { route } : {}),
+    versions,
+    ...(planningRetrieval ? { planningRetrieval } : {}),
+    ...(ragJudgmentSink ? { ragJudgmentSink } : {}),
+  };
+}
+
+/**
+ * Execution half of a run (Requirement 1.2): the streaming tool loop, budget
+ * enforcement, context compression, same-tier fallback, tracing and result
+ * assembly. Every input is read from {@link LoopContext} — no enclosing
+ * closure — so a worker (Phase 2) can drive the same loop with its own ctx.
+ *
+ * This is a behaviour-preserving extraction of the second half of the old
+ * single runAgent(): the only new output is {@link LoopResult.hadSideEffects},
+ * which exposes what was the internal `attemptHadSideEffects` flag so the
+ * caller (and later a per-worker fallback) can see whether the attempt wrote.
+ */
+export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
+  const {
+    tools,
+    launchMode,
+    publishEnabled,
+    segmentMode,
+    userMessage,
+    startModelKey,
+    isPinned,
+    maxSteps,
+    budgetLimits,
+    modelHealth,
+    toolApproval,
+    approvalReasons,
+    baseTracerAttrs,
+    abortSignal,
+  } = ctx;
+
+  // A fresh tracer per model attempt so a same-tier fallback's abandoned steps
+  // don't leak into the exported trace (they get their own tracer, never
+  // finished). `tracer` always points at the current attempt; finish() +
+  // exportSpans() run once the loop settles, on both success and error.
+  // Tracing reads only what the SDK already reports per step, so it never
+  // changes the agent's behaviour, and export is best-effort (never throws).
+  // Phase 3 (workers): when the coordinator passes a parent span, each
+  // attempt's tracer nests under it so the run's spans form one tree
+  // (Requirement 14.1). Single-agent runs leave it undefined, so the trace
+  // opens fresh exactly as before.
+  let tracer = new RunTracer(baseTracerAttrs, Date.now, ctx.tracerParent);
+
+  const registry = getModelRegistry();
+
+  // TASK 8: step counter for onStepEnd → onStep mapping. Reset per model
+  // attempt, since a fallback restarts the run from scratch.
+  let stepIndex = 0;
+  const runStartedAt = Date.now();
+  // Per model attempt, like stepIndex (a fallback restarts the run). A worker
+  // passes ctx.budgetParent so each step charges the run ledger too
+  // (Requirements 8.1, 8.3); single-agent runs leave it undefined, so the
+  // tracker has no parent and behaves exactly as before.
+  let budget = new RunBudgetTracker(budgetLimits, startModelKey || getDefaultModelKey(), runStartedAt, Date.now, ctx.budgetParent);
+  let stopReason: BudgetStopReason | undefined;
+  // Whether the current attempt has executed a write/destructive tool call —
+  // if so, falling back would re-run those side effects on the next model.
+  let attemptHadSideEffects = false;
+
+  const callModel = (resolvedModelKey: string) => {
+    stepIndex = 0;
+    attemptHadSideEffects = false;
+    budget = new RunBudgetTracker(budgetLimits, resolvedModelKey, runStartedAt, Date.now, ctx.budgetParent);
+    stopReason = undefined;
+    // Fresh tracer for this attempt (a fallback restarts the run from scratch),
+    // still nested under the coordinator span when one was passed.
+    tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey }, Date.now, ctx.tracerParent);
+    // Step index at which a budget forced the wrap-up step; the loop stops after it.
+    let forcedAt: number | undefined;
+
+    // TASK 10: resolve thinking config for this model + request combination
+    const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, ctx.thinkingBudget);
+    if (thinkingProviderOptions) {
+      console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
+    }
+    const historyBound = isHistoryBound(resolvedModelKey);
+    const conversationCacheMarker = cacheMarker(resolvedModelKey);
+    const providerOptions = mergeProviderOptions(
+      thinkingProviderOptions,
+      historyBound ? contextEditingProviderOptions(resolvedModelKey) : undefined
+    ) as Record<string, Record<string, never>> | undefined;
+
+    return stage(`chat model call (${resolvedModelKey})`, async () => {
+      // TASK 1 (token streaming): streamText instead of generateText so the
+      // assistant's text is emitted as it's produced. Everything else — the
+      // multi-step loop (stopWhen), prepareStep context management, the
+      // approval gate, abort, thinking/context-editing providerOptions, and
+      // the onStepEnd trace/side-effect tracking — is unchanged; streamText
+      // takes the same options. We consume fullStream to forward text deltas,
+      // then await the terminal promises for the same result shape the
+      // fallback loop and result construction below already expect.
+      const stream = streamText({
+        model: resolveModel(resolvedModelKey),
+        // TASK 1: system prompt with provider-specific cache markers
+        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled, segmentMode === true),
+        messages: [{ role: 'user', content: userMessage }],
+        tools,
+        stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
+        abortSignal,
+        // Hard backstop for the time budget, which is otherwise checked
+        // between steps: one step that hangs (or waits on an approval) past
+        // it still gets cut off, with room left for the wrap-up step.
+        ...(budgetLimits.maxDurationMs !== undefined
+          ? { timeout: { totalMs: budgetLimits.maxDurationMs + HARD_TIMEOUT_GRACE_MS - (Date.now() - runStartedAt) } }
+          : {}),
+        // TASK 10 (thinking) + TASK 2 (server-side context editing)
+        ...(providerOptions ? { providerOptions } : {}),
+        ...(toolApproval ? { toolApproval } : {}),
+        prepareStep: ({ steps, messages }) => {
+          // Run budgets / loop detection (run-budget.ts): a hit limit turns
+          // this step into the wrap-up step, and repeated calls get a warning.
+          const exceeded = budget.exceeded();
+          if (exceeded && forcedAt === undefined) {
+            forcedAt = steps.length;
+            stopReason = exceeded;
+          }
+          const isLastStep = steps.length >= maxSteps - 1 || forcedAt !== undefined;
+          const notes = budget.takeWarnings();
+          if (exceeded) notes.push(budgetFinalNote(exceeded));
+          // Phase 2: a worker loop ends on its forced tool (report_result)
+          // rather than on free text, so on the last step a history-bound
+          // model is told to call that tool instead of the generic
+          // "write your final answer" note (Requirement 4.6). A budget
+          // wrap-up (`exceeded`) still gets budgetFinalNote above so the run
+          // stops cleanly rather than making one more tool call it can't pay
+          // for.
+          else if (historyBound && isLastStep) {
+            notes.push(ctx.forceFinalTool ? `Call ${ctx.forceFinalTool} now.` : FINAL_STEP_NOTE);
+          }
+          const withNotes = (base: ModelMessage[]): ModelMessage[] =>
+            notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
+
+          // History-bound models: append-only. Old tool results are cleared
+          // server-side (providerOptions above), and the last step keeps the
+          // tools array — toolChoice 'none' makes the providers drop it — and
+          // instead appends an instruction after the latest tool results.
+          if (historyBound) {
+            return { messages: withCacheBreakpoint(withNotes(messages), conversationCacheMarker) };
+          }
+
+          // TASK 2: compress tool results from steps older than the threshold
+          // so large list/read payloads don't accumulate at full size in the
+          // context that's resent on every turn. The trace (onStep /
+          // result.steps) keeps the uncompressed (8K-capped) results; only
+          // the in-flight model context is shrunk. Only compress when there's enough history
+          // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
+          // stay at full fidelity.
+          const compressedMessages = compressOldToolMessages(messages, steps.length);
+
+          // TASK 3: force text-only on the final allowed step. Phase 2: a
+          // worker instead forces its wrap-up tool (report_result) on that
+          // step so the loop always ends with a structured result rather than
+          // free text (Requirement 4.6). Single-agent runs leave
+          // forceFinalTool unset, so they keep forcing 'none' exactly as
+          // before.
+          const lastStepToolChoice = ctx.forceFinalTool
+            ? ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
+            : ('none' as const);
+          return {
+            toolChoice: isLastStep ? lastStepToolChoice : 'auto',
+            messages: withCacheBreakpoint(withNotes(compressedMessages ?? messages), conversationCacheMarker),
+          };
+        },
+        // TASK 8: fire onStep callback after each step so the route can stream it
+        onStepEnd: (step) => {
+          const stepNumber = stepIndex++;
+          const trace = toStepTrace(step, stepNumber);
+          budget.recordStep(
+            step.usage,
+            step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))
+          );
+          // Only calls that actually ran count — a denied call never executed.
+          for (const part of step.content) {
+            if (part.type !== 'tool-result' && part.type !== 'tool-error') continue;
+            if (classifyTool(effectiveToolCall(part.toolName, part.input).toolName) !== 'read') attemptHadSideEffects = true;
+          }
+          // Item #8: record a trace span for this step from what the SDK reports.
+          recordStepSpan(tracer, step, stepNumber, resolvedModelKey);
+          if (ctx.onToolOutcome) {
+            for (const outcome of toolOutcomes(step.content, approvalReasons)) ctx.onToolOutcome(outcome);
+          }
+          ctx.onStep?.(trace);
+        },
+      });
+
+      // Drain the stream, forwarding assistant text as it arrives. Reasoning
+      // (thinking) deltas are intentionally not forwarded — they're hidden by
+      // default on current models. Errors during streaming surface when the
+      // terminal promises below are awaited, so they still reach the fallback
+      // try/catch as a rejection rather than being swallowed here.
+      if (ctx.onTextDelta) {
+        for await (const part of stream.fullStream) {
+          if (part.type === 'text-delta') ctx.onTextDelta(part.text);
+        }
+      }
+
+      // Same shape generateText returned, so nothing downstream changes.
+      // Awaiting these also drives the loop to completion when onTextDelta
+      // isn't set (no fullStream consumer) and rejects on a provider failure.
+      const [text, steps, finishReason, usage] = await Promise.all([
+        stream.text,
+        stream.steps,
+        stream.finishReason,
+        stream.usage,
+      ]);
+      return { text, steps, finishReason, usage };
+    });
+  };
+
+  let resolvedModelKey = startModelKey || getDefaultModelKey();
+  if (!isPinned && modelHealth.isUnhealthy(resolvedModelKey)) {
+    const healthy = modelHealth.pickFallback(resolvedModelKey, registry);
+    if (healthy) resolvedModelKey = healthy;
+  }
+
+  // Finish the current attempt's trace and export it (best-effort). Called once
+  // the run settles — on success with the run's totals, on failure with the
+  // error. exportSpans never throws, so this can't disturb the run.
+  const finishTrace = (extra: { attributes?: Record<string, AttrValue>; error?: string }): void => {
+    try {
+      const spans = tracer.finish({
+        attributes: {
+          'harness.model.key': resolvedModelKey,
+          'harness.step.count': stepIndex,
+          ...extra.attributes,
+        },
+        ...(extra.error ? { error: extra.error } : {}),
+      });
+      void exportSpans(spans);
+    } catch (err) {
+      console.error('[tracing] failed to finish/export run trace:', err instanceof Error ? err.message : err);
+    }
+  };
+
+  const tried = new Set<string>();
+  let result: Awaited<ReturnType<typeof callModel>> | undefined;
+
+  // Concurrency cap (Requirement 13.1, 13.2): take one of the process-wide
+  // agent-loop slots before the first model call and release it in `finally`,
+  // whatever ends the loop — success, a thrown provider failure, a side-effect
+  // refusal or an abort. A worker that can't get a slot queues FIFO here; an
+  // abort while queued rejects before any model call runs.
+  const releaseSlot = await acquireLoopSlot(abortSignal);
+  try {
+    for (;;) {
+      tried.add(resolvedModelKey);
+      try {
+        result = await callModel(resolvedModelKey);
+        modelHealth.recordSuccess(resolvedModelKey);
+        break;
+      } catch (err) {
+        if (abortSignal?.aborted) {
+          finishTrace({ error: 'aborted', attributes: { 'harness.aborted': true } });
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        const failureKind = classifyProviderFailure(message);
+        if (failureKind) modelHealth.recordFailure(resolvedModelKey);
+        const fallback =
+          !isPinned && failureKind ? modelHealth.pickFallback(resolvedModelKey, registry, tried) : null;
+        if (!fallback) {
+          finishTrace({ error: message });
+          throw err;
+        }
+        // A fallback restarts the whole run. If this attempt already ran a
+        // write/destructive tool, the new model would redo it — fail instead.
+        if (attemptHadSideEffects) {
+          const sideEffectErr =
+            `${message}\n(Not falling back to "${fallback}": the failed attempt on "${resolvedModelKey}" ` +
+            `already executed write/destructive tool calls, which a restarted run would repeat.)`;
+          finishTrace({ error: sideEffectErr });
+          throw new Error(sideEffectErr);
+        }
+        console.warn(
+          `[agent] model "${resolvedModelKey}" hit a provider ${failureKind} failure; ` +
+            `falling back to same-tier "${fallback}".`
+        );
+        ctx.onRestart?.({ fromModelKey: resolvedModelKey, toModelKey: fallback });
+        resolvedModelKey = fallback;
+      }
+    }
+
+    if (!result) throw new Error('unreachable: chat model call produced no result');
+
+    const steps = result.steps.map((step, i) => toStepTrace(step, i));
+
+    const budgetUsage = budget.usage();
+    // Item #8: finish the run trace with the run's totals (best-effort).
+    finishTrace({
+      attributes: {
+        'gen_ai.response.finish_reasons': result.finishReason,
+        'harness.usage.total_tokens': budgetUsage.tokens,
+        'harness.duration_ms': budgetUsage.durationMs,
+        ...(budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': budgetUsage.costUsd } : {}),
+        ...(stopReason ? { 'harness.stop_reason': stopReason } : {}),
+      },
+    });
+
+    return {
+      text: result.text,
+      steps,
+      finishReason: result.finishReason,
+      modelKey: resolvedModelKey,
+      ...(stopReason ? { stopReason } : {}),
+      budgetUsage,
+      usage: toTokenUsage(result.usage),
+      hadSideEffects: attemptHadSideEffects,
+    };
+  } finally {
+    releaseSlot();
+  }
+}
+
+/**
+ * The public agent entry point (Requirements 1.3, 1.4): unchanged signature
+ * and unchanged AgentRunResult shape, now implemented as prepareRun() followed
+ * by executeLoop(). When setup produced an early answer (unclear request or a
+ * denied plan), the EarlyResult is returned as-is; otherwise the LoopResult is
+ * folded back together with the setup outputs into the same AgentRunResult the
+ * single function returned before.
+ */
+export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
+  const prepared = await prepareRun(opts);
+  if (prepared.kind === 'early') {
+    return prepared.result;
+  }
+
+  const { ctx, toolsConsidered, planTracker, route, versions, ragJudgmentSink, planningRetrieval } = prepared;
+
+  // Requirements 2.3–2.5: use the coordinator when orchestration is enabled
+  // for this run and the plan has two or more steps that could run at the same
+  // time. A plan with a cycle / unknown dependency never reaches here (the
+  // planner rejects it), and a plan too serial to parallelise falls through to
+  // the single-agent loop with `orchestrated: false` (Requirement 2.5).
+  if (planTracker && shouldOrchestrate(orchestrationFlag(), opts.orchestrate, planTracker.plan)) {
+    const config = orchestrationConfig({ ...(opts.maxWorkers !== undefined ? { maxWorkers: opts.maxWorkers } : {}) }, ctx.launchMode);
+    // workerTools reads the catalog only for tool names (to find platform-group
+    // siblings). The eval path's injected tools stand in for the MCP catalog,
+    // so eval workers get the same sibling expansion as live ones.
+    const catalog = opts.tools
+      ? Object.entries(opts.tools).map(([name, t]) => ({
+          name,
+          description: (t as { description?: string }).description ?? '',
+          inputSchema: { type: 'object' },
+        }))
+      : await getMcpToolCatalog();
+    const runModelKey = ctx.startModelKey ?? getDefaultModelKey();
+    // Requirement 14.1: one run span, with the coordinator span under it and
+    // each worker under that — run → coordinator → worker → step. A
+    // single-agent run's loop span is its run span; here the coordinator and
+    // workers each open their own, so the run needs one of its own.
+    const runTracer = new RunTracer({ ...ctx.baseTracerAttrs, 'gen_ai.request.model': runModelKey, 'harness.orchestrated': true });
+    const finishRunTrace = (extra: { attributes?: Record<string, AttrValue>; error?: string }): void => {
+      try {
+        void exportSpans(runTracer.finish(extra));
+      } catch (err) {
+        console.error('[tracing] failed to finish/export run trace:', err instanceof Error ? err.message : err);
+      }
+    };
+    let orchestrated: AgentRunResult;
+    try {
+      orchestrated = await runOrchestrated({
+        tracker: planTracker,
+        request: opts.userInput,
+        config,
+        ...(opts.resumePlan ? { seedResults: opts.resumePlan.results } : {}),
+        tools: ctx.tools,
+        catalog,
+        ...(planningRetrieval?.context ? { knowledge: planningRetrieval.context } : {}),
+        runModelKey,
+        isPinned: ctx.isPinned,
+        budgetLimits: ctx.budgetLimits,
+        modelHealth: ctx.modelHealth,
+        // Requirement 9.1: the run's single LaunchValidationGate, shared by every
+        // worker. It is already embedded in `ctx.tools` (so a worker's narrowed
+        // tool set calls through the same instance); passing it here also tells
+        // each worker it is in a gated Launch run (worker launchMode grounding).
+        ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
+        ...(ctx.segmentMode ? { segmentMode: true } : {}),
+        ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+        ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),
+        approvalReasons: ctx.approvalReasons,
+        baseTracerAttrs: ctx.baseTracerAttrs,
+        tracerParent: runTracer.ref(),
+        ...(opts.runId ? { runId: opts.runId } : {}),
+        toolsConsidered,
+        ...(ctx.thinkingBudget !== undefined ? { thinkingBudget: ctx.thinkingBudget } : {}),
+        ...(opts.onWorkerStart ? { onWorkerStart: opts.onWorkerStart } : {}),
+        ...(opts.onWorker ? { onWorker: opts.onWorker } : {}),
+        // Requirement 11.3: forward the worker-tagged step straight through so the
+        // route can attach the workerId to the step event and checkpoint. The
+        // coordinator supplies the workerId (executeLoop's own ctx.onStep never
+        // has one), so forward opts.onStep, which carries the optional arg.
+        ...(opts.onStep ? { onStep: (step, workerId) => opts.onStep?.(step, workerId) } : {}),
+        ...(ctx.onTextDelta ? { onTextDelta: ctx.onTextDelta } : {}),
+        // Requirement 9.6: forward the worker-tagged outcome so its audit entry
+        // carries the workerId. opts.onToolOutcome accepts the optional arg.
+        ...(opts.onToolOutcome ? { onToolOutcome: (outcome, workerId) => opts.onToolOutcome?.(outcome, workerId) } : {}),
+        ...(opts.onRestart ? { onRestart: ({ fromModelKey, toModelKey, workerId }) => opts.onRestart?.({ fromModelKey, toModelKey, workerId }) } : {}),
+        ...(opts.onPlan ? { onPlan: opts.onPlan } : {}),
+      });
+    } catch (err) {
+      finishRunTrace(
+        ctx.abortSignal?.aborted
+          ? { error: 'aborted', attributes: { 'harness.aborted': true } }
+          : { error: err instanceof Error ? err.message : String(err) }
+      );
+      throw err;
+    }
+    finishRunTrace({
+      attributes: {
+        'harness.usage.total_tokens': orchestrated.budgetUsage.tokens,
+        'harness.duration_ms': orchestrated.budgetUsage.durationMs,
+        ...(orchestrated.budgetUsage.costUsd !== undefined ? { 'harness.cost_usd': orchestrated.budgetUsage.costUsd } : {}),
+        ...(orchestrated.stopReason ? { 'harness.stop_reason': orchestrated.stopReason } : {}),
+      },
+    });
+    const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+    return { ...orchestrated, ragJudgments, versions, ...(route ? { route } : {}) };
+  }
+
+  const loop = await executeLoop(ctx);
+
+  // The judge ran concurrently with the loop; await any still in flight now
+  // (off the tool-call critical path) so the verdicts are captured with the
+  // run record. drain() never rejects.
+  const ragJudgments = ragJudgmentSink ? await ragJudgmentSink.drain() : [];
+
+  return {
+    finalText: loop.text,
+    steps: loop.steps,
+    toolsConsidered,
+    finishReason: loop.finishReason,
+    modelKey: loop.modelKey,
+    ...(loop.stopReason ? { stopReason: loop.stopReason } : {}),
+    budgetUsage: loop.budgetUsage,
+    usage: loop.usage,
+    ragJudgments,
+    versions,
+    ...(planTracker ? { plan: planTracker.plan } : {}),
+    ...(route ? { route } : {}),
+    // Requirement 2.5: orchestration was asked for but the plan (or the lack
+    // of one) left nothing to run in parallel, so this ran single-agent.
+    ...(orchestrationRequested(orchestrationFlag(), opts.orchestrate) ? { orchestrated: false } : {}),
+  };
+}

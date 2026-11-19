@@ -5,7 +5,7 @@ Guidance for calling the `reactor_*` tools. These wrap the Adobe Launch API
 ignoring the resource dependency order or a resource's state machine.
 
 A compact version of this guidance is injected into the agent's system prompt
-in Launch mode (`LAUNCH_TOOLS_CONTEXT` in `lib/llm/agent-core.ts`); this file is
+in Launch mode (`LAUNCH_TOOLS_CONTEXT` in `lib/llm/runtime/agent-core.ts`); this file is
 the full reference.
 
 ## Resource dependency chain — create top-down, delete bottom-up
@@ -65,7 +65,7 @@ handled for you.
   the staging environment) or `reject`: `approve`/`publish`, transitioning an
   approved library, and building an approved library or one bound to a
   production environment are the production path, refused in code by
-  `lib/llm/launch-validation.ts`.
+  `lib/llm/domains/launch/validation.ts`.
 - A library can only be deleted while in `development` state.
 - Read current members with `reactor_list_library_resources` (reads the
   per-type relationship endpoints).

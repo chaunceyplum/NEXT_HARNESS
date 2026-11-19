@@ -28,7 +28,7 @@ before writing any Next.js code, and heed deprecation notices. (Same rule as
 - Tool approval uses the `toolApproval` option; it returns
   `'not-applicable'`, `{ type: 'approved' }` or `{ type: 'denied', reason }`.
 - Per-step trace and side-effect tracking happen in `onStepEnd`.
-- "History-bound" models (see `HISTORY_BOUND_MODEL_RE` in `lib/llm/agent.ts`)
+- "History-bound" models (see `HISTORY_BOUND_MODEL_RE` in `lib/llm/runtime/agent.ts`)
   must not have earlier messages rewritten or tools swapped mid-run; use
   append-only notes and server-side context editing for them.
 - Keep the tool list fixed for a whole agent loop (prompt cache and the
@@ -38,8 +38,8 @@ before writing any Next.js code, and heed deprecation notices. (Same rule as
 ## Runtime model
 
 - One Node process. Jobs (`lib/run-jobs.ts`), pending approvals
-  (`lib/llm/approvals.ts`), the kill switch (`lib/kill-switch.ts`) and the
-  read cache (`lib/llm/tool-call-cache.ts`) live in memory on `globalThis`
+  (`lib/llm/tools/approvals.ts`), the kill switch (`lib/kill-switch.ts`) and the
+  read cache (`lib/llm/tools/tool-call-cache.ts`) live in memory on `globalThis`
   so dev-mode module reloading doesn't split them. Don't move these to
   separate processes.
 - Persistence goes through the MCP server's `execute_sql` tool

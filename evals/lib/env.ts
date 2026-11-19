@@ -5,7 +5,7 @@
  */
 
 import { generateText } from 'ai';
-import { getDefaultModelKey, getModelEntry, getModelRegistry, resolveModel } from '@/lib/llm/model-registry';
+import { getDefaultModelKey, getModelEntry, getModelRegistry, resolveModel } from '@/lib/llm/models/model-registry';
 
 /** Model under test for the agent suite. EVAL_MODEL overrides DEFAULT_MODEL, so two models can be compared on the same fixtures. */
 export function evalModelKey(): string {

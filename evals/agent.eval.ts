@@ -1,7 +1,7 @@
 /**
  * Agent behavior eval — run manually with `npm run eval:agent`.
  *
- * Grades the REAL agent loop (lib/llm/agent.ts runAgent: system prompt,
+ * Grades the REAL agent loop (lib/llm/runtime/agent.ts runAgent: system prompt,
  * step limit, trace mapping, model resolution) with a REAL chat model, but
  * against scripted tools (evals/lib/scripted-tools.ts) instead of the live
  * MCP server — so "did it pick the narrowest tool, avoid writes it wasn't
@@ -27,12 +27,12 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runAgent } from '@/lib/llm/agent';
+import { runAgent } from '@/lib/llm/runtime/agent';
 import { promptVersion } from '@/lib/version';
-import { LOCAL_TOOL_DEFINITIONS } from '@/lib/llm/local-tools';
-import { getMcpToolCatalog, type McpToolDefinition } from '@/lib/llm/tool-catalog';
-import { ModelHealthTracker } from '@/lib/llm/model-health';
-import { estimateCostUsd } from '@/lib/llm/pricing';
+import { LOCAL_TOOL_DEFINITIONS } from '@/lib/llm/tools/local-tools';
+import { getMcpToolCatalog, type McpToolDefinition } from '@/lib/llm/tools/tool-catalog';
+import { ModelHealthTracker } from '@/lib/llm/models/model-health';
+import { estimateCostUsd } from '@/lib/llm/models/pricing';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report, reportComparison } from './lib/report';

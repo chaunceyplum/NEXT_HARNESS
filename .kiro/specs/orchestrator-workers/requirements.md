@@ -3,7 +3,7 @@
 ## Introduction
 
 Add an orchestrator-worker mode to the harness agent. Today every run is a
-single agent loop (`runAgent` in `lib/llm/agent.ts`) that executes the whole
+single agent loop (`runAgent` in `lib/llm/runtime/agent.ts`) that executes the whole
 plan itself. In the new mode, a code-based coordinator runs plan steps whose
 dependencies are done as concurrent worker agents. Each worker is a smaller
 agent loop with a narrow tool set and a step cap. Workers return structured
@@ -78,8 +78,8 @@ can be lost.
 ### Glossary
 
 - **Run:** one agent job started by `POST /api/build` or a resume.
-- **Plan:** the `Plan` object from `lib/llm/planner.ts` (or the Launch
-  template from `lib/llm/launch-plan.ts`).
+- **Plan:** the `Plan` object from `lib/llm/runtime/planner.ts` (or the Launch
+  template from `lib/llm/domains/launch/plan.ts`).
 - **Ready step:** a plan step with status `pending` whose `dependsOn` steps
   are all `done`.
 - **Coordinator:** the code that schedules ready steps as workers.

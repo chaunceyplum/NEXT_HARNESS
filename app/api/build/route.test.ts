@@ -20,7 +20,7 @@ type WorkerAgentOpts = {
 };
 let orchestratedScript: ((opts: WorkerAgentOpts) => void | Promise<void>) | null = null;
 
-vi.mock('@/lib/llm/agent', () => ({
+vi.mock('@/lib/llm/runtime/agent', () => ({
   runAgent: async (opts: WorkerAgentOpts) => {
     if (orchestratedScript) {
       const script = orchestratedScript;
@@ -78,12 +78,12 @@ vi.mock('@/lib/online-judge', () => ({ shouldJudgeRun: () => false, judgeRun: as
 // actually starting MAX_ACTIVE_RUNS concurrent runs. Defaults high so every
 // other test runs as before.
 let activeCapForTest = 1_000;
-vi.mock('@/lib/llm/orchestration-config', () => ({
+vi.mock('@/lib/llm/runtime/orchestration-config', () => ({
   maxActiveRuns: () => activeCapForTest,
 }));
 
 const { POST } = await import('./route');
-const { resolveApproval } = await import('@/lib/llm/approvals');
+const { resolveApproval } = await import('@/lib/llm/tools/approvals');
 const events = await import('../runs/[id]/events/route');
 const cancel = await import('../runs/[id]/cancel/route');
 

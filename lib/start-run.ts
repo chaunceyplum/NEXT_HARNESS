@@ -5,14 +5,14 @@
  * agent loop, streaming events, per-step checkpoints, and the final record.
  */
 
-import { runAgent } from '@/lib/llm/agent';
-import { waitForApproval } from '@/lib/llm/approvals';
-import { APPROVAL_REASON_TEXT } from '@/lib/llm/approval-policy';
-import { getDefaultModelKey } from '@/lib/llm/model-registry';
+import { runAgent } from '@/lib/llm/runtime/agent';
+import { waitForApproval } from '@/lib/llm/tools/approvals';
+import { APPROVAL_REASON_TEXT } from '@/lib/llm/tools/approval-policy';
+import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
-import { createStreamRedactor, redactOutput } from '@/lib/llm/guardrails';
+import { createStreamRedactor, redactOutput } from '@/lib/llm/quality/guardrails';
 import { judgeRun, shouldJudgeRun } from '@/lib/online-judge';
-import { critiqueAnswer, type Critique } from '@/lib/llm/answer-critic';
+import { critiqueAnswer, type Critique } from '@/lib/llm/quality/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';

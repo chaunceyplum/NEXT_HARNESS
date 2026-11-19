@@ -1,7 +1,7 @@
 /**
  * Model-routing accuracy — `npm run eval:routing`.
  *
- * lib/llm/model-router.ts sends each "auto" request to a model tier. A
+ * lib/llm/models/model-router.ts sends each "auto" request to a model tier. A
  * misroute is either wasted money (a lookup on the strong model) or a weak
  * model on a multi-step build, so this measures how often the category is
  * right on labelled requests, including ambiguous ones that should come
@@ -14,11 +14,11 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import type { EvalTrialRecord } from '@/lib/types';
-import { routeRequest, type RouteCategory } from '@/lib/llm/model-router';
+import { routeRequest, type RouteCategory } from '@/lib/llm/models/model-router';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';
 import { modelSource, preflight, warnSkip } from './lib/env';
-import { getDefaultModelKey } from '@/lib/llm/model-registry';
+import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 
 type RoutingFixture = { id: string; request: string; expected: RouteCategory };
 

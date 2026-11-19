@@ -12,8 +12,8 @@ const verdictJson = JSON.stringify({
 // stop_reason "refusal" (finish reason content-filter, no content).
 const behavior: Record<string, 'refuse' | 'ok' | 'throw'> = {};
 
-vi.mock('@/lib/llm/model-registry', async (orig) => ({
-  ...(await orig<typeof import('@/lib/llm/model-registry')>()),
+vi.mock('@/lib/llm/models/model-registry', async (orig) => ({
+  ...(await orig<typeof import('@/lib/llm/models/model-registry')>()),
   resolveModel: (key: string) =>
     new MockLanguageModelV4({
       doGenerate: async () => {

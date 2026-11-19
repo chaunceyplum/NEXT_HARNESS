@@ -17,7 +17,7 @@ Key behaviours to preserve:
   database (`harness_agent_runs`), so it can be replayed and resumed.
 - Launch-tagging runs stop at a populated library, or publish only to a
   development or staging environment. Production publishing is refused in
-  code (`lib/llm/launch-validation.ts`).
+  code (`lib/llm/domains/launch/validation.ts`).
 - Budgets (tokens, cost, time, identical calls), the kill switch and the
   tool policy (`read-only`, dry-run, rollout modes) are enforced in code,
   never only in the prompt.

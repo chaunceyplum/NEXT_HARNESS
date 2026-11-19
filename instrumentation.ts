@@ -19,6 +19,6 @@ export async function register() {
 
   // Pre-build the tool embedding index so the first agent run doesn't pay
   // the catalog fetch + embedding batch cost on its critical path.
-  const { warmUpToolIndex } = await import('./lib/llm/tool-retrieval');
+  const { warmUpToolIndex } = await import('./lib/llm/tools/tool-retrieval');
   warmUpToolIndex();
 }

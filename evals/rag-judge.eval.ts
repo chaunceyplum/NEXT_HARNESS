@@ -1,7 +1,7 @@
 /**
  * RAG-judge calibration eval — run manually with `npm run eval:rag-judge`.
  *
- * lib/llm/rag-judge.ts scores every search_adobe_knowledge lookup in
+ * lib/llm/quality/rag-judge.ts scores every search_adobe_knowledge lookup in
  * production, and that score is only worth attaching if it agrees with a
  * human's read of the same retrieval. Each fixture is a query plus a canned
  * (hand-picked) retrieval result, and the band of judgments a careful
@@ -15,8 +15,8 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { judgeRagResult } from '@/lib/llm/rag-judge';
-import { getDefaultModelKey } from '@/lib/llm/model-registry';
+import { judgeRagResult } from '@/lib/llm/quality/rag-judge';
+import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 import type { EvalTrialRecord } from '@/lib/types';
 import { loadFixtures } from './lib/fixtures';
 import { report } from './lib/report';

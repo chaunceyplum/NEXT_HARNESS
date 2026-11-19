@@ -12,7 +12,7 @@
  * Active runs register their AbortController here, which is also how the
  * switch reaches them. Kept on globalThis so Next's dev-mode module
  * reloading doesn't split the state between route bundles, as in
- * lib/llm/approvals.ts.
+ * lib/llm/tools/approvals.ts.
  */
 
 interface ActiveRun {

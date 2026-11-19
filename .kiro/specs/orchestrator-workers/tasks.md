@@ -9,10 +9,10 @@ eval fixture or `evals/baseline.json` entry has to change for it to pass,
 stop. That means behaviour changed, and it must be fixed before going on.
 
 - [x] 1. Split `runAgent` into `prepareRun` and `executeLoop` (no behaviour change)
-- [x] 1.1 Add `LoopContext`, `LoopResult`, `PreparedRun` and `EarlyResult` types to `lib/llm/agent-core.ts`
+- [x] 1.1 Add `LoopContext`, `LoopResult`, `PreparedRun` and `EarlyResult` types to `lib/llm/runtime/agent-core.ts`
   - Types only; no imports of the live MCP client
   - _Requirements: 1.1, 1.2_
-- [x] 1.2 Extract `executeLoop(ctx)` from `runAgent` (`lib/llm/agent.ts` lines ~1062–1330)
+- [x] 1.2 Extract `executeLoop(ctx)` from `runAgent` (`lib/llm/runtime/agent.ts` lines ~1062–1330)
   - Move tracer setup, budget, `callModel`, the fallback loop and result assembly
   - Replace every closure read with a `ctx` field; return `hadSideEffects`
   - _Requirements: 1.2_
@@ -25,20 +25,20 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 1.5_
 
 - [x] 2. Planner support for parallel steps
-- [x] 2.1 Keep `dependsOn` in `PlanTracker.revise` and add optional `dependsOn` to the `revise_plan` schema (`lib/llm/planner.ts`)
+- [x] 2.1 Keep `dependsOn` in `PlanTracker.revise` and add optional `dependsOn` to the `revise_plan` schema (`lib/llm/runtime/planner.ts`)
   - Remap ids to the renumbered steps; drop references to removed steps
-  - Unit tests in `lib/llm/planner.test.ts`
+  - Unit tests in `lib/llm/runtime/planner.test.ts`
   - _Requirements: 6.4_
 - [x] 2.2 Reject cycles and unknown ids in `normalisePlan`
   - _Requirements: 3.6_
 - [x] 2.3 Add `readySteps(plan)` and `parallelWidth(plan)` with tests
   - _Requirements: 2.5, 3.3_
-- [x] 2.4 Set `dependsOn` in the Launch template (`lib/llm/launch-plan.ts`): read state → data elements → rules → validate → library (→ publish)
-  - Update `lib/llm/launch-plan.test.ts`
+- [x] 2.4 Set `dependsOn` in the Launch template (`lib/llm/domains/launch/plan.ts`): read state → data elements → rules → validate → library (→ publish)
+  - Update `lib/llm/domains/launch/plan.test.ts`
   - _Requirements: 9.2_
 
 - [x] 3. Concurrency limits and configuration
-- [x] 3.1 Add `lib/llm/agent-slots.ts` (FIFO semaphore on `globalThis`, `MAX_AGENT_LOOPS`) with `agent-slots.test.ts`
+- [x] 3.1 Add `lib/llm/runtime/agent-slots.ts` (FIFO semaphore on `globalThis`, `MAX_AGENT_LOOPS`) with `agent-slots.test.ts`
   - Release on success, error and abort; abort while queued removes the waiter
   - _Requirements: 13.1, 13.2_
 - [x] 3.2 Acquire a slot in `executeLoop` before the first model call; release in `finally`
@@ -49,16 +49,16 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 2.1, 3.1, 4.1, 4.8, 6.1, 8.2_
 
 - [x] 4. Shared run budget
-- [x] 4.1 Add `RunLedger` and parent charging to `RunBudgetTracker` (`lib/llm/run-budget.ts`)
+- [x] 4.1 Add `RunLedger` and parent charging to `RunBudgetTracker` (`lib/llm/runtime/run-budget.ts`)
   - `child(modelKey, share)`; `recordStep` charges child and parent; `exceeded()` reports either
   - Single-agent path uses a tracker with no parent (unchanged behaviour)
-  - Tests in `lib/llm/run-budget.test.ts`
+  - Tests in `lib/llm/runtime/run-budget.test.ts`
   - _Requirements: 8.1, 8.2, 8.3, 8.5_
 
 - [x] 5. Workers
 - [x] 5.1 Add `forceFinalTool` to `executeLoop`: last or wrap-up step forces that tool; history-bound models get an appended instruction instead
   - _Requirements: 4.6_
-- [x] 5.2 Create `lib/llm/worker.ts` with `reportResultTool` (truncate summary to 1,000 and notes to 500 characters)
+- [x] 5.2 Create `lib/llm/runtime/worker.ts` with `reportResultTool` (truncate summary to 1,000 and notes to 500 characters)
   - _Requirements: 5.1, 5.2_
 - [x] 5.3 Implement `workerTools(all, step, catalog)`: step tool + same `PLATFORM_GROUPS` group + `find_tools` + `call_tool` + `report_result`; exclude `remember_fact`, `update_plan`, `revise_plan`
   - _Requirements: 4.2, 4.3_
@@ -66,11 +66,11 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 4.4, 4.5_
 - [x] 5.5 Implement `runWorker`: child abort controller, child budget, `executeLoop`, missing-result handling, per-worker fallback and no restart after a write
   - _Requirements: 4.1, 4.7, 4.8, 5.4, 9.3, 10.1, 10.2, 10.3_
-- [x] 5.6 Write `lib/llm/worker.test.ts` with scripted tools
+- [x] 5.6 Write `lib/llm/runtime/worker.test.ts` with scripted tools
   - _Requirements: 4.2, 4.6, 4.7, 10.1, 10.2_
 
 - [x] 6. Coordinator
-- [x] 6.1 Create `lib/llm/coordinator.ts` with `orchestrationConfig` and `shouldOrchestrate`
+- [x] 6.1 Create `lib/llm/runtime/coordinator.ts` with `orchestrationConfig` and `shouldOrchestrate`
   - _Requirements: 2.2, 2.3, 2.4, 2.5_
 - [x] 6.2 Implement the scheduler loop: ready steps up to `maxWorkers`, serial write workers in Launch runs, step status and `workerId`, results to dependants
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.7, 5.3, 5.4_
@@ -80,7 +80,7 @@ stop. That means behaviour changed, and it must be fixed before going on.
   - _Requirements: 7.1, 7.2_
 - [x] 6.5 Stop on ledger exhaustion and on abort
   - _Requirements: 8.4, 9.4_
-- [x] 6.6 Write `lib/llm/coordinator.test.ts` using controlled-delay scripted tools to assert overlap and ordering
+- [x] 6.6 Write `lib/llm/runtime/coordinator.test.ts` using controlled-delay scripted tools to assert overlap and ordering
   - _Requirements: 3.1, 3.3, 3.4, 6.1, 6.3, 7.1_
 - [x] 6.7 Call `runOrchestrated` from `runAgent` when `shouldOrchestrate` is true; force planning when orchestration is requested
   - _Requirements: 2.3, 2.4, 2.6_

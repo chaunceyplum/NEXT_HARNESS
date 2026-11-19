@@ -14,7 +14,7 @@
  *   {"type":"done","finalText":"...","finishReason":"stop","usage":{...},"runId":"...","modelKey":"...","toolsConsidered":[...],
  *    "stopReason":"token-budget"?,"budgetUsage":{"tokens":...,"costUsd":...,"durationMs":...}}
  *
- * When a tool call needs a human decision (lib/llm/approval-policy.ts; POST it
+ * When a tool call needs a human decision (lib/llm/tools/approval-policy.ts; POST it
  * to /api/build/approve — the run waits until then, or until it times out):
  *   {"type":"approval_request","toolCallId":"...","toolName":"...","input":{...},"reason":"outbound","reasonText":"..."}
  *   {"type":"approval_resolved","toolCallId":"...","approved":true,"reason":"..."}
@@ -37,14 +37,14 @@
  * /results/[id] (POST /api/runs/:id/resume).
  */
 
-import { parseRolloutMode } from '@/lib/llm/approval-policy';
-import { planFirstByDefault } from '@/lib/llm/planner';
-import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/model-router';
-import { getModelRegistry } from '@/lib/llm/model-registry';
-import { checkInput } from '@/lib/llm/guardrails';
-import { PLATFORM_GROUPS } from '@/lib/llm/tool-catalog';
+import { parseRolloutMode } from '@/lib/llm/tools/approval-policy';
+import { planFirstByDefault } from '@/lib/llm/runtime/planner';
+import { AUTO_MODEL, routingEnabledByDefault } from '@/lib/llm/models/model-router';
+import { getModelRegistry } from '@/lib/llm/models/model-registry';
+import { checkInput } from '@/lib/llm/quality/guardrails';
+import { PLATFORM_GROUPS } from '@/lib/llm/tools/tool-catalog';
 import { runsBlockedReason } from '@/lib/kill-switch';
-import { maxActiveRuns } from '@/lib/llm/orchestration-config';
+import { maxActiveRuns } from '@/lib/llm/runtime/orchestration-config';
 import { activeJobCount, streamJob } from '@/lib/run-jobs';
 import { startRun } from '@/lib/start-run';
 import { ApiError, RunRequest } from '@/lib/types';
@@ -259,7 +259,7 @@ function validateRequest(body: unknown): { ok: true; req: RunRequest } | { ok: f
     ok: true,
     req: {
       description,
-      // "auto" routes per request (lib/llm/model-router.ts); MODEL_ROUTING=true makes it the default.
+      // "auto" routes per request (lib/llm/models/model-router.ts); MODEL_ROUTING=true makes it the default.
       model: typeof b.model === 'string' ? b.model : routingEnabledByDefault() ? AUTO_MODEL : undefined,
       toolRetries: typeof b.toolRetries === 'number' ? b.toolRetries : undefined,
       toolShortlistSize: typeof b.toolShortlistSize === 'number' ? b.toolShortlistSize : undefined,

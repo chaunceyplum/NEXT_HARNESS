@@ -11,11 +11,11 @@ The catalog is filtered to Adobe-scoped tools by default
 defined in the harness's tool-catalog filtering code but isn't currently
 present in the connected MCP server's tool list.
 
-`POST /api/build` runs a dynamic agent (`lib/llm/agent.ts`) rather than a
+`POST /api/build` runs a dynamic agent (`lib/llm/runtime/agent.ts`) rather than a
 fixed pipeline: it semantically shortlists the handful of MCP tools relevant
-to your request (`lib/llm/tool-retrieval.ts`), then lets an LLM call them in
+to your request (`lib/llm/tools/tool-retrieval.ts`), then lets an LLM call them in
 a loop until the task is done. The model is swappable per request across
-Anthropic, Bedrock, or OpenAI (`lib/llm/model-registry.ts`) — pick cheap vs.
+Anthropic, Bedrock, or OpenAI (`lib/llm/models/model-registry.ts`) — pick cheap vs.
 expensive, or switch providers, without code changes. There is no full,
 end-to-end build tool wired up — every request resolves through specific,
 narrow tool calls chosen by the agent. Every run's chat-model token usage
@@ -30,12 +30,12 @@ the MCP server, and the platforms behind it fit together.
 ## Orchestrator-worker mode
 
 When a run has a plan with independent steps, a deterministic coordinator
-(`lib/llm/coordinator.ts`) can run them as concurrent worker agents
-(`lib/llm/worker.ts`), replan once a step fails, and make one synthesis call
+(`lib/llm/runtime/coordinator.ts`) can run them as concurrent worker agents
+(`lib/llm/runtime/worker.ts`), replan once a step fails, and make one synthesis call
 for the final answer. It's off by default: set `ORCHESTRATION=on` and tick
 **Run steps in parallel** on the home page (or send `"orchestrate": true`),
 or set `ORCHESTRATION=always`. A process-wide slot pool
-(`lib/llm/agent-slots.ts`) caps how many agent loops run at once. See the
+(`lib/llm/runtime/agent-slots.ts`) caps how many agent loops run at once. See the
 orchestrator-worker section of `ENVIRONMENT_VARIABLES.md` for the limits.
 
 ## Tool scope
@@ -150,5 +150,5 @@ add fixtures.
 - [`OPERATIONS.md`](./OPERATIONS.md): the weekly habits that keep the agent good in production
 - [`evals/README.md`](./evals/README.md): the eval suites and how to add fixtures
 - [`docs/reactor-tools-context.md`](./docs/reactor-tools-context.md): full reference for the Reactor/Launch tools (a compact version is injected in Launch mode)
-- [`docs/pql-reference.md`](./docs/pql-reference.md): Adobe's PQL function reference, injected on segment/audience runs (regenerate `lib/llm/pql-reference.ts` with `node scripts/gen-pql-reference.mjs` after editing)
+- [`docs/pql-reference.md`](./docs/pql-reference.md): Adobe's PQL function reference, injected on segment/audience runs (regenerate `lib/llm/domains/segments/pql-reference.ts` with `node scripts/gen-pql-reference.mjs` after editing)
 - `.kiro/`: product/tech steering and the orchestrator-workers spec

@@ -20,7 +20,7 @@ Look for `McpEndpointUrl` output.
 
 Create `.env.local`. `MCP_ENDPOINT_URL` is required, but so is at least one
 chat-model provider now — the harness runs an LLM agent loop
-(`lib/llm/agent.ts`), not just an MCP passthrough. See
+(`lib/llm/runtime/agent.ts`), not just an MCP passthrough. See
 `ENVIRONMENT_VARIABLES.md` for the full list (Bedrock/Anthropic/OpenAI
 options, tool-shortlisting embeddings, `ADOBE_TOOLS_ONLY`, the RAG judge,
 orchestrator-worker mode).
@@ -71,7 +71,7 @@ time, not at startup. See `ENVIRONMENT_VARIABLES.md` for the full list.
 **Easiest for Next.js, free tier available — with caveats**
 
 Runs, their event buffers and paused approvals live in the memory of the
-process that started them (`lib/run-jobs.ts`, `lib/llm/approvals.ts`). On
+process that started them (`lib/run-jobs.ts`, `lib/llm/tools/approvals.ts`). On
 serverless hosting a request to reconnect, cancel or approve can land on a
 different instance than the run, and a long run can outlive the function's
 time limit. The harness is built and tested as one long-lived Node process
@@ -328,7 +328,7 @@ MCP_ENDPOINT_URL=https://xxx.execute-api.us-east-1.amazonaws.com/mcp
 - Use load balancer (ALB/NLB)
 - Run multiple harness instances — note the tool catalog and the
   tool-shortlisting embedding index are both in-memory, per-process
-  (`lib/llm/tool-catalog.ts`, `lib/llm/tool-retrieval.ts`); each instance
+  (`lib/llm/tools/tool-catalog.ts`, `lib/llm/tools/tool-retrieval.ts`); each instance
   rebuilds them independently on first use rather than sharing one copy.
   Fine at small scale, worth revisiting before running many instances.
 - Use Lambda reserved concurrency

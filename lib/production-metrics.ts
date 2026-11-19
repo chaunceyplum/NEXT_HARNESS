@@ -12,7 +12,7 @@
 
 import { percentile } from './eval-metrics';
 import { execSql, sqlInt } from './mcp-sql';
-import { estimateCostUsd } from './llm/pricing';
+import { estimateCostUsd } from './llm/models/pricing';
 import { ensureQualityTable, qualityVersion } from './run-quality';
 
 export interface ProductionRunRow {

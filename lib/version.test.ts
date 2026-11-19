@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { shortHash, promptVersion, toolsetVersion, appVersion } from './version';
-import { systemPrompt } from './llm/agent-core';
+import { systemPrompt } from './llm/runtime/agent-core';
 
 describe('shortHash', () => {
   it('is a stable 12-char hex digest', () => {

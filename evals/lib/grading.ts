@@ -6,7 +6,7 @@
  * part of the fixture passed.
  */
 
-import type { RagJudgment } from '@/lib/llm/rag-judge';
+import type { RagJudgment } from '@/lib/llm/quality/rag-judge';
 
 // ── Agent trajectory ───────────────────────────────────────────────────────
 

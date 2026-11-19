@@ -1,11 +1,11 @@
 /**
  * Deterministic graders for the Launch eval (evals/launch.eval.ts): replay a
  * run's recorded scripted-tool calls through a fresh LaunchValidationGate
- * (lib/llm/launch-validation.ts) to assert what the live gate would have done.
+ * (lib/llm/domains/launch/validation.ts) to assert what the live gate would have done.
  * No model or network calls — unit-tested in launch-grading.test.ts.
  */
 
-import { LaunchValidationGate, isLaunchHandoffTool, isPublishTransitionTool, LAUNCH_HANDOFF_TOOLS } from '@/lib/llm/launch-validation';
+import { LaunchValidationGate, isLaunchHandoffTool, isPublishTransitionTool, LAUNCH_HANDOFF_TOOLS } from '@/lib/llm/domains/launch/validation';
 import type { RecordedCall } from './grading';
 import type { ScriptedToolDef } from './scripted-tools';
 
