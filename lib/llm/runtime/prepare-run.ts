@@ -7,13 +7,13 @@ import { type ToolSet } from 'ai';
 import { getDefaultModelKey } from '../models/model-registry';
 import { getMcpToolCatalog, createRagJudgmentSink, type RagJudgmentSink } from '../tools/tool-catalog';
 import { effectiveToolCall } from '../tools/tool-discovery';
-import { stage, type LoopContext, type PreparedRun, type EarlyResult, type ToolApprovalFn } from './agent-core';
+import { stage, type PreparedRun, type EarlyResult, type ToolApprovalFn } from './agent-core';
 import { defaultModelHealth } from '../models/model-health';
 import { resolvePolicy } from '../tools/tool-policy';
 import { listFacts, memoryEnabled, memoryPreamble } from '../../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker } from './planner';
 import { launchShortlistQuery, seedLaunchPlan } from '../domains/launch/plan';
-import { resolveSegmentMode } from '../domains/segments/context';
+import { resolveDomains } from '../domains';
 import { launchExamplesPreamble, selectLaunchExamples } from '../domains/launch/examples';
 import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
 import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from '../domains/launch/validation';
@@ -33,26 +33,6 @@ import { promptVersion, toolsetVersion, appVersion } from '../../version';
 import { type RunAgentOptions } from './agent-options';
 import { selectLiveTools } from './tool-selection';
 import { rememberFactTool } from './step-trace';
-
-/** The PLATFORM_GROUPS key for Launch/Reactor tags — a platformFilter narrowed to it turns Launch mode on. */
-const LAUNCH_PLATFORM_GROUP = 'Tags (Reactor)';
-/** Groups that may ride along with the Launch group without making the run "not Launch" (grounding + the code-commit handoff). */
-const LAUNCH_COMPANION_GROUPS = new Set(['Knowledge', 'GitHub']);
-
-/**
- * Whether this run should ground on the Launch/Reactor object model: set
- * explicitly via opts.launchMode, or implied when the platform filter is
- * narrowed to the Launch/Reactor tag tools (plus Knowledge/GitHub). A filter
- * that merely still includes the Tags group alongside other platforms — e.g.
- * every box ticked but CJA — is not a Launch run. Non-Launch runs keep the
- * lean cached prefix.
- */
-export function resolveLaunchMode(opts: Pick<RunAgentOptions, 'launchMode' | 'platformFilter'>): boolean {
-  if (opts.launchMode !== undefined) return opts.launchMode;
-  const filter = opts.platformFilter ?? [];
-  return filter.includes(LAUNCH_PLATFORM_GROUP) && filter.every((p) => p === LAUNCH_PLATFORM_GROUP || LAUNCH_COMPANION_GROUPS.has(p));
-}
-
 
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
@@ -117,10 +97,12 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
   // from the Launch template, and widens tool selection to the Reactor tools
   // (both via launch-plan.ts). Explicit opts.launchMode wins; otherwise it's
   // inferred from a Launch/Reactor platform filter.
-  const launchMode = resolveLaunchMode(opts);
   // Segment/audience run: grounds the prompt with the PQL reference + glossary
-  // and keeps the field lookup + segment tools always on (segment-context.ts).
-  const segmentMode = resolveSegmentMode(opts, userInput);
+  // and keeps the field lookup + segment tools always on (segmentsPack).
+  // Both are domain packs (lib/llm/domains); an explicit flag wins over inference.
+  const domains = resolveDomains({ userInput, platformFilter: opts.platformFilter, launchMode: opts.launchMode, segmentMode: opts.segmentMode });
+  const launchMode = domains.launch;
+  const segmentMode = domains.segments;
   // A Launch run started with a publishTarget may publish the populated
   // library to a dev/staging environment. This flag swaps the grounding to
   // the publish state machine, widens the seed plan + always-on tools to the

@@ -191,12 +191,14 @@ function validateRequest(body: unknown): { ok: true; req: RunRequest } | { ok: f
     }
   }
 
-  if (b.launchMode !== undefined && typeof b.launchMode !== 'boolean') {
-    return {
-      ok: false,
-      error: { error: '"launchMode" must be a boolean', code: 'VALIDATION_ERROR' },
-      status: 400,
-    };
+  for (const flag of ['launchMode', 'segmentMode'] as const) {
+    if (b[flag] !== undefined && typeof b[flag] !== 'boolean') {
+      return {
+        ok: false,
+        error: { error: `"${flag}" must be a boolean`, code: 'VALIDATION_ERROR' },
+        status: 400,
+      };
+    }
   }
 
   // Orchestration opt-in (Requirements 2.3, 2.4): a per-request boolean. Its
@@ -277,6 +279,7 @@ function validateRequest(body: unknown): { ok: true; req: RunRequest } | { ok: f
         ? (b.platformFilter as string[])
         : undefined,
       launchMode: typeof b.launchMode === 'boolean' ? b.launchMode : undefined,
+      segmentMode: typeof b.segmentMode === 'boolean' ? b.segmentMode : undefined,
       ...(b.publishTarget !== undefined ? { publishTarget: normalisePublishTarget(b.publishTarget) } : {}),
       orchestrate: typeof b.orchestrate === 'boolean' ? b.orchestrate : undefined,
       maxWorkers: typeof b.maxWorkers === 'number' ? b.maxWorkers : undefined,

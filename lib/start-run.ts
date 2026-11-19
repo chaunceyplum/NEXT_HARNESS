@@ -134,6 +134,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         thinkingBudget: req.thinkingBudget,
         platformFilter: req.platformFilter,
         launchMode: req.launchMode,
+        segmentMode: req.segmentMode,
         publishTarget: req.publishTarget,
         // Orchestrator-worker mode (Requirements 2.3, 2.4, 3.2): the coordinator
         // is used only when ORCHESTRATION is on/always and the plan parallelises.

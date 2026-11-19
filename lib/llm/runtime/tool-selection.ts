@@ -13,8 +13,8 @@ import { shortlistTools } from '../tools/tool-retrieval';
 import { ALWAYS_ON_TOOLS, stage } from './agent-core';
 import { applyToolPolicy, type PolicyMode } from '../tools/tool-policy';
 import { applyActionGuards } from '../quality/guardrails';
-import { launchAlwaysOnTools, launchShortlistQuery } from '../domains/launch/plan';
-import { SEGMENT_ALWAYS_ON_TOOLS } from '../domains/segments/context';
+import { launchShortlistQuery } from '../domains/launch/plan';
+import { domainAlwaysOnTools } from '../domains';
 import { LaunchValidationGate } from '../domains/launch/validation';
 import { type LaunchRequirements } from '../domains/launch/brief';
 
@@ -54,8 +54,7 @@ export async function selectLiveTools(
   // always on (segment-context.ts), so the "only real fields" rule is usable.
   const alwaysOnNames = [
     ...ALWAYS_ON_TOOLS,
-    ...(launch?.enabled ? launchAlwaysOnTools(launch.publishEnabled === true) : []),
-    ...(segmentMode ? SEGMENT_ALWAYS_ON_TOOLS : []),
+    ...domainAlwaysOnTools({ launch: launch?.enabled === true, segments: segmentMode }, { publishEnabled: launch?.publishEnabled === true }),
   ];
   const alwaysOn = [...new Set(alwaysOnNames)].filter((name) => catalogByName.has(name) && !isKnowledgeTool(name));
   const shortlistQuery = launch?.enabled ? launchShortlistQuery(userInput, launch.requirements) : userInput;

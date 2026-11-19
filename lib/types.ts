@@ -195,6 +195,14 @@ export interface RunRequest {
    */
   launchMode?: boolean;
   /**
+   * Segment/audience run: ground the agent on the PQL reference, the business
+   * glossary and the real-fields-only rules, and keep the field lookup and
+   * segment tools always on (lib/llm/domains/segments). Omit to infer it from
+   * a request that mentions segments, audiences or PQL; set false to keep the
+   * lean prompt even then.
+   */
+  segmentMode?: boolean;
+  /**
    * Publish target for a Launch run. ABSENT → library-only, byte-identical to
    * today's behaviour (the run stops at a populated library and never
    * publishes). PRESENT → the run MAY publish the populated library, subject

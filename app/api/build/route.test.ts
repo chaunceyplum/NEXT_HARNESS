@@ -289,3 +289,18 @@ describe('POST /api/build — publishTarget validation', () => {
     expect((await res.json()).error).toMatch(/must name the environment/);
   });
 });
+
+describe('POST /api/build — domain mode flags', () => {
+  it('rejects a non-boolean launchMode or segmentMode', async () => {
+    for (const flag of ['launchMode', 'segmentMode']) {
+      const res = await POST(
+        new Request('http://x/api/build', {
+          method: 'POST',
+          body: JSON.stringify({ description: 'build an audience of gold members', [flag]: 'yes' }),
+        })
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe(`"${flag}" must be a boolean`);
+    }
+  });
+});

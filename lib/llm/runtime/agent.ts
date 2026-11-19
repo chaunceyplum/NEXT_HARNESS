@@ -59,7 +59,8 @@ import { executeLoop } from './agent-loop';
 export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace, TokenUsage, ToolOutcome, LoopContext, LoopResult, PreparedRun, EarlyResult };
 export type { AgentRunResult, RunAgentOptions } from './agent-options';
-export { prepareRun, resolveLaunchMode } from './prepare-run';
+export { prepareRun } from './prepare-run';
+export { resolveLaunchMode } from '../domains/launch/pack';
 export { executeLoop } from './agent-loop';
 
 /**

@@ -41,8 +41,10 @@ lib/
     models/               model-registry.ts, model-router.ts ("auto" routing), model-health.ts, pricing.ts, embeddings.ts
     quality/              answer-critic.ts, rag-judge.ts, guardrails.ts, commit-validation.ts
     domains/              Adobe domain knowledge, kept apart from the generic agent machinery
-      launch/             Launch (Reactor) brief parsing, plan template, examples, validation gate
-      segments/           Audience grounding: PQL reference, glossary, profile catalog, field check
+      domain-pack.ts      DomainPack interface: detect, promptContext, alwaysOnTools
+      index.ts            DOMAIN_PACKS registry; the runtime asks it instead of naming a domain
+      launch/             Launch (Reactor): pack, prompt context, brief parsing, plan template, examples, validation gate
+      segments/           Audiences: pack, PQL reference, glossary, profile catalog, field check
 evals/                    vitest eval suites, fixtures, baseline.json
 scripts/                  Eval baseline check, run-to-fixture
 .kiro/specs/              Kiro feature specs (requirements, design, tasks)
