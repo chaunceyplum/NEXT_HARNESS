@@ -19,7 +19,12 @@ lib/
   types.ts                Shared DTOs: RunRequest, RunStreamEvent, RunRecord, ...
   llm/
     runtime/              The agent loop and orchestration
-      agent.ts            runAgent: setup + the streamText tool loop
+      agent.ts            runAgent = prepareRun + executeLoop; the public entry point
+      prepare-run.ts      Setup: routing, Launch mode, tool selection, memory, planning, approvals
+      agent-loop.ts       executeLoop: the streamText model/tool loop
+      agent-options.ts    RunAgentOptions / AgentRunResult
+      provider-options.ts Prompt-cache markers, context editing, extended thinking
+      context-compression.ts, tool-selection.ts, step-trace.ts
       agent-core.ts       System prompt pieces and shared agent types
       planner.ts          Plan, PlanTracker, update_plan / revise_plan tools
       planning-retrieval.ts  Knowledge-base context for the planner
