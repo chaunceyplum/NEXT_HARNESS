@@ -1,6 +1,7 @@
 /** Orchestrator-worker records (lib/llm/runtime/coordinator.ts, worker.ts). */
 
 import type { StepRecord } from './agent';
+import type { ChangedObject } from './adobe';
 
 /**
  * Lifecycle of one worker (one plan step carried out by its own bounded agent
@@ -23,6 +24,13 @@ export interface WorkerResult {
   ids: Record<string, string>;
   /** ≤ 500 chars. */
   notes?: string;
+  /**
+   * The Adobe objects this worker actually changed, derived from its executed
+   * tool calls (lib/llm/tools/object-refs.ts) rather than claimed by the
+   * model. Dependent steps see them as typed references. Absent when it
+   * changed nothing.
+   */
+  objects?: ChangedObject[];
 }
 
 /**

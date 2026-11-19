@@ -7,14 +7,14 @@ app/                      Next.js App Router
   api/build/approve/      POST: approve or deny a pending tool call / plan
   api/runs/[id]/          Run record, events (reconnect), cancel, resume, feedback
   api/admin/kill-switch/  Trip / reset the kill switch
-  api/evals, metrics, audit, memory, models, tools
+  api/evals, metrics, audit, memory, models, tools, lineage (which runs touched an object)
   results/, evals/, metrics/, memory/   UI pages
 components/               React components (AgentTrace, PlanView, KillSwitch, ...)
 lib/
   start-run.ts            Starts a run as a job: kill switch, agent, events, checkpoints, critic, judge
   run-jobs.ts             Detached jobs and event buffers (in-process)
   run-lifecycle.ts        Run statuses and allowed moves: running ⇄ awaiting_approval → completed | failed | cancelled | interrupted
-  run-store.ts            Run records in harness_agent_runs via execute_sql
+  run-store.ts            Run records in harness_agent_runs via execute_sql; findObjectHistory over their lineage
   kill-switch.ts, audit-log.ts, memory-store.ts, online-judge.ts, tracing.ts
   mcp-client.ts, mcp-sql.ts   MCP transport and SQL escaping
   types/                  Shared types, one module per concept (run, stream, agent, worker, plan,
@@ -38,6 +38,7 @@ lib/
     tools/                The MCP tool layer
       tool-taxonomy.ts    Every hand-kept tool fact: access level, outbound/credential/SQL sets, platform groups, scope
       tool-registry.ts    describeTool(name): one profile per tool (also GET /api/tools)
+      object-refs.ts      Lineage: which Adobe objects a run's executed calls created / updated / deleted
       tool-catalog.ts     MCP catalog, PLATFORM_GROUPS, AI SDK tool wrappers, retries
       tool-retrieval.ts, tool-discovery.ts, tool-policy.ts, tool-call-cache.ts
       approval-policy.ts, approvals.ts   Which calls need a person, and the waiting room

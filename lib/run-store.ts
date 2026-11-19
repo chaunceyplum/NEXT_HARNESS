@@ -23,7 +23,7 @@
 import { randomUUID } from 'crypto';
 import { ACTIVE_STATUSES } from './run-lifecycle';
 import { execSql, sqlInt, sqlJson, sqlJsonOrNull, sqlStr, sqlStrOrNull } from './mcp-sql';
-import type { RunRecord, RunSummary } from './types';
+import type { LineageRecord, RunRecord, RunSummary } from './types';
 
 const TABLE = 'harness_agent_runs';
 
@@ -202,4 +202,40 @@ export async function listRuns(opts: ListRunsOptions = {}): Promise<{ runs: RunS
 
   const total = Number(countResult.rows?.[0]?.total ?? 0);
   return { runs, total };
+}
+
+// ── Lineage: which runs touched an Adobe object ──────────────────────────
+
+/** One run's change to an object, with enough of the run to link to it. */
+export interface ObjectHistoryEntry extends LineageRecord {
+  runId: string;
+  runCreatedAt: string;
+  runDescription: string;
+  runStatus: RunSummary['status'];
+}
+
+/**
+ * Every recorded change to the Adobe object with this id (optionally of one
+ * kind), newest run first. Reads each run's lineage out of the existing
+ * `result` JSONB (RunResult.lineage), so it needs no extra table; runs
+ * stored before lineage was tracked simply have none.
+ */
+export async function findObjectHistory(opts: { id: string; kind?: string; limit?: number }): Promise<ObjectHistoryEntry[]> {
+  await ensureTable();
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+  const result = await execSql(
+    `SELECT r.id AS run_id, r.created_at, r.description, r.status, e.value AS entry
+       FROM ${TABLE} r, jsonb_array_elements(COALESCE(r.result->'lineage', '[]'::jsonb)) e
+      WHERE e.value->'ref'->>'id' = ${sqlStr(opts.id)}
+        ${opts.kind ? `AND e.value->'ref'->>'kind' = ${sqlStr(opts.kind)}` : ''}
+      ORDER BY r.created_at DESC
+      LIMIT ${sqlInt(limit)}`.replace(/\s+/g, ' ')
+  );
+  return (result.rows ?? []).map((row) => ({
+    ...(row.entry as LineageRecord),
+    runId: row.run_id as string,
+    runCreatedAt: new Date(row.created_at as string).toISOString(),
+    runDescription: row.description as string,
+    runStatus: row.status as RunSummary['status'],
+  }));
 }

@@ -10,6 +10,7 @@
  *   quality.ts  critique and RAG judgments
  *   model.ts    routing decisions and model options
  *   eval.ts     eval history
+ *   adobe.ts    typed Adobe object references and run lineage
  *   api.ts      API error bodies
  *
  * Naming: …Record is something stored in a run record (or its own table),
@@ -18,6 +19,7 @@
  */
 
 export type { RunStatus } from '../run-lifecycle';
+export type { AdobeObjectKind, AdobeObjectRef, AdobePlatform, ChangedObject, LineageRecord, ObjectChange } from './adobe';
 export type { ToolCallRecord, ToolResultRecord, StepRecord, TokenUsage } from './agent';
 export type { WorkerStatus, WorkerResult, WorkerRecord } from './worker';
 export type { PlanRecord } from './plan';

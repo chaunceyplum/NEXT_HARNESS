@@ -8,6 +8,7 @@
 import { runAgent } from '@/lib/llm/runtime/agent';
 import { waitForApproval } from '@/lib/llm/tools/approvals';
 import { endStatusOnError, transition, type RunStatus } from '@/lib/run-lifecycle';
+import { lineageFromSteps } from '@/lib/llm/tools/object-refs';
 import { APPROVAL_REASON_TEXT } from '@/lib/llm/tools/approval-policy';
 import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
@@ -17,7 +18,7 @@ import { critiqueAnswer, type Critique } from '@/lib/llm/quality/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { StepRecord, RunRequest, RunRecord, PlanRecord, ResumePlan, WorkerRecord } from '@/lib/types';
+import type { LineageRecord, StepRecord, RunRequest, RunRecord, PlanRecord, ResumePlan, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
@@ -121,6 +122,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
             ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
             : {}),
           checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+          ...lineageOf(steps),
         },
       });
 
@@ -357,6 +359,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
           critique: agentResult.critique,
           route: agentResult.route,
           versions: agentResult.versions,
+          // What the run changed in Adobe (lib/llm/tools/object-refs.ts).
+          ...lineageOf(agentResult.steps),
           // Requirements 12.1, 14.2: orchestration fields stored inside the
           // existing result JSONB — no table schema change. Absent on
           // single-agent runs, so their record shape is unchanged.
@@ -409,6 +413,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
                   ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
                   : {}),
                 checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+                // A failed or cancelled run still records what it changed before it stopped.
+                ...lineageOf(steps),
               },
             }
           : {}),
@@ -422,6 +428,12 @@ export function startRun(req: RunRequest, actor: string): RunJob {
   });
 
   return job;
+}
+
+/** `{ lineage }` when the steps changed any Adobe object, else nothing (keeps the record shape unchanged). */
+function lineageOf(steps: readonly StepRecord[]): { lineage?: LineageRecord[] } {
+  const lineage = lineageFromSteps(steps);
+  return lineage.length ? { lineage } : {};
 }
 
 const MAX_RESUME_CHARS = 6_000;

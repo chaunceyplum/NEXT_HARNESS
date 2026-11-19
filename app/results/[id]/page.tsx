@@ -9,6 +9,7 @@ import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
 import AuditTrail from '@/components/AuditTrail';
+import ObjectChanges from '@/components/ObjectChanges';
 
 /** Status badge colors; the badge text always carries the status too. */
 const STATUS_BADGE: Record<string, string> = {
@@ -251,6 +252,8 @@ export default function RunDetailPage() {
                 />
               );
             })()}
+
+            {record.result?.lineage?.length ? <ObjectChanges lineage={record.result.lineage} /> : null}
 
             {record.status === 'completed' && <RunFeedback runId={record.id} />}
 

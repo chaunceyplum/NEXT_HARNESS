@@ -323,3 +323,28 @@ describe('POST /api/build — domain mode flags', () => {
     }
   });
 });
+
+describe('POST /api/build — lineage', () => {
+  it('records what a run changed in Adobe, even when it then fails', async () => {
+    saved.length = 0;
+    orchestratedScript = async (opts) => {
+      opts.onStep?.({
+        stepNumber: 1,
+        text: '',
+        toolCalls: [{ toolName: 'adobe_create_segment', input: { name: 'Gold members', sandbox: 'prod' } }],
+        toolResults: [{ toolName: 'adobe_create_segment', output: { id: 'seg-77' } }],
+      });
+      throw new Error('provider down');
+    };
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'create the gold segment', orchestrate: true }) })
+    );
+    await res.text();
+    await tick();
+    const last = saved.at(-1)!;
+    expect(last.status).toBe('failed');
+    expect(last.result?.lineage).toEqual([
+      { ref: { kind: 'adobe:segment', id: 'seg-77', name: 'Gold members', sandbox: 'prod' }, change: 'created', tool: 'adobe_create_segment', step: 1 },
+    ]);
+  });
+});

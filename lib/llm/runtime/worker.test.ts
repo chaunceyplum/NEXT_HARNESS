@@ -267,6 +267,23 @@ describe('buildWorkerBrief', () => {
     expect(brief).toContain('call report_result');
   });
 
+  it('gives a dependent step typed references to what an earlier step actually changed', () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'Tag the cart',
+      step: makeStep(),
+      deps: [
+        {
+          stepId: 1,
+          status: 'done',
+          summary: 'created the data element',
+          ids: {},
+          objects: [{ kind: 'reactor:data_element', id: 'DE9', name: 'cart total', change: 'created' }],
+        },
+      ],
+    });
+    expect(brief).toContain('Objects it created reactor:data_element DE9 ("cart total")');
+  });
+
   it("puts the user's own request, with its limits, ahead of the plan goal", () => {
     const brief = buildWorkerBrief({
       runGoal: 'Clean up old segments',

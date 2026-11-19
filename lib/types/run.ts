@@ -1,6 +1,7 @@
 /** A run: its request, its result, and its stored record (lib/run-store.ts). */
 
 import type { RunStatus } from '../run-lifecycle';
+import type { LineageRecord } from './adobe';
 import type { StepRecord, TokenUsage } from './agent';
 import type { WorkerResult, WorkerRecord } from './worker';
 import type { PlanRecord } from './plan';
@@ -171,6 +172,13 @@ export interface RunResult {
   orchestrated?: boolean;
   replans?: number;
   workers?: WorkerRecord[];
+  /**
+   * Every Adobe object change the run made, in order (lib/llm/tools/object-refs.ts).
+   * Kept inside the result JSONB, so no schema change; queried across runs by
+   * lib/lineage-store.ts. Absent on runs that changed nothing, and on runs
+   * stored before lineage was tracked.
+   */
+  lineage?: LineageRecord[];
 }
 
 /** Mirrors lib/llm/runtime/planner.ts Plan, for client code. */

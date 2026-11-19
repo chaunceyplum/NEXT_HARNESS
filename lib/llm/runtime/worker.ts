@@ -30,6 +30,7 @@ import type { ApprovalReason } from '../tools/approval-policy';
 import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
 import { executeLoop } from './agent-loop';
+import { lineageFromSteps, objectsIn } from '../tools/object-refs';
 import { getDefaultModelKey } from '../models/model-registry';
 import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from '../tools/tool-catalog';
 import type { PlanStep } from './planner';
@@ -329,6 +330,10 @@ export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'request' 
     for (const dep of deps) {
       const ids = Object.keys(dep.ids).length ? ` ids=${JSON.stringify(dep.ids)}` : '';
       lines.push(`- Step ${dep.stepId} [${dep.status}]: ${dep.summary}${ids}${dep.notes ? ` (${dep.notes})` : ''}`);
+      // Typed references to what that step actually changed (from its executed calls).
+      if (dep.objects?.length) {
+        lines.push(`  Objects it ${dep.objects.map((o) => `${o.change} ${o.kind} ${o.id}${o.name ? ` ("${o.name}")` : ''}${o.sandbox ? ` in sandbox ${o.sandbox}` : ''}`).join('; ')}`);
+      }
     }
   }
 
@@ -484,6 +489,9 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
 
     // The model's own report_result status decides done vs failed (Req 5.3, 5.4).
     const status: WorkerStatus = reported.status === 'done' ? 'done' : 'failed';
+    // What the worker actually changed, from its executed tool calls, so a
+    // dependent step gets typed references rather than only the model's ids.
+    const objects = objectsIn(lineageFromSteps(loop.steps, workerId));
     return {
       workerId,
       stepId: step.id,
@@ -491,7 +499,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       modelKey: loop.modelKey,
       status,
       steps: loop.steps,
-      result: reported,
+      result: objects.length ? { ...reported, objects } : reported,
       budgetUsage: spend(),
       startedAt,
       durationMs: Date.now() - startedAtMs,
