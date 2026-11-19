@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useState } from 'react';
-import { AgentStepDTO, CritiqueInfo, RunVersions, TokenUsage, WorkerStatus } from '@/lib/types';
+import { StepRecord, CritiqueRecord, RunVersions, TokenUsage, WorkerStatus } from '@/lib/types';
 
 /**
  * One worker lane in an orchestrated run (Requirement 15.1). Built from the
@@ -20,7 +20,7 @@ export interface WorkerLane {
 }
 
 export interface AgentTraceProps {
-  steps: AgentStepDTO[];
+  steps: StepRecord[];
   toolsConsidered: string[];
   finishReason: string;
   finalText: string;
@@ -33,7 +33,7 @@ export interface AgentTraceProps {
   /** Version fingerprints (prompt/toolset/app). Absent on runs from before versioning. */
   versions?: RunVersions;
   /** Grounding check on the final answer, when it ran. */
-  critique?: CritiqueInfo;
+  critique?: CritiqueRecord;
   /** The streamed answer is finished and being checked; the checked (possibly revised) text replaces it. */
   checking?: boolean;
   /**
@@ -77,7 +77,7 @@ const STOP_REASON_LABEL: Record<string, string> = {
  * re-renders on every text delta, which would otherwise re-stringify every
  * step's inputs and outputs each time.
  */
-const StepCard = memo(function StepCard({ step }: { step: AgentStepDTO }) {
+const StepCard = memo(function StepCard({ step }: { step: StepRecord }) {
   const stepTime = formatMs(step.durationMs);
   const modelTime = formatMs(step.modelMs);
   const stepTokens = step.usage?.totalTokens;
@@ -126,7 +126,7 @@ const StepCard = memo(function StepCard({ step }: { step: AgentStepDTO }) {
 });
 
 /** A collapsible lane for one worker: its status, model, tokens and steps (Requirement 15.1). */
-function WorkerLaneCard({ lane, steps }: { lane: WorkerLane; steps: AgentStepDTO[] }) {
+function WorkerLaneCard({ lane, steps }: { lane: WorkerLane; steps: StepRecord[] }) {
   const [open, setOpen] = useState(lane.status === 'running' || lane.status === 'failed');
   const status = WORKER_STATUS[lane.status] ?? WORKER_STATUS.queued;
   const tokens = lane.budgetUsage?.tokens;

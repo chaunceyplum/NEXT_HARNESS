@@ -63,6 +63,8 @@ const eslintConfig = defineConfig([
     { regex: "(^|/)launch(/|$)", message: "One domain pack must not import another." },
   ]),
   layer(["lib/*.ts", "app/**/*.ts", "app/**/*.tsx", "components/**/*.tsx"], [DOMAIN_INTERNALS]),
+  // lib/types holds types only: any value import would pull implementation in.
+  layer(["lib/types/**/*.ts"], [{ regex: ".*", message: "lib/types holds types only; use `import type`." }]),
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:

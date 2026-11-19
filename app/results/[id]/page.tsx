@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { AgentStepDTO, ApiError, RunResult, RunRecord, WorkerRecord } from '@/lib/types';
+import { StepRecord, ApiError, RunResult, RunRecord, WorkerRecord } from '@/lib/types';
 import { isActive, isResumable } from '@/lib/run-lifecycle';
 import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
@@ -38,7 +38,7 @@ function buildWorkerLanes(workers: WorkerRecord[]): WorkerLane[] {
  * Taking worker steps from the WorkerRecords keeps lanes populated regardless
  * of how the stored `result.steps` was merged.
  */
-function mergeWorkerSteps(resultSteps: AgentStepDTO[], workers: WorkerRecord[]): AgentStepDTO[] {
+function mergeWorkerSteps(resultSteps: StepRecord[], workers: WorkerRecord[]): StepRecord[] {
   const coordinatorSteps = resultSteps.filter((s) => !s.workerId);
   const workerSteps = workers.flatMap((w) => w.steps.map((s) => ({ ...s, workerId: s.workerId ?? w.workerId })));
   return [...coordinatorSteps, ...workerSteps];

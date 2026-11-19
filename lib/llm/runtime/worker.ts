@@ -43,7 +43,7 @@ import { effectiveToolCall } from '../tools/tool-discovery';
 // Re-homed to lib/types.ts in Task 8.1 (the record/resume phase) so the run
 // record, stream events and resume path share one definition. Re-exported here
 // so existing importers (coordinator, tests) keep importing them from worker.ts.
-// WorkerRecord.steps is typed AgentStepDTO[] there; AgentStepTrace is
+// WorkerRecord.steps is typed StepRecord[] there; AgentStepTrace is
 // structurally identical, so the runtime steps assign without a cast.
 export type { WorkerStatus, WorkerResult, WorkerRecord } from '../../types';
 import type { WorkerResult, WorkerRecord, WorkerStatus } from '../../types';

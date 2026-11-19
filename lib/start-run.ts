@@ -17,7 +17,7 @@ import { critiqueAnswer, type Critique } from '@/lib/llm/quality/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { AgentStepDTO, RunRequest, RunRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
+import type { StepRecord, RunRequest, RunRecord, PlanRecord, ResumePlan, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
@@ -55,7 +55,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     // Checkpoints: the run record is saved as 'running' after every step,
     // so a crash or restart leaves the steps so far (marked 'interrupted' on
     // the next start, and resumable). Saves are chained so the last write wins.
-    const steps: AgentStepDTO[] = [];
+    const steps: StepRecord[] = [];
     // Orchestrated runs only (Requirements 11.2, 12.1, 12.2): the worker
     // records seen so far, keyed by workerId so a later attempt of the same
     // worker replaces the earlier one. Checkpointed with the run so an
@@ -64,7 +64,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     let orchestrated = false;
     // The plan as last emitted, checkpointed so an interrupted orchestrated run
     // can be resumed from its done steps (Requirement 12.4).
-    let latestPlan: PlanInfo | undefined;
+    let latestPlan: PlanRecord | undefined;
     // Streamed tokens pass through the output guardrail too. A credential can
     // span several deltas, so text is held back until it's safe to redact.
     const textRedactor = createStreamRedactor();
@@ -178,7 +178,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         // client (and the per-worker restart below) can file it by lane.
         onStep: (step, workerId) => {
           pushDelta(textRedactor.flush());
-          const redacted: AgentStepDTO = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
+          const redacted: StepRecord = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
           steps.push(redacted);
           push({ type: 'step', step: redacted, ...(workerId ? { workerId } : {}) });
           checkpoint();

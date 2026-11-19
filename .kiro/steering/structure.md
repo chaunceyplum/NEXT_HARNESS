@@ -17,7 +17,8 @@ lib/
   run-store.ts            Run records in harness_agent_runs via execute_sql
   kill-switch.ts, audit-log.ts, memory-store.ts, online-judge.ts, tracing.ts
   mcp-client.ts, mcp-sql.ts   MCP transport and SQL escaping
-  types.ts                Shared DTOs: RunRequest, RunStreamEvent, RunRecord, ...
+  types/                  Shared types, one module per concept (run, stream, agent, worker, plan,
+                          quality, model, eval, api); types only. …Record = stored, …Summary = list row
   llm/
     runtime/              The agent loop and orchestration
       agent.ts            runAgent = prepareRun + executeLoop; the public entry point

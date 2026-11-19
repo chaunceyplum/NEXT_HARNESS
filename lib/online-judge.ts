@@ -11,7 +11,7 @@
 import { allCriteria, formatJudgeNotes, judge, summarizeToolActivity } from '@/evals/lib/judge';
 import { judgeModelKey } from '@/evals/lib/env';
 import { saveJudgment } from './run-quality';
-import type { AgentStepDTO } from './types';
+import type { StepRecord } from './types';
 
 const DEFAULT_SAMPLE_RATE = 0.1;
 
@@ -36,7 +36,7 @@ export interface OnlineJudgeInput {
   runId: string;
   task: string;
   answer: string;
-  steps: AgentStepDTO[];
+  steps: StepRecord[];
 }
 
 /**

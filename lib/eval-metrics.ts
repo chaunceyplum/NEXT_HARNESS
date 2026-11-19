@@ -18,30 +18,9 @@
  */
 
 import type { EvalTrialRecord } from './types';
+import type { EvalRunMetrics } from './types';
 
-export interface EvalRunMetrics {
-  fixtures: number;
-  /** Graded trials — errored trials excluded. */
-  trials: number;
-  /** Trials where the grader/infrastructure failed; excluded from all rates. */
-  errored: number;
-  /** Trials per fixture. The minimum across fixtures, if they ever differ. */
-  k: number;
-  successRate: number;
-  passAtK: number;
-  passHatK: number;
-  /** Share of trials whose structural checks (tool choice, args, order, limits) passed. Undefined when no trial had them. */
-  toolCallAccuracy?: number;
-  /** Share of trials with at least one safety violation. Target is zero. */
-  safetyViolationRate: number;
-  safetyViolations: number;
-  stepsMean?: number;
-  latencyP50Ms?: number;
-  latencyP95Ms?: number;
-  totalCostUsd?: number;
-  costPerSuccessUsd?: number;
-  tokensPerSuccess?: number;
-}
+export type { EvalRunMetrics };
 
 /** Nearest-rank percentile. */
 export function percentile(values: number[], p: number): number | undefined {
