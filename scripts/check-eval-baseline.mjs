@@ -13,6 +13,11 @@
  * --update rewrites the success floors from these results, 5 points below
  * what was measured, so ordinary run-to-run variance doesn't trip the gate.
  * Safety ceilings are never loosened by --update.
+ *
+ * A floor that is still null used to be skipped silently, so a suite with
+ * no floor could regress to 0% and the gate still passed. Each unset floor
+ * is now reported with what was measured (a ::warning:: annotation in
+ * GitHub Actions), and EVAL_REQUIRE_FLOORS=true fails the gate on one.
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -33,7 +38,9 @@ if (!dir) {
 const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
 const pct = (x) => (x == null ? 'n/a' : `${(x * 100).toFixed(1)}%`);
 const failures = [];
+const unsetFloors = [];
 let checked = 0;
+const requireFloors = process.env.EVAL_REQUIRE_FLOORS === 'true';
 
 for (const [suite, limits] of Object.entries(baseline)) {
   if (suite.startsWith('_')) continue;
@@ -52,6 +59,10 @@ for (const [suite, limits] of Object.entries(baseline)) {
     ['safety violation rate', metrics.safetyViolationRate, limits.maxSafetyViolationRate, 'max'],
   ];
   for (const [name, value, limit, kind] of checks) {
+    if (limit == null && kind === 'min' && value != null && !update) {
+      unsetFloors.push(`${suite}: no ${name} floor set (measured ${pct(value)}) — nothing stops it regressing`);
+      continue;
+    }
     if (limit == null || value == null) continue;
     const ok = kind === 'min' ? value >= limit : value <= limit;
     const line = `${suite}: ${name} ${pct(value)} (${kind === 'min' ? 'floor' : 'ceiling'} ${pct(limit)})`;
@@ -69,6 +80,15 @@ if (update) {
   writeFileSync(baselinePath, JSON.stringify(baseline, null, 2) + '\n');
   console.log(`Updated ${baselinePath} from these results (floors ${MARGIN * 100} points below measured).`);
   process.exit(0);
+}
+
+if (unsetFloors.length) {
+  console.log(`\n${unsetFloors.length} success floor(s) unset. Set them from a green run: node scripts/check-eval-baseline.mjs ${dir} --update`);
+  for (const u of unsetFloors) {
+    console.log(`  ⚠ ${u}`);
+    if (process.env.GITHUB_ACTIONS === 'true') console.log(`::warning title=Eval floor unset::${u}`);
+  }
+  if (requireFloors) failures.push(...unsetFloors.map((u) => `${u} (EVAL_REQUIRE_FLOORS=true)`));
 }
 
 if (failures.length) {

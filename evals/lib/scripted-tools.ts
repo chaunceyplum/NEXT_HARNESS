@@ -13,6 +13,10 @@
  * Scripted tools bypass executeMcpToolWithRetry's retry / grounding
  * (tool-catalog.ts) — that path makes live knowledge-base calls, and it's
  * the model's own retry behavior being graded here, not the harness's.
+ * Their results DO go through capToolResult, the same size trimming every
+ * live result gets, so a fixture with a production-size list (tens of KB)
+ * shows the model what production would. Results under the limit are
+ * returned unchanged.
  *
  * Answer selection is by TOOL NAME + INPUT, independent of call order
  * (Requirement 16.1). Under orchestration the coordinator runs independent
@@ -28,6 +32,7 @@
 
 import { jsonSchema, tool, type ToolSet } from 'ai';
 import type { RecordedCall } from './grading';
+import { capToolResult } from '@/lib/llm/tools/tool-catalog';
 
 /**
  * How a response is matched to a call's input, when the response is not just
@@ -94,7 +99,7 @@ export function buildScriptedTools(defs: ScriptedToolDef[]): { tools: ToolSet; c
         const matched = responses.find((r) => r.when && matchesInput(input, r.when));
         const response = matched ?? unmatched[Math.min(n++, unmatched.length - 1)] ?? { result: { ok: true } };
         if ('error' in response) throw new Error(response.error);
-        return response.result;
+        return capToolResult(def.name, response.result);
       },
     });
   }
