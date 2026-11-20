@@ -94,3 +94,27 @@ describe('systemPrompt knowledge rule', () => {
     for (const p of [withSearch, without]) expect(p).toMatch(/say that part is not from the knowledge base/);
   });
 });
+
+describe('systemPrompt grounding rules', () => {
+  it('asks for every identifier to be grounded and allows a lookup to resolve one', () => {
+    const p = systemPrompt({ toolDiscovery: true, recall: true });
+    expect(p).toMatch(/never from memory or a plausible-looking guess/);
+    expect(p).toMatch(/a quick read that resolves an id is part of doing the task, not exploration/);
+    expect(p).toMatch(/Read before you change/);
+    expect(p).toMatch(/stored facts, recall_objects or a tool result/);
+  });
+
+  it('no longer tells the model to trust the shortlist or avoid looking', () => {
+    for (const p of [systemPrompt({ toolDiscovery: true }), systemPrompt({})]) {
+      expect(p).not.toMatch(/see what's there/);
+      expect(p).not.toMatch(/trust that they are the ones/);
+      expect(p).toMatch(/the shortlist can miss/);
+    }
+    expect(systemPrompt({ toolDiscovery: true })).toMatch(/look for one with find_tools rather than forcing/);
+    expect(systemPrompt({})).toMatch(/say so rather than forcing/);
+  });
+
+  it('keeps the scope rule: do exactly what was asked', () => {
+    expect(systemPrompt({})).toMatch(/Do exactly what was asked and nothing more/);
+  });
+});

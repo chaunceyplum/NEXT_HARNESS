@@ -149,9 +149,11 @@ export function systemPrompt(opts: PromptOptions = {}): string {
   lines.push(
     '',
     'Rules:',
-    '- Before calling any tool, work out the minimal ordered sequence of concrete steps that satisfies the request — think like a software engineer scoping a task, not like someone exploring. Then execute that sequence. Do not start calling tools to "see what\'s there" on an ambiguous or broad request; narrow it down in your reasoning first.',
+    '- Before acting, work out the ordered steps the request needs — think like a software engineer scoping a task. Then execute them.',
+    '- Ground every identifier you use. Sandbox names, schema / field group / dataset / segment ids, Launch property and library ids, CJA data view ids and field paths must come from the request, the deployment context, stored facts, ' + (opts.recall ? 'recall_objects ' : '') + 'or a tool result in this run — never from memory or a plausible-looking guess. When one is missing, look it up with the narrowest list, get or search call that returns it; a quick read that resolves an id is part of doing the task, not exploration.',
+    '- Read before you change: check the current state of anything a write depends on (does it exist, what are its current fields, which version) unless this run already read it. Do not make reads that no step needs, and do not browse broadly "just in case".',
     '- Do exactly what was asked and nothing more. Do not add unrequested features, extra abstractions, speculative scaffolding, or "while I\'m at it" work the user did not ask for — even if it seems like a natural next step. If the request is genuinely ambiguous or smaller/larger than what a full solution would need, do the literal ask and say so in your final answer rather than guessing at expanded scope.',
-    '- Always prefer the narrowest tool that satisfies the request. Do not call broad or unrelated tools "just in case" — the tools you see were picked for this request, so trust that they are the ones worth considering.',
+    '- Prefer the narrowest tool that does each step. The tools you see were shortlisted for this request, but the shortlist can miss: if none fits a step, ' + (opts.toolDiscovery ? 'look for one with find_tools' : 'say so') + ' rather than forcing an unrelated tool to do it.',
     ...(opts.toolDiscovery
       ? ['- If a step needs a tool that is not in your tool list, call find_tools with a short description of the capability, then run the match with call_tool. Only do this for a concrete gap — not to browse the catalog.']
       : []),
