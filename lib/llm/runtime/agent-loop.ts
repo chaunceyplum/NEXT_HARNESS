@@ -16,6 +16,9 @@ import {
   withCacheBreakpoint,
   isHistoryBound,
   contextEditingProviderOptions,
+  contextEditKeepToolUses,
+  contextEditTriggerTokens,
+  CONTEXT_EDIT_EXCLUDED_TOOLS,
   mergeProviderOptions,
   resolveThinkingProviderOptions,
 } from './provider-options';
@@ -97,6 +100,20 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
     tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey }, Date.now, ctx.tracerParent);
     // Step index at which a budget forced the wrap-up step; the loop stops after it.
     let forcedAt: number | undefined;
+    // Loop detection vs. lost results: a read whose result was compressed
+    // (below) or cleared server-side (history-bound models) is forgiven once,
+    // so re-fetching it doesn't count toward loop-detected. Reads only —
+    // identical writes are suppressed by the write deduper instead.
+    const forgiven = new Set<string>();
+    const forgive = (toolCallId: string, toolName: string, input: unknown): void => {
+      if (forgiven.has(toolCallId)) return;
+      forgiven.add(toolCallId);
+      const call = effectiveToolCall(toolName, input);
+      if (classifyTool(call.toolName) === 'read') budget.forgive(call.toolName, call.input);
+    };
+    // History-bound models: every tool call so far, oldest first, to work out
+    // which results server-side clearing may have removed.
+    const issued: Array<{ toolCallId: string; toolName: string; input: unknown }> = [];
 
     // TASK 10: resolve thinking config for this model + request combination
     const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, ctx.thinkingBudget);
@@ -175,7 +192,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.
-          const compressedMessages = compressOldToolMessages(messages, steps.length, { recall: 'recall_objects' in tools });
+          const compressedMessages = compressOldToolMessages(messages, steps.length, { recall: 'recall_objects' in tools, onCompressed: forgive });
 
           // TASK 3: force text-only on the final allowed step. Phase 2: a
           // worker instead forces its wrap-up tool (report_result) on that
@@ -195,6 +212,13 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
         onStepEnd: (step) => {
           const stepNumber = stepIndex++;
           const trace = toStepTrace(step, stepNumber);
+          // This step's request crossed the clearing trigger, so the server may
+          // have cleared every result but the newest few kept tool uses.
+          if (historyBound && (step.usage.inputTokens ?? 0) >= contextEditTriggerTokens()) {
+            const clearable = issued.filter((c) => !CONTEXT_EDIT_EXCLUDED_TOOLS.includes(c.toolName));
+            for (const c of clearable.slice(0, Math.max(0, clearable.length - contextEditKeepToolUses()))) forgive(c.toolCallId, c.toolName, c.input);
+          }
+          if (historyBound) for (const c of step.toolCalls) issued.push({ toolCallId: c.toolCallId, toolName: c.toolName, input: c.input });
           budget.recordStep(
             step.usage,
             step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))

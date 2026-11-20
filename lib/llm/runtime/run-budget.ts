@@ -147,6 +147,19 @@ export class RunBudgetTracker {
     this.checkLimits();
   }
 
+  /**
+   * One earlier call's result has left the model's context (compressed, or
+   * cleared server-side), so a repeat of it is a legitimate re-fetch, not a
+   * loop: take that call back out of the identical-call count. Each removed
+   * result should be forgiven once (the caller tracks which). The warning,
+   * if one was already given, stands; only the count moves.
+   */
+  forgive(toolName: string, input: unknown): void {
+    const sig = callSignature(toolName, input);
+    const count = this.callCounts.get(sig) ?? 0;
+    if (count > 0) this.callCounts.set(sig, count - 1);
+  }
+
   private checkLimits(): void {
     if (this.stopReason) return;
     const { maxTokens, maxCostUsd, maxDurationMs } = this.limits;

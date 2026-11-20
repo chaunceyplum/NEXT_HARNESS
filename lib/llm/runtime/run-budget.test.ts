@@ -90,6 +90,22 @@ describe('RunBudgetTracker', () => {
     expect(t.exceeded()).toBe('loop-detected');
   });
 
+  it('takes a forgiven call (its result left the context) out of the repeat count', () => {
+    const t = new RunBudgetTracker(limits, 'unknown', 0, () => 0);
+    const call = { toolName: 'adobe_list_segments', input: { limit: 5 } };
+    t.recordStep({}, [call]);
+    t.recordStep({}, [call]);
+    t.forgive(call.toolName, { limit: 5 });
+    t.forgive(call.toolName, { limit: 5 });
+    t.forgive(call.toolName, { limit: 5 }); // never below zero
+    t.recordStep({}, [call]);
+    t.recordStep({}, [call]);
+    expect(t.takeWarnings()).toEqual([]);
+    t.recordStep({}, [call]);
+    expect(t.takeWarnings()).toHaveLength(1);
+    expect(t.exceeded()).toBeUndefined();
+  });
+
   it('does not count different arguments as a repeat', () => {
     const t = new RunBudgetTracker(limits, 'unknown', 0, () => 0);
     for (let i = 0; i < 6; i++) t.recordStep({}, [{ toolName: 'adobe_list_segments', input: { page: i } }]);

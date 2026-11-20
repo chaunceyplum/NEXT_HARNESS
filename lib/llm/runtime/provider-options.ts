@@ -121,6 +121,13 @@ export function contextEditKeepToolUses(): number {
 export { contextEditTriggerTokens };
 
 /**
+ * Tools whose results server-side clearing never removes: find_tools results
+ * carry the schemas call_tool needs, and recall_objects results are the ids
+ * the model is about to act on.
+ */
+export const CONTEXT_EDIT_EXCLUDED_TOOLS: readonly string[] = ['find_tools', 'recall_objects'];
+
+/**
  * Server-side context editing (clear_tool_uses) — the API clears old tool
  * results itself, which doesn't count as a history edit. Anthropic takes
  * the typed `contextManagement` option; on Bedrock it's passed through as a
@@ -131,9 +138,7 @@ export function contextEditingProviderOptions(modelKey: string): ProviderOptions
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
   const trigger = { type: 'input_tokens', value: contextEditTriggerTokens() };
   const keep = { type: 'tool_uses', value: contextEditKeepToolUses() };
-  // find_tools results carry the schemas call_tool needs, and recall_objects
-  // results are the ids the model is about to act on — keep both.
-  const excluded = ['find_tools', 'recall_objects'];
+  const excluded = [...CONTEXT_EDIT_EXCLUDED_TOOLS];
   if (entry.provider === 'anthropic') {
     return {
       anthropic: {

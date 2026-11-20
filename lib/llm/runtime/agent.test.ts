@@ -324,6 +324,36 @@ describe('runAgent loop shape', () => {
     expect(rewrites).toHaveLength(1);
   });
 
+  it('does not call re-fetching a compressed result a loop', async () => {
+    const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
+    // 8 distinct lists, so the 4 oldest (a..d) are compressed, then 'a' again three times.
+    // Without forgiveness 'a' would be on its 4th identical call and the run would stop.
+    script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'a', 'a', 'a'].map(listPage), { text: 'final' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', maxSteps: 13 });
+    expect(result.stopReason).toBeUndefined();
+    expect(result.finalText).toBe('final');
+  });
+
+  it('still stops a real loop on a result that was never compressed', async () => {
+    const same: Scripted = { toolCall: { toolName: 'adobe_list_segments', input: { id: 'z' } } };
+    script = [same, same, same, same, same, { text: 'final' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', maxSteps: 8 });
+    expect(result.stopReason).toBe('loop-detected');
+  });
+
+  it('on history-bound models, forgives re-fetches once input passes the clearing trigger', async () => {
+    const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
+    const before = usage.inputTokens.total;
+    usage.inputTokens.total = 120_000; // past the 100K default: the server may have cleared all but 6 tool uses
+    try {
+      script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'a', 'a', 'a'].map(listPage), { text: 'final' }];
+      const result = await runAgent({ userInput: 'list segments', modelKey: 'test:sonnet55', maxSteps: 12 });
+      expect(result.stopReason).toBeUndefined();
+    } finally {
+      usage.inputTokens.total = before;
+    }
+  });
+
   it('marks only the system prompt and the newest message for caching', async () => {
     script = [listCall, listCall, { text: 'final' }];
     await runAgent({ userInput: 'list segments twice', modelKey: 'test:plain', maxSteps: 3 });
