@@ -171,7 +171,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // TASK 2: compress tool results from steps older than the threshold
           // so large list/read payloads don't accumulate at full size in the
           // context that's resent on every turn. The trace (onStep /
-          // result.steps) keeps the uncompressed (8K-capped) results; only
+          // result.steps) keeps the uncompressed (size-trimmed) results; only
           // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.

@@ -19,8 +19,8 @@
  *      summary. Models that bind thinking to the exact prior conversation
  *      (see HISTORY_BOUND_MODEL_RE) reject any rewrite of earlier messages, so
  *      for those the API's server-side context editing clears them instead.
- *      The trace keeps the uncompressed results (each already capped at 8K
- *      chars by capToolResult) — only the in-flight model context shrinks.
+ *      The trace keeps the uncompressed results (each already trimmed to size
+ *      by capToolResult) — only the in-flight model context shrinks.
  *
  *   3. Last-step summary (TASK 3): the final allowed step is steered to a
  *      written answer so the run doesn't end cut off mid-tool-call when

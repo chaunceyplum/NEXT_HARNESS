@@ -24,7 +24,7 @@ const COMPRESS_BATCH = 4;
  * RESULT_SUMMARY_THRESHOLD. Large list/read payloads otherwise accumulate at
  * full size in the context that's resent on every turn (the same mechanism
  * behind the documented 400K-token run). The trace keeps each result as the
- * tool returned it (after capToolResult's 8K cap) — only the model's
+ * tool returned it (after capToolResult's structural trim) — only the model's
  * in-flight context is shrunk further.
  *
  * Returns a new messages array if anything was compressed, or undefined to

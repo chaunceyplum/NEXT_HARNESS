@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   capRagResult,
   capToolResult,
+  toolResultLimits,
   isAdobeScoped,
   isNonRetryableError,
   isRateLimitError,
@@ -195,19 +196,32 @@ describe('capToolResult', () => {
     expect(capToolResult('t', undefined)).toBeUndefined();
   });
 
-  it('caps results larger than 8,000 chars to prevent context overflow', () => {
-    // Verify the new tighter limit (reduced from 12,000 to 8,000) is enforced
-    const largeResult = { data: 'x'.repeat(10000) };
-    const capped = capToolResult('test_tool', largeResult);
-    expect(typeof capped).toBe('string');
-    expect(capped).toMatch(/truncated — 1001\d chars total/);
-    expect((capped as string).length).toBeLessThan(JSON.stringify(largeResult).length);
+  it('trims results over the limit structurally instead of slicing the JSON', () => {
+    const largeResult = { data: 'x'.repeat(12_000) };
+    const capped = capToolResult('test_tool', largeResult) as { _trimmed: { originalChars: number; level: string }; data: string };
+    expect(typeof capped).toBe('object');
+    expect(capped._trimmed.originalChars).toBe(JSON.stringify(largeResult).length);
+    expect(capped._trimmed.level).toBe('long-text');
+    expect(JSON.stringify(capped).length).toBeLessThan(JSON.stringify(largeResult).length);
   });
 
   it('preserves moderate-sized results that fit within the limit', () => {
-    const moderateResult = { data: 'x'.repeat(7000) };
+    const moderateResult = { data: 'x'.repeat(9_000) };
     const capped = capToolResult('test_tool', moderateResult);
     expect(capped).toBe(moderateResult);
+  });
+
+  it('reads its limits from TOOL_RESULT_MAX_CHARS / TOOL_RESULT_INDEX_MAX_CHARS', () => {
+    process.env.TOOL_RESULT_MAX_CHARS = '3000';
+    process.env.TOOL_RESULT_INDEX_MAX_CHARS = '2000';
+    try {
+      // The index ceiling can't be below the main limit.
+      expect(toolResultLimits()).toEqual({ maxChars: 3000, indexMaxChars: 3000 });
+      expect(capToolResult('t', { data: 'x'.repeat(5_000) })).toHaveProperty('_trimmed');
+    } finally {
+      delete process.env.TOOL_RESULT_MAX_CHARS;
+      delete process.env.TOOL_RESULT_INDEX_MAX_CHARS;
+    }
   });
 });
 

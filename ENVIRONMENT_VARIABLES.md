@@ -270,6 +270,20 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Tool result size (`lib/llm/tools/result-trim.ts`)
+
+Every tool result is trimmed before the model sees it. Trimming is
+structural, never a slice of the JSON text: long strings are shortened
+first, then list items lose their nested detail, then they keep only their
+identity fields (id, `$id`, name, title, type, status, `*_id` …). Only if
+even that index is too big are lists cut, and the result then says how many
+items were left out. Each trimmed result carries a `_trimmed` note.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TOOL_RESULT_MAX_CHARS` | `10000` | Size a trimmed result must fit. Min 1000. |
+| `TOOL_RESULT_INDEX_MAX_CHARS` | `20000` | Larger ceiling for an identity-only index of a big list, so every id survives. Never below `TOOL_RESULT_MAX_CHARS`. |
+
 ## Tool call timeouts (`lib/fetch-timeout.ts`)
 
 Every outbound request in the tool path has a deadline. A timeout surfaces

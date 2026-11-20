@@ -30,6 +30,7 @@ import { checkDomainToolCall } from '../domains';
 import type { ToolCallGate } from './tool-policy';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from '../quality/rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
+import { trimResult } from './result-trim';
 
 export interface McpToolDefinition {
   name: string;
@@ -592,37 +593,43 @@ export async function executeMcpToolWithRetry(
 }
 
 /**
- * Universal cap applied to every tool's result before it's returned to the
- * model. Prevents large list/read payloads from accumulating in context the
- * same way capRagResult() already does for knowledge-search results. This is
- * also what the trace and persisted run record see — there's no uncapped copy.
+ * Universal size limit applied to every tool's result before it's returned
+ * to the model. This is also what the trace and persisted run record see —
+ * there's no uncapped copy.
  *
- * Reduced from 12,000 to 8,000 chars after a production run overflowed
- * Haiku's 200K-token context window (365,912 tokens). With multi-step runs
- * potentially making many tool calls, even capped results accumulate quickly.
- * At ~3.5 chars per token, 8,000 chars ≈ 2,300 tokens, which still covers a
- * large list_* response or a moderate read (e.g. a CJA project definition)
- * without truncating typical narrow-tool results (create/update confirmation
- * objects, short list pages) at all. The compressOldToolMessages logic in
- * agent.ts further compresses results from steps older than 2, and
- * server-side context editing clears old tool results on history-bound
- * models, so this cap is one of three layers defending against context
- * overflow.
+ * History: the limit was cut from 12,000 to 8,000 chars after a production
+ * run overflowed Haiku's 200K-token window, and results over it were sliced
+ * mid-JSON. That slice was the main cause of wrong answers on list calls —
+ * the model saw the first few schemas / segments / rules as a broken string
+ * and treated them as the whole list. Results are now trimmed structurally
+ * (result-trim.ts): valid JSON, every item's identity fields kept, and a
+ * `_trimmed` note saying what was dropped. The overflow defence is unchanged
+ * in kind — results still have a hard ceiling, and old ones are compressed
+ * (context-compression.ts) or cleared server-side on history-bound models.
  *
- * RAG results are already capped at 4,000 chars by capRagResult(), which
- * fires before this wrapper — the two caps don't conflict, this one is just
- * a backstop for every other tool.
+ *   TOOL_RESULT_MAX_CHARS        (default 10,000) size a trimmed result fits
+ *   TOOL_RESULT_INDEX_MAX_CHARS  (default 20,000) ceiling for an id-only
+ *                                index of a large list, so a complete list
+ *                                of ids survives where full items cannot
+ *
+ * RAG results are capped separately by capRagResult().
  */
-const MAX_CHARS_PER_TOOL_RESULT = 8_000;
+const DEFAULT_MAX_CHARS_PER_TOOL_RESULT = 10_000;
+const DEFAULT_MAX_INDEX_CHARS_PER_TOOL_RESULT = 20_000;
 
-export function capToolResult(toolName: string, result: unknown): unknown {
-  // JSON.stringify returns undefined (not a string) for undefined/functions.
-  const json = JSON.stringify(result);
-  if (json === undefined || json.length <= MAX_CHARS_PER_TOOL_RESULT) return result;
-  return (
-    `${json.slice(0, MAX_CHARS_PER_TOOL_RESULT)}… (truncated — ${json.length} chars total. ` +
-    `Use more specific arguments to ${toolName} to get a smaller, focused result.)`
-  );
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isInteger(n) && n >= 1_000 ? n : fallback;
+}
+
+export function toolResultLimits(): { maxChars: number; indexMaxChars: number } {
+  const maxChars = positiveIntEnv('TOOL_RESULT_MAX_CHARS', DEFAULT_MAX_CHARS_PER_TOOL_RESULT);
+  const indexMaxChars = Math.max(maxChars, positiveIntEnv('TOOL_RESULT_INDEX_MAX_CHARS', DEFAULT_MAX_INDEX_CHARS_PER_TOOL_RESULT));
+  return { maxChars, indexMaxChars };
+}
+
+export function capToolResult(_toolName: string, result: unknown): unknown {
+  return trimResult(result, toolResultLimits());
 }
 
 /**
@@ -632,9 +639,9 @@ export function capToolResult(toolName: string, result: unknown): unknown {
  * tool-shortlisting (lib/llm/tools/tool-retrieval.ts) effective: pass a narrow
  * `defs` list and the model literally cannot call anything outside it.
  *
- * Every result is capped at MAX_CHARS_PER_TOOL_RESULT before being returned
- * to the model, so that large list/read payloads don't accumulate unbounded
- * in context across a multi-step run.
+ * Every result is trimmed to toolResultLimits() before being returned to the
+ * model (structurally — see capToolResult), so that large list/read payloads
+ * don't accumulate unbounded in context across a multi-step run.
  */
 export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOptions = {}): ToolSet {
   const maxRetries = opts.maxRetries ?? 1;
