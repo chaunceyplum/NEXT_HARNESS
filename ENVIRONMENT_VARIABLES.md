@@ -526,6 +526,11 @@ If planning fails, the run continues without a plan.
     the original answer".
   - `npm run eval:critic` measures the critic's catch rate and false-flag
     rate on labelled answers. Run it before switching to `revise`.
+  - `JUDGE_ACTIVITY_MAX_CHARS` (default `40000`, was a fixed 6000): size of
+    the tool-activity evidence the critic, the online judge and the eval
+    judge see. Every call line is kept and results are trimmed
+    structurally; when over budget, read results shrink first and their
+    bodies are dropped oldest first, so writes and errors keep detail.
 - **Retrieval hints:** a knowledge search that returns nothing, or results
   sharing almost none of the query's key terms, gets a `_retrievalHint`
   telling the model to rewrite the query and search once more (or say

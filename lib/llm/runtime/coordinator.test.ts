@@ -517,6 +517,17 @@ describe('runOrchestrated synthesis (Req 7.1, 7.2)', () => {
     expect(synthesisPrompt).toContain('[failed]');
   });
 
+  it('shows synthesis what each step verifiably changed and found, not only the model-reported ids', async () => {
+    const plan = makePlan([{ id: 1 }, { id: 2 }]);
+    const run = runOrchestrated(baseInput(plan));
+    await tick();
+    finishDone(1, { summary: 'listed schemas', seen: [{ id: 'sch-web', label: 'Web Interactions' }] });
+    finishDone(2, { summary: 'made the field group', objects: [{ kind: 'adobe:field_group', id: 'fg-1', name: 'Attribution', change: 'created' }] });
+    await run;
+    expect(synthesisPrompt).toContain('found: sch-web ("Web Interactions")');
+    expect(synthesisPrompt).toContain('changed: created adobe:field_group fg-1 ("Attribution")');
+  });
+
   it("hands the user's request to every worker and to synthesis", async () => {
     const plan = makePlan([{ id: 1 }, { id: 2 }]);
     const run = runOrchestrated(baseInput(plan, { request: 'List them, but do not delete anything.' }));

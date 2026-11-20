@@ -79,7 +79,7 @@ vi.mock('../models/model-registry', () => {
   };
 });
 
-const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS } = await import('./worker');
+const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS, seenObjects, MAX_SEEN_OBJECTS } = await import('./worker');
 const { ModelHealthTracker } = await import('../models/model-health');
 const { RunLedger, resolveBudget } = await import('./run-budget');
 const { LaunchValidationGate } = await import('../domains/launch/validation');
@@ -221,11 +221,11 @@ describe('serialiseWrites (Req 3.4)', () => {
 });
 
 describe('reportResultTool', () => {
-  it('truncates summary to 1,000 and notes to 500 chars and binds the step id (Req 5.1, 5.2)', async () => {
+  it('truncates summary to 2,000 and notes to 500 chars and binds the step id (Req 5.1, 5.2)', async () => {
     let got: unknown;
     const t = reportResultTool(7, (r) => { got = r; });
     await t.execute!(
-      { status: 'done', summary: 's'.repeat(1_500), ids: { dataElementId: 'DE1' }, notes: 'n'.repeat(900) },
+      { status: 'done', summary: 's'.repeat(2_500), ids: { dataElementId: 'DE1' }, notes: 'n'.repeat(900) },
       { toolCallId: 'c', messages: [] } as never
     );
     expect(got).toMatchObject({ stepId: 7, status: 'done', ids: { dataElementId: 'DE1' } });
@@ -265,6 +265,15 @@ describe('buildWorkerBrief', () => {
     expect(brief).toContain('Step 1 [done]: read property state ids={"propertyId":"PR1"}');
     expect(brief).toContain('Launch data elements need a delegate id.');
     expect(brief).toContain('call report_result');
+  });
+
+  it('hands a dependent step the objects an earlier step\'s reads found', () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'Apply the field group',
+      step: makeStep(),
+      deps: [{ stepId: 1, status: 'done', summary: 'listed schemas', ids: {}, seen: [{ id: 'https://ns.adobe.com/acme/schemas/aaa', label: 'Web Interactions', kind: 'schemas' }] }],
+    });
+    expect(brief).toContain('Objects it found: schemas https://ns.adobe.com/acme/schemas/aaa ("Web Interactions")');
   });
 
   it('gives a dependent step typed references to what an earlier step actually changed', () => {
@@ -451,5 +460,30 @@ describe('runWorker', () => {
     // The worker ran as a Launch worker (gated Launch run).
     const launchCall = calls.find((c) => (c.tools ?? []).some((t) => t.name === 'reactor_create_library'));
     expect(launchCall).toBeDefined();
+  });
+});
+
+describe('seenObjects', () => {
+  const steps = [
+    {
+      toolResults: [
+        { toolName: 'adobe_list_schemas', output: { results: [{ $id: 's1', title: 'Web' }, { $id: 's2', title: 'Email' }] } },
+        { toolName: 'adobe_get_schema', output: undefined, error: '404 not found' },
+        { toolName: 'report_result', output: { id: 'ignored' } },
+      ],
+    },
+    { toolResults: [{ toolName: 'adobe_create_field_group', output: { $id: 'fg1', title: 'Attribution' } }, { toolName: 'adobe_list_schemas', output: { results: [{ $id: 's1', title: 'Web' }] } }] },
+  ];
+
+  it('collects ids from successful results, deduped, without what the worker changed', () => {
+    expect(seenObjects(steps, new Set(['fg1']))).toEqual([
+      { id: 's1', label: 'Web', kind: 'schemas' },
+      { id: 's2', label: 'Email', kind: 'schemas' },
+    ]);
+  });
+
+  it('caps the list', () => {
+    const many = [{ toolResults: [{ toolName: 'adobe_list_datasets', output: Array.from({ length: 200 }, (_, i) => ({ id: `ds${i}` })) }] }];
+    expect(seenObjects(many, new Set())).toHaveLength(MAX_SEEN_OBJECTS);
   });
 });
