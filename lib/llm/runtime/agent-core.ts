@@ -24,9 +24,10 @@ import { domainPromptBlocks } from '../domains';
 
 /**
  * Tools always available regardless of the shortlist, because the requests
- * that need them don't reliably embed close enough to win a slot. No
- * knowledge-search tool belongs here: the model never gets one — retrieval
- * runs at planning (planning-retrieval.ts) and on tool errors only.
+ * that need them don't reliably embed close enough to win a slot. No raw
+ * knowledge-search tool belongs here: the model searches only through
+ * search_knowledge (knowledge-search.ts, added in tool-selection.ts with a
+ * per-run limit), besides the planning lookup and tool-error grounding.
  *
  * Only list names that are actually present in the live MCP catalog —
  * ALWAYS_ON_TOOLS is filtered against it in agent.ts, so a stale name here
@@ -98,6 +99,8 @@ export interface PromptOptions {
   memory?: boolean;
   /** recall_objects (object-ledger.ts) is in the tool set. */
   recall?: boolean;
+  /** search_knowledge (knowledge-search.ts) is in the tool set. */
+  knowledgeSearch?: boolean;
   launchMode?: boolean;
   publishEnabled?: boolean;
   segmentMode?: boolean;
@@ -112,6 +115,7 @@ export function promptOptionsFor(
     toolDiscovery: 'find_tools' in tools,
     memory: 'remember_fact' in tools,
     recall: 'recall_objects' in tools,
+    knowledgeSearch: 'search_knowledge' in tools,
     launchMode: modes.launchMode === true,
     publishEnabled: modes.publishEnabled === true,
     segmentMode: modes.segmentMode === true,
@@ -161,7 +165,9 @@ export function systemPrompt(opts: PromptOptions = {}): string {
           '- When you confirm a stable identifier that later runs will need (which sandbox is production, a Launch property id, the repo tags live in, a merge policy id), save it with remember_fact. Only save identifiers you verified with a tool, never credentials, personal data or one-off results. If a fact from memory turns out to be wrong, correct it with remember_fact.',
         ]
       : []),
-    '- You have no knowledge-search tool. Knowledge-base excerpts, when any were found, are provided with the request; a tool error may also carry knowledge-base findings in its retry history (raggedBefore). Ground your actions in those, and when your answer relies on them, name the source titles you used.',
+    opts.knowledgeSearch
+      ? '- Knowledge-base excerpts, when any were found, are provided with the request, and a tool error may carry more in its retry history (raggedBefore). When you need documented behaviour, constraints, required fields or how-to steps those do not cover — especially before a write whose correct arguments you are unsure of — call search_knowledge with one specific query. Its searches are limited per run, so do not repeat or loosely vary a query. When your answer relies on knowledge-base results, name the source titles; when the knowledge base has nothing on a point, you may answer from general Adobe knowledge, but say that part is not from the knowledge base.'
+      : '- You have no knowledge-search tool. Knowledge-base excerpts, when any were found, are provided with the request; a tool error may also carry knowledge-base findings in its retry history (raggedBefore). Ground your actions in those, and when your answer relies on them, name the source titles you used. Where they do not cover something, you may answer from general Adobe knowledge, but say that part is not from the knowledge base.',
     '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
     // TASK 4: destructive-scope rule. The human confirmation itself is
     // enforced in code (agent.ts toolApproval) — this keeps the model from

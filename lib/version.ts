@@ -37,6 +37,7 @@ export function promptVersion(opts: PromptOptions = {}): string {
       toolDiscovery: opts.toolDiscovery ?? false,
       memory: opts.memory ?? false,
       recall: opts.recall ?? false,
+      knowledgeSearch: opts.knowledgeSearch ?? false,
       launchMode: opts.launchMode ?? false,
       publishEnabled: opts.publishEnabled ?? false,
       segmentMode: opts.segmentMode ?? false,

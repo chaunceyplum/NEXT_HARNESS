@@ -548,7 +548,7 @@ describe('runAgent plan-first', () => {
 });
 
 describe('runAgent knowledge retrieval', () => {
-  it('never offers the model a knowledge-search tool, directly or through call_tool', async () => {
+  it('never offers the model the raw MCP knowledge tool, directly or through call_tool', async () => {
     script = [
       { toolCall: { toolName: 'call_tool', input: { tool_name: 'search_adobe_knowledge', arguments: { query: 'merge policy' } } } },
       { text: 'no search' },
@@ -557,6 +557,27 @@ describe('runAgent knowledge retrieval', () => {
     expect((calls[0].tools ?? []).map((t) => t.name)).not.toContain('search_adobe_knowledge');
     expect(result.steps[0].toolResults[0].error).toMatch(/not available on this run/);
     expect(executed).toEqual([]);
+  });
+
+  it('offers search_knowledge, which searches the knowledge base through the MCP tool, and says so in the prompt', async () => {
+    script = [{ toolCall: { toolName: 'search_knowledge', input: { query: 'merge policy' } } }, { text: 'done' }];
+    const result = await runAgent({ userInput: 'explain merge policies', modelKey: 'test:plain' });
+    expect((calls[0].tools ?? []).map((t) => t.name)).toContain('search_knowledge');
+    expect(JSON.stringify(calls[0].prompt[0])).toContain('call search_knowledge');
+    expect(executed).toEqual([{ name: 'search_adobe_knowledge', input: { query: 'merge policy' } }]);
+    expect(result.steps[0].toolResults[0].output).toMatchObject({ search: '1 of 4' });
+  });
+
+  it('drops search_knowledge (and its prompt rule) with KNOWLEDGE_SEARCHES_PER_RUN=0', async () => {
+    vi.stubEnv('KNOWLEDGE_SEARCHES_PER_RUN', '0');
+    try {
+      script = [{ text: 'done' }];
+      await runAgent({ userInput: 'explain merge policies', modelKey: 'test:plain' });
+      expect((calls[0].tools ?? []).map((t) => t.name)).not.toContain('search_knowledge');
+      expect(JSON.stringify(calls[0].prompt[0])).toContain('You have no knowledge-search tool');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('hands the planning-stage excerpts to the planner and the executor', async () => {

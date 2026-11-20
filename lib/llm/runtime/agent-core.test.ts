@@ -76,9 +76,21 @@ describe('systemPrompt recall_objects rule', () => {
       toolDiscovery: true,
       memory: false,
       recall: true,
+      knowledgeSearch: false,
       launchMode: false,
       publishEnabled: false,
       segmentMode: true,
     });
+  });
+});
+
+describe('systemPrompt knowledge rule', () => {
+  it('tells the model to search when search_knowledge is present, and allows marked general knowledge either way', () => {
+    const withSearch = systemPrompt({ knowledgeSearch: true });
+    expect(withSearch).toMatch(/call search_knowledge with one specific query/);
+    expect(withSearch).not.toMatch(/You have no knowledge-search tool/);
+    const without = systemPrompt({});
+    expect(without).toMatch(/You have no knowledge-search tool/);
+    for (const p of [withSearch, without]) expect(p).toMatch(/say that part is not from the knowledge base/);
   });
 });

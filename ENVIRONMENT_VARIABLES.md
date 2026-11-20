@@ -301,6 +301,19 @@ a list call or guess an id. Compressed results also name the ids they held.
 On other models the 4 most recent tool messages stay at full size (was 2);
 older results above 500 chars are compressed in batches of 4.
 
+## Knowledge search (`lib/llm/tools/knowledge-search.ts`)
+
+Besides the one up-front planning lookup and tool-error grounding, the model
+can search the knowledge base itself with `search_knowledge`, a few times
+per run. Results go through the same wrapper as before (capped at 4,000
+chars, weak-retrieval hint, sampled by the RAG judge); a repeated query
+returns the stored result without using a search. The raw MCP knowledge
+tools are still never handed to the model.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KNOWLEDGE_SEARCHES_PER_RUN` | `4` | Searches per run (per worker in an orchestrated run). `0` removes the tool and restores planning-only retrieval. Max 20. |
+
 ## Tool call timeouts (`lib/fetch-timeout.ts`)
 
 Every outbound request in the tool path has a deadline. A timeout surfaces

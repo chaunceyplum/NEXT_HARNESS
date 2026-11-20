@@ -9,6 +9,7 @@ import {
   type RagJudgmentSink,
 } from '../tools/tool-catalog';
 import { buildDiscoveryTools } from '../tools/tool-discovery';
+import { KNOWLEDGE_SEARCH_TOOL, KNOWLEDGE_SOURCE_TOOL, knowledgeSearchesPerRun, knowledgeSearchTool } from '../tools/knowledge-search';
 import { shortlistTools } from '../tools/tool-retrieval';
 import { ALWAYS_ON_TOOLS, stage } from './agent-core';
 import { applyToolPolicy, type PolicyMode } from '../tools/tool-policy';
@@ -81,8 +82,16 @@ export async function selectLiveTools(
       toolGate: domains.toolGate,
     })
   );
+  // The model's own, rate-limited knowledge search (knowledge-search.ts),
+  // over the policy-wrapped MCP tool so results stay capped and judged.
+  // Taken before the raw knowledge tools are hidden below.
+  const searchLimit = knowledgeSearchesPerRun();
+  const knowledgeSource = callable[KNOWLEDGE_SOURCE_TOOL];
+  const searchTool = searchLimit > 0 && knowledgeSource ? knowledgeSearchTool(knowledgeSource, searchLimit) : undefined;
+
   // Built over the whole catalog so each tool's error grounding can still
-  // reach the knowledge base, then hidden so call_tool can't run them either.
+  // reach the knowledge base, then hidden so call_tool can't run them either
+  // (the model searches through search_knowledge, with its per-run limit).
   for (const name of Object.keys(callable)) {
     if (isKnowledgeTool(name)) delete callable[name];
   }
@@ -93,6 +102,7 @@ export async function selectLiveTools(
   );
   // TASK 6: discovery over everything the policy allows (see tool-discovery.ts)
   Object.assign(tools, buildDiscoveryTools(catalog, callable, new Set(toolsConsidered)));
+  if (searchTool) tools[KNOWLEDGE_SEARCH_TOOL] = searchTool;
 
   return { tools, toolsConsidered };
 }

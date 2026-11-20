@@ -122,8 +122,8 @@ function normaliseIds(ids: Record<string, string> | undefined): Record<string, s
 /** Tools a worker is never given, whatever its step (Requirement 4.3). */
 const EXCLUDED_WORKER_TOOLS = new Set(['remember_fact', 'update_plan', 'revise_plan']);
 
-/** Always kept (when present in the run's tool set) so a worker can discover and call tools it wasn't handed directly. */
-const WORKER_KEEP_TOOLS = new Set(['find_tools', 'call_tool']);
+/** Always kept (when present in the run's tool set) so a worker can discover and call tools it wasn't handed directly, and search the knowledge base. */
+const WORKER_KEEP_TOOLS = new Set(['find_tools', 'call_tool', 'search_knowledge']);
 
 /** The PLATFORM_GROUPS group names a tool belongs to (usually one; some tools match none). */
 function platformsOf(toolName: string): string[] {
