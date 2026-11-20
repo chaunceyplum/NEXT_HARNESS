@@ -19,6 +19,7 @@ import type { RagJudgmentSink, RagJudgmentEntry } from '../tools/tool-catalog';
 import type { RouteDecision } from '../models/model-router';
 import type { AttrValue, SpanRef } from '../../tracing';
 import type { ToolCallGate } from '../tools/tool-policy';
+import type { ObjectLedger } from '../tools/object-ledger';
 import { domainPromptBlocks } from '../domains';
 
 /**
@@ -86,9 +87,38 @@ function getEnvironmentContext(): string {
  *   runs about segments, audiences or PQL. Defaults false, so every other
  *   run's prompt and fingerprint are unchanged.
  */
-export function systemPrompt(
-  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean } = {}
-): string {
+/**
+ * Everything the system prompt varies on. The tool flags (toolDiscovery,
+ * memory, recall) say whether a tool is in the run's tool set, so a rule is
+ * only included when the tool it names exists — build them with
+ * promptOptionsFor() rather than by hand.
+ */
+export interface PromptOptions {
+  toolDiscovery?: boolean;
+  memory?: boolean;
+  /** recall_objects (object-ledger.ts) is in the tool set. */
+  recall?: boolean;
+  launchMode?: boolean;
+  publishEnabled?: boolean;
+  segmentMode?: boolean;
+}
+
+/** The prompt flags for a tool set plus the run's domain modes. One source for the loop and for promptVersion. */
+export function promptOptionsFor(
+  tools: ToolSet,
+  modes: { launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean }
+): PromptOptions {
+  return {
+    toolDiscovery: 'find_tools' in tools,
+    memory: 'remember_fact' in tools,
+    recall: 'recall_objects' in tools,
+    launchMode: modes.launchMode === true,
+    publishEnabled: modes.publishEnabled === true,
+    segmentMode: modes.segmentMode === true,
+  };
+}
+
+export function systemPrompt(opts: PromptOptions = {}): string {
   const envCtx = getEnvironmentContext();
 
   const lines = [
@@ -120,6 +150,11 @@ export function systemPrompt(
     '- Always prefer the narrowest tool that satisfies the request. Do not call broad or unrelated tools "just in case" — the tools you see were picked for this request, so trust that they are the ones worth considering.',
     ...(opts.toolDiscovery
       ? ['- If a step needs a tool that is not in your tool list, call find_tools with a short description of the capability, then run the match with call_tool. Only do this for a concrete gap — not to browse the catalog.']
+      : []),
+    ...(opts.recall
+      ? [
+          '- Ids and names that earlier tool results showed stay available through recall_objects, even after those results are compressed or cleared from your context. When you need one again, call recall_objects instead of repeating the list call, and never reconstruct or guess an id from memory.',
+        ]
       : []),
     ...(opts.memory
       ? [
@@ -275,6 +310,14 @@ export interface LoopContext {
    * the SAME instance to every worker.
    */
   toolGate?: ToolCallGate;
+  /**
+   * The run's object ledger (object-ledger.ts): every id a tool result showed.
+   * Already wired into `tools` (results are recorded as they come back, and
+   * recall_objects reads it); carried here so the coordinator can hand each
+   * worker's dependants the objects that worker saw. Unset when the ledger is
+   * off (OBJECT_LEDGER=false).
+   */
+  objectLedger?: ObjectLedger;
   /** Base attributes for the run trace span. */
   baseTracerAttrs: Record<string, AttrValue>;
   /**

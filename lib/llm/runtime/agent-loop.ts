@@ -3,7 +3,7 @@
 import { streamText, stepCountIs, type ModelMessage } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel } from '../models/model-registry';
 import { effectiveToolCall } from '../tools/tool-discovery';
-import { stage, type LoopContext, type LoopResult } from './agent-core';
+import { promptOptionsFor, stage, type LoopContext, type LoopResult } from './agent-core';
 import { classifyProviderFailure } from '../models/model-health';
 import { classifyTool } from '../tools/tool-policy';
 import { budgetFinalNote, RunBudgetTracker, type BudgetStopReason } from './run-budget';
@@ -122,7 +122,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled, segmentMode === true),
+        instructions: buildSystemMessage(resolvedModelKey, promptOptionsFor(tools, { launchMode, publishEnabled, segmentMode })),
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
@@ -175,7 +175,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.
-          const compressedMessages = compressOldToolMessages(messages, steps.length);
+          const compressedMessages = compressOldToolMessages(messages, steps.length, { recall: 'recall_objects' in tools });
 
           // TASK 3: force text-only on the final allowed step. Phase 2: a
           // worker instead forces its wrap-up tool (report_result) on that

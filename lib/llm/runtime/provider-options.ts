@@ -5,7 +5,7 @@
 
 import { type ModelMessage, type SystemModelMessage } from 'ai';
 import { getModelEntry } from '../models/model-registry';
-import { systemPrompt } from './agent-core';
+import { systemPrompt, type PromptOptions } from './agent-core';
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
 
@@ -17,18 +17,11 @@ import { systemPrompt } from './agent-core';
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-export function buildSystemMessage(
-  modelKey: string,
-  toolDiscovery: boolean,
-  memory = false,
-  launchMode = false,
-  publishEnabled = false,
-  segmentMode = false
-): SystemModelMessage {
+export function buildSystemMessage(modelKey: string, promptOptions: PromptOptions): SystemModelMessage {
   const providerOptions = cacheMarker(modelKey);
   return {
     role: 'system',
-    content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled, segmentMode }),
+    content: systemPrompt(promptOptions),
     ...(providerOptions ? { providerOptions } : {}),
   };
 }
@@ -103,10 +96,29 @@ export function isHistoryBound(modelKey: string): boolean {
   return Boolean(entry && HISTORY_BOUND_MODEL_RE.test(entry.modelId));
 }
 
-/** Server-side clearing of old tool results starts once a request's input passes this many tokens. */
-const CONTEXT_EDIT_TRIGGER_TOKENS = 30_000;
-/** Most recent tool uses kept intact by server-side context editing. */
-const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
+/**
+ * Server-side clearing of old tool results starts once a request's input
+ * passes this many tokens (CONTEXT_EDIT_TRIGGER_TOKENS, default 100,000).
+ *
+ * It was 30,000, which the system prompt, ~27 tool schemas and a domain
+ * block (the PQL reference alone is ~3K tokens) nearly fill before any
+ * result arrives — so clearing started after a step or two and the model
+ * lost the lists it had just read. 100K stays well inside every current
+ * Claude context window while letting a normal run keep its working set.
+ */
+function contextEditTriggerTokens(): number {
+  const n = Number(process.env.CONTEXT_EDIT_TRIGGER_TOKENS);
+  return Number.isInteger(n) && n >= 10_000 ? n : 100_000;
+}
+
+/** Most recent tool uses kept intact by server-side context editing (CONTEXT_EDIT_KEEP_TOOL_USES, default 6, was 3). */
+export function contextEditKeepToolUses(): number {
+  const n = Number(process.env.CONTEXT_EDIT_KEEP_TOOL_USES);
+  return Number.isInteger(n) && n >= 1 ? n : 6;
+}
+
+/** Input size at which the server may have cleared old results: past it, loop detection forgives re-fetches (run-budget.ts). */
+export { contextEditTriggerTokens };
 
 /**
  * Server-side context editing (clear_tool_uses) — the API clears old tool
@@ -117,10 +129,11 @@ const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
 export function contextEditingProviderOptions(modelKey: string): ProviderOptions | undefined {
   const entry = tryGetModelEntry(modelKey);
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
-  const trigger = { type: 'input_tokens', value: CONTEXT_EDIT_TRIGGER_TOKENS };
-  const keep = { type: 'tool_uses', value: CONTEXT_EDIT_KEEP_TOOL_USES };
-  // find_tools results carry the schemas call_tool needs — keep them.
-  const excluded = ['find_tools'];
+  const trigger = { type: 'input_tokens', value: contextEditTriggerTokens() };
+  const keep = { type: 'tool_uses', value: contextEditKeepToolUses() };
+  // find_tools results carry the schemas call_tool needs, and recall_objects
+  // results are the ids the model is about to act on — keep both.
+  const excluded = ['find_tools', 'recall_objects'];
   if (entry.provider === 'anthropic') {
     return {
       anthropic: {

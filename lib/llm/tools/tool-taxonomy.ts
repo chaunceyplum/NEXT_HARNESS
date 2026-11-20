@@ -23,6 +23,7 @@ export const EXACT_LEVELS: Record<string, ToolAccessLevel> = {
   policy_info: 'read',                     // synthetic (below)
   update_plan: 'read',                     // synthetic (planner.ts) — only updates in-memory plan state
   revise_plan: 'read',                     // synthetic (planner.ts)
+  recall_objects: 'read',                  // synthetic (object-ledger.ts) — reads the run's in-memory object ledger
 };
 
 export const DESTRUCTIVE_VERBS = new Set(['delete', 'abort', 'trash', 'purge']);

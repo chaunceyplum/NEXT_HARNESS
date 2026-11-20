@@ -29,6 +29,8 @@ import { promptVersion, toolsetVersion, appVersion } from '../../version';
 import { type RunAgentOptions } from './agent-options';
 import { selectLiveTools } from './tool-selection';
 import { rememberFactTool } from './step-trace';
+import { ObjectLedger, objectLedgerEnabled, recallObjectsTool, withObjectLedger } from '../tools/object-ledger';
+import { promptOptionsFor } from './agent-core';
 
 // ── Main agent loop ───────────────────────────────────────────────────────────
 
@@ -189,6 +191,15 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     }
   }
 
+  // Object ledger (object-ledger.ts): every id a tool result shows is kept
+  // for the whole run, outside the context that compression and server-side
+  // clearing shrink, and recall_objects reads it back. Both paths (live and
+  // eval) get it, so evals exercise what production runs do.
+  const objectLedger = objectLedgerEnabled() ? new ObjectLedger() : undefined;
+  if (objectLedger) {
+    tools = { ...withObjectLedger(tools, objectLedger), recall_objects: recallObjectsTool(objectLedger) };
+  }
+
   // Plan-and-execute (planner.ts): plan first, optionally have a person
   // approve it, then execute with update_plan / revise_plan available.
   // Requirement 2.6: a run that asks for orchestration needs a plan for the
@@ -279,11 +290,11 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
         return { type: decision.approved ? ('approved' as const) : ('denied' as const), reason: decision.reason };
       };
 
-  // Version fingerprints for this run (lib/version.ts). promptVersion matches
-  // how the prompt is actually built: live runs include the find_tools rule.
-  const toolDiscovery = 'find_tools' in tools;
+  // Version fingerprints for this run (lib/version.ts). promptVersion is built
+  // from the same flags the loop builds the prompt from (promptOptionsFor), so
+  // the fingerprint always matches the prompt the model actually got.
   const versions = {
-    prompt: promptVersion({ toolDiscovery, memory: 'remember_fact' in tools, launchMode, publishEnabled, segmentMode }),
+    prompt: promptVersion(promptOptionsFor(tools, { launchMode, publishEnabled, segmentMode })),
     toolset: toolsetVersion(
       Object.entries(tools).map(([name, t]) => ({ name, description: (t as { description?: string }).description }))
     ),
@@ -320,6 +331,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       // embedded in `tools`; carried on the ctx so the coordinator hands the
       // same instance to every worker.
       ...(toolGate ? { toolGate } : {}),
+      ...(objectLedger ? { objectLedger } : {}),
       baseTracerAttrs,
       ...(opts.thinkingBudget !== undefined ? { thinkingBudget: opts.thinkingBudget } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),

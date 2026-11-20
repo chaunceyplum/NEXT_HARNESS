@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { systemPrompt } from './agent-core';
+import { promptOptionsFor, systemPrompt } from './agent-core';
 
 describe('systemPrompt Launch grounding', () => {
   it('omits the Launch object model from non-Launch runs so the cached prefix stays lean', () => {
@@ -61,5 +61,24 @@ describe('systemPrompt publish grounding (conditional)', () => {
     expect(publish).toMatch(/refused in code/i);
     expect(publish).toMatch(/NEVER use action "approve" or "publish"/);
     expect(publish).not.toMatch(/submit → approve → publish\) to the named/);
+  });
+});
+
+describe('systemPrompt recall_objects rule', () => {
+  it('is included only when recall_objects is in the tool set', () => {
+    expect(systemPrompt({ recall: true })).toMatch(/call recall_objects instead of repeating the list call/);
+    expect(systemPrompt({})).not.toMatch(/recall_objects/);
+  });
+
+  it('promptOptionsFor derives every tool flag from the tool set', () => {
+    const t = {} as never;
+    expect(promptOptionsFor({ find_tools: t, recall_objects: t }, { segmentMode: true })).toEqual({
+      toolDiscovery: true,
+      memory: false,
+      recall: true,
+      launchMode: false,
+      publishEnabled: false,
+      segmentMode: true,
+    });
   });
 });

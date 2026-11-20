@@ -307,15 +307,16 @@ describe('runAgent loop shape', () => {
   it('on other models, compresses old tool results in batches and forces text on the last step', async () => {
     // Different arguments each time, so loop detection doesn't end the run early.
     const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
-    script = [...['a', 'b', 'c', 'd', 'e', 'f'].map(listPage), { text: 'final' }];
-    await runAgent({ userInput: 'list segments six times', modelKey: 'test:plain', maxSteps: 7 });
+    script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(listPage), { text: 'final' }];
+    await runAgent({ userInput: 'list segments eight times', modelKey: 'test:plain', maxSteps: 9 });
 
     const last = calls.at(-1)!;
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
     expect(calls[0].providerOptions?.anthropic).toBeUndefined();
-    // The history is rewritten only when a batch of 4 old results is
-    // compressed (at the 6th result), not once per step, so it stays cached.
+    // The 4 newest results stay intact, and the history is rewritten only
+    // when a batch of 4 older ones is compressed (at the 8th result), not
+    // once per step, so it stays cached.
     const rewrites = calls.slice(1).filter((c, i) => {
       const prev = withoutMarkers(calls[i].prompt);
       return JSON.stringify(withoutMarkers(c.prompt).slice(0, prev.length)) !== JSON.stringify(prev);

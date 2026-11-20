@@ -1,15 +1,18 @@
 /** Shrinks older tool results in the in-flight model context (TASK 2). */
 
 import { type ModelMessage } from 'ai';
+import { describeObjects, extractObjects } from '../tools/object-ledger';
 
 // ── TASK 2: prepareStep context compression ───────────────────────────────────
 
 /**
- * Steps older than this threshold have their tool results compressed to a
- * one-line summary. The current step and the one before it are kept at full
- * fidelity so the model can reason about what it just did.
+ * Tool messages older than the most recent RESULT_SUMMARY_THRESHOLD have their
+ * results compressed to a short summary. Raised from 2 to 4: with only two
+ * kept, a list read three steps earlier was already gone by the time the
+ * model acted on it. Results are now trimmed to size first (result-trim.ts)
+ * and compressed summaries keep their ids, so keeping four is affordable.
  */
-export const RESULT_SUMMARY_THRESHOLD = 2;
+export const RESULT_SUMMARY_THRESHOLD = 4;
 
 /**
  * Old results are compressed this many tool messages at a time. Compressing
@@ -38,9 +41,17 @@ const COMPRESS_BATCH = 4;
  */
 const COMPRESS_FLOOR_CHARS = 500;
 
+export interface CompressOptions {
+  /** recall_objects is in the tool set: point the model at it instead of a repeat call. */
+  recall?: boolean;
+  /** Called with the toolCallId of every result compressed (newly or again), so loop detection can forgive a re-fetch of it. */
+  onCompressed?: (toolCallId: string, toolName: string, input: unknown) => void;
+}
+
 export function compressOldToolMessages(
   messages: readonly ModelMessage[],
-  completedSteps: number
+  completedSteps: number,
+  opts: CompressOptions = {}
 ): ModelMessage[] | undefined {
   if (completedSteps < RESULT_SUMMARY_THRESHOLD) return undefined;
 
@@ -54,6 +65,12 @@ export function compressOldToolMessages(
 
   const keepFrom = toolMsgIndexes[compressible];
   let changed = false;
+  // Each compressed result's call input, so onCompressed can report the exact call.
+  const inputs = new Map<string, unknown>();
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !Array.isArray(m.content)) continue;
+    for (const part of m.content) if (part.type === 'tool-call') inputs.set(part.toolCallId, part.input);
+  }
 
   const rewritten = messages.map((m, i) => {
     if (m.role !== 'tool' || i >= keepFrom) return m;
@@ -68,11 +85,22 @@ export function compressOldToolMessages(
       if (serialized.length <= COMPRESS_FLOOR_CHARS) return part;
 
       changed = true;
+      opts.onCompressed?.(part.toolCallId, part.toolName, inputs.get(part.toolCallId));
+      const value = out.type === 'json' ? out.value : parseMaybe(serialized);
+      const objects = describeObjects(extractObjects(value, part.toolName));
       return {
         ...part,
         output: {
           type: 'text' as const,
-          value: `[compressed to save context] ${part.toolName} returned ${serialized.length} chars. ${summariseOutputHint(out.type === 'json' ? out.value : serialized)}`,
+          value: [
+            `[compressed to save context] ${part.toolName} returned ${serialized.length} chars.`,
+            objects,
+            opts.recall
+              ? 'Every id and name it showed is still available: call recall_objects (optionally with a query) rather than repeating this call.'
+              : summariseOutputHint(value),
+          ]
+            .filter(Boolean)
+            .join(' '),
         },
       };
     });
@@ -81,6 +109,15 @@ export function compressOldToolMessages(
   });
 
   return changed ? (rewritten as ModelMessage[]) : undefined;
+}
+
+/** A text output that is JSON (e.g. a stringified result) parsed back, so its objects can be read. */
+function parseMaybe(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 /** One-line hint about a compressed output so the model still has a signal. */

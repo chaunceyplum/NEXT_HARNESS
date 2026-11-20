@@ -28,6 +28,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runAgent } from '@/lib/llm/runtime/agent';
+import { objectLedgerEnabled } from '@/lib/llm/tools/object-ledger';
 import { promptVersion } from '@/lib/version';
 import { LOCAL_TOOL_DEFINITIONS } from '@/lib/llm/tools/local-tools';
 import { getMcpToolCatalog, type McpToolDefinition } from '@/lib/llm/tools/tool-catalog';
@@ -88,8 +89,9 @@ const judgeKey = judgeModelKey();
 const judgeFallbackKey = judgeFallbackModelKey(judgeKey);
 const trials = trialsPerFixture();
 // Shared helper (lib/version.ts) so this matches the promptVersion runAgent
-// records — the eval path builds the prompt without the tool-discovery rule.
-const promptVersionHash = promptVersion({ toolDiscovery: false });
+// records — the eval path builds the prompt without the tool-discovery rule,
+// but with the recall_objects rule (the object ledger wraps scripted tools too).
+const promptVersionHash = promptVersion({ toolDiscovery: false, recall: objectLedgerEnabled() });
 const pre = await preflight('agent eval', [
   { role: 'model under test', key: modelKey, source: modelSource('model') },
   { role: 'judge', key: judgeKey, source: modelSource('judge') },

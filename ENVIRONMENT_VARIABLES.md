@@ -284,6 +284,23 @@ items were left out. Each trimmed result carries a `_trimmed` note.
 | `TOOL_RESULT_MAX_CHARS` | `10000` | Size a trimmed result must fit. Min 1000. |
 | `TOOL_RESULT_INDEX_MAX_CHARS` | `20000` | Larger ceiling for an identity-only index of a big list, so every id survives. Never below `TOOL_RESULT_MAX_CHARS`. |
 
+## Context retention (`lib/llm/tools/object-ledger.ts`, `lib/llm/runtime/context-compression.ts`, `lib/llm/runtime/provider-options.ts`)
+
+Older tool results leave the model's context as a run goes on. The object
+ledger keeps the ids they carried: every object a tool result shows (its
+`$id` / `id`, name or title, kind and sandbox) is recorded for the run, and
+the `recall_objects` tool reads it back, so the model never needs to repeat
+a list call or guess an id. Compressed results also name the ids they held.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OBJECT_LEDGER` | `true` | `false` turns the ledger and `recall_objects` off. |
+| `CONTEXT_EDIT_TRIGGER_TOKENS` | `100000` | History-bound models (Opus/Sonnet/Haiku 5.5): input size at which the API starts clearing old tool results server-side. Was 30000. Min 10000. |
+| `CONTEXT_EDIT_KEEP_TOOL_USES` | `6` | Most recent tool uses that server-side clearing keeps. Was 3. |
+
+On other models the 4 most recent tool messages stay at full size (was 2);
+older results above 500 chars are compressed in batches of 4.
+
 ## Tool call timeouts (`lib/fetch-timeout.ts`)
 
 Every outbound request in the tool path has a deadline. A timeout surfaces
