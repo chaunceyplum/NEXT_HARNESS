@@ -18,7 +18,7 @@
  */
 
 import type { ToolSet } from 'ai';
-import { classifyTool } from '../tools/tool-policy';
+import { classifyTool } from '../tools/tool-taxonomy';
 
 // ── Detection ─────────────────────────────────────────────────────────────────
 

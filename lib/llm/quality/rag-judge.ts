@@ -18,6 +18,9 @@
 import { generateObject } from 'ai';
 import { z } from 'zod';
 import { resolveModel, getDefaultModelKey, getModelEntry, getModelRegistry } from '../models/model-registry';
+import type { RagJudgment } from '../../types';
+
+export type { RagJudgment };
 
 /**
  * Tools where "judge the retrieval" is a coherent question — a query goes
@@ -27,17 +30,6 @@ import { resolveModel, getDefaultModelKey, getModelEntry, getModelRegistry } fro
  * tool-catalog.ts if the live catalog's knowledge-search tools change.
  */
 export const JUDGEABLE_RAG_TOOLS = new Set(['search_adobe_knowledge', 'search_all_agents']);
-
-export interface RagJudgment {
-  /** 0 (irrelevant) to 5 (squarely on-topic). */
-  relevance: number;
-  /** Whether the results contain enough to actually answer the query, independent of relevance. */
-  sufficient: boolean;
-  verdict: 'good' | 'weak' | 'poor';
-  rationale: string;
-  /** Model registry key the judgment was scored with, so a judgment can be discounted if that model is known-unreliable. */
-  judgeModel: string;
-}
 
 const ragJudgmentSchema = z.object({
   relevance: z

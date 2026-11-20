@@ -7,16 +7,18 @@ app/                      Next.js App Router
   api/build/approve/      POST: approve or deny a pending tool call / plan
   api/runs/[id]/          Run record, events (reconnect), cancel, resume, feedback
   api/admin/kill-switch/  Trip / reset the kill switch
-  api/evals, metrics, audit, memory, models
+  api/evals, metrics, audit, memory, models, tools, lineage (which runs touched an object)
   results/, evals/, metrics/, memory/   UI pages
 components/               React components (AgentTrace, PlanView, KillSwitch, ...)
 lib/
   start-run.ts            Starts a run as a job: kill switch, agent, events, checkpoints, critic, judge
   run-jobs.ts             Detached jobs and event buffers (in-process)
-  run-store.ts            Run records in harness_agent_runs via execute_sql
+  run-lifecycle.ts        Run statuses and allowed moves: running ⇄ awaiting_approval → completed | failed | cancelled | interrupted
+  run-store.ts            Run records in harness_agent_runs via execute_sql; findObjectHistory over their lineage
   kill-switch.ts, audit-log.ts, memory-store.ts, online-judge.ts, tracing.ts
   mcp-client.ts, mcp-sql.ts   MCP transport and SQL escaping
-  types.ts                Shared DTOs: RunRequest, RunStreamEvent, RunRecord, ...
+  types/                  Shared types, one module per concept (run, stream, agent, worker, plan,
+                          quality, model, eval, api); types only. …Record = stored, …Summary = list row
   llm/
     runtime/              The agent loop and orchestration
       agent.ts            runAgent = prepareRun + executeLoop; the public entry point
@@ -34,6 +36,9 @@ lib/
       run-budget.ts       Token / cost / time budgets and loop detection
       orchestration-config.ts  ORCHESTRATION / MAX_WORKERS / ... env readers
     tools/                The MCP tool layer
+      tool-taxonomy.ts    Every hand-kept tool fact: access level, outbound/credential/SQL sets, platform groups, scope
+      tool-registry.ts    describeTool(name): one profile per tool (also GET /api/tools)
+      object-refs.ts      Lineage: which Adobe objects a run's executed calls created / updated / deleted
       tool-catalog.ts     MCP catalog, PLATFORM_GROUPS, AI SDK tool wrappers, retries
       tool-retrieval.ts, tool-discovery.ts, tool-policy.ts, tool-call-cache.ts
       approval-policy.ts, approvals.ts   Which calls need a person, and the waiting room
@@ -41,8 +46,9 @@ lib/
     models/               model-registry.ts, model-router.ts ("auto" routing), model-health.ts, pricing.ts, embeddings.ts
     quality/              answer-critic.ts, rag-judge.ts, guardrails.ts, commit-validation.ts
     domains/              Adobe domain knowledge, kept apart from the generic agent machinery
-      domain-pack.ts      DomainPack interface: detect, promptContext, alwaysOnTools
-      index.ts            DOMAIN_PACKS registry; the runtime asks it instead of naming a domain
+      domain-pack.ts      DomainPack interface: detect, promptContext, alwaysOnTools, plus optional
+                          startSession (gate, seeded plan, preamble, approvals), checkToolCall, localTools
+      index.ts            DOMAIN_PACKS registry. runtime/ and tools/ reach domains only through it
       launch/             Launch (Reactor): pack, prompt context, brief parsing, plan template, examples, validation gate
       segments/           Audiences: pack, PQL reference, glossary, profile catalog, field check
 evals/                    vitest eval suites, fixtures, baseline.json
@@ -51,3 +57,10 @@ scripts/                  Eval baseline check, run-to-fixture
 ```
 
 Unit tests live next to the module they cover as `*.test.ts`.
+
+Layer rules (enforced by `npm run lint`, see eslint.config.mjs): `models/` imports no
+other layer; `tools/` never imports `runtime/`; `quality/` uses only the pure
+tool taxonomy; `domains/` packs never import each other and use only the
+planner from `runtime/`; everything outside `domains/` reaches a domain only
+through `lib/llm/domains` (the registry). Type-only imports are allowed, and
+`import/no-cycle` forbids import cycles.

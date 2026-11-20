@@ -35,3 +35,27 @@ describe('domain pack registry', () => {
     expect(systemPrompt({})).not.toContain(segmentDomainContext());
   });
 });
+
+describe('domain hooks', () => {
+  it('exposes domain-owned local tools in registry order', async () => {
+    const { DOMAIN_LOCAL_TOOLS } = await import('.');
+    expect(DOMAIN_LOCAL_TOOLS.map((t) => t.definition.name)).toEqual(['aep_find_profile_fields']);
+  });
+
+  it('keeps aep_find_profile_fields first in the local tool catalog', async () => {
+    const { LOCAL_TOOL_DEFINITIONS } = await import('../tools/local-tools');
+    expect(LOCAL_TOOL_DEFINITIONS.map((d) => d.name)).toEqual(['aep_find_profile_fields', 'github_read_file', 'github_list_directory']);
+  });
+
+  it('runs no pre-call check for a tool no domain cares about', async () => {
+    const { checkDomainToolCall } = await import('.');
+    await expect(checkDomainToolCall('adobe_list_datasets', {})).resolves.toBeUndefined();
+  });
+
+  it('starts no session when no pack with a session is active', async () => {
+    const { startDomainSessions } = await import('.');
+    const input = { userInput: 'build an audience', live: false, publishEnabled: false, dryRun: false, shadow: false };
+    expect(await startDomainSessions({ segments: true }, input)).toEqual({});
+    expect(await startDomainSessions({ launch: true }, input)).toHaveProperty('seedPlan');
+  });
+});

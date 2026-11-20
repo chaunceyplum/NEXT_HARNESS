@@ -13,6 +13,9 @@
 
 import { callMcpTool, listMcpTools } from '@/lib/mcp-client';
 import { classifyTool } from './tool-policy';
+import { isAdobeScoped, isAdobeToolsOnlyEnabled, RAG_TOOLS } from './tool-taxonomy';
+
+export { isAdobeScoped, isKnowledgeTool, PLATFORM_GROUPS, toolMatchesPlatforms } from './tool-taxonomy';
 import { withRetrievalHint } from './retrieval-hints';
 import {
   cachedRead,
@@ -23,8 +26,8 @@ import {
 } from './tool-call-cache';
 import { executeLocalTool, isLocalTool, LOCAL_TOOL_DEFINITIONS } from './local-tools';
 import { validateBeforeCommit } from '../quality/commit-validation';
-import { validateBeforeSegmentWrite } from '../domains/segments/validation';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import { checkDomainToolCall } from '../domains';
+import type { ToolCallGate } from './tool-policy';
 import { judgeRagResult, JUDGEABLE_RAG_TOOLS, shouldJudgeLiveResult, type RagJudgment } from '../quality/rag-judge';
 import { jsonSchema, tool, type ToolSet } from 'ai';
 
@@ -32,79 +35,6 @@ export interface McpToolDefinition {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
-}
-
-/**
- * Non-Adobe integrations the harness currently has no use for. As of the
- * last live tools/list check (Aug 2026), the connected MCP server doesn't
- * actually expose any aws_/databricks_/snowflake_-prefixed tools or the
- * named search/pattern tools below — so today this filter is a no-op
- * defensive guard, not an active exclusion. It's kept (rather than deleted)
- * so that if a future server redeploy brings AWS/data-eng tools back into
- * the catalog, they stay excluded by default instead of silently competing
- * for shortlist slots against the Adobe tools every request here actually
- * needs — verify this list against a fresh tools/list before relying on it
- * to hide anything.
- *
- * Filtered out of the catalog entirely (not just excluded from the
- * shortlist) so this is enforced regardless of embedding/keyword scoring,
- * and so an always-on tool from one of these categories would silently
- * become unavailable too — agent.ts already does
- * `ALWAYS_ON_TOOLS.filter((name) => catalogByName.has(name))`.
- *
- * Set ADOBE_TOOLS_ONLY=false to disable this filter without a code change.
- */
-const NON_ADOBE_TOOL_PREFIXES = ['aws_', 'databricks_', 'snowflake_'];
-const NON_ADOBE_TOOL_NAMES = new Set([
-  'search_aws_knowledge',
-  'search_data_eng_knowledge',
-  'search_braze_knowledge',
-  'search_zeta_knowledge',
-  'search_all_agents',
-  'aws_architecture_pattern',
-  'aws_recommend_services',
-  'data_sql_pattern',
-  'data_pipeline_pattern',
-  'data_compare_platforms',
-]);
-
-function isAdobeToolsOnlyEnabled(): boolean {
-  return process.env.ADOBE_TOOLS_ONLY !== 'false';
-}
-
-export function isAdobeScoped(name: string): boolean {
-  if (NON_ADOBE_TOOL_NAMES.has(name)) return false;
-  return !NON_ADOBE_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
-
-/**
- * Platform groupings for UI-driven tool filtering. Each entry maps a display
- * label to an array of patterns: strings ending with '_' are prefix matches;
- * others are exact name matches. All groups are enabled by default.
- */
-export const PLATFORM_GROUPS: Record<string, string[]> = {
-  'AEP Core': ['adobe_', 'aep_find_profile_fields'],
-  'CJA': ['cja_'],
-  'Tags (Reactor)': ['reactor_'],
-  'Data Prep': ['dataprep_'],
-  'Sources': ['source_'],
-  'Destinations': ['destination_'],
-  'Flow Service': ['flow_'],
-  'Query Service': ['query_'],
-  'GitHub': ['github_', 'msb_github_'],
-  'Knowledge': ['search_adobe_knowledge', 'query_rag_db', 'knowledge_base_health'],
-};
-
-/** Returns true if `toolName` belongs to any of the named `platforms`. */
-export function toolMatchesPlatforms(toolName: string, platforms: string[]): boolean {
-  for (const platform of platforms) {
-    const patterns = PLATFORM_GROUPS[platform];
-    if (!patterns) continue;
-    for (const pattern of patterns) {
-      if (pattern.endsWith('_') ? toolName.startsWith(pattern) : toolName === pattern) return true;
-    }
-  }
-  return false;
 }
 
 let catalogPromise: Promise<McpToolDefinition[]> | null = null;
@@ -135,37 +65,17 @@ export async function getMcpToolCatalog(): Promise<McpToolDefinition[]> {
 
 /**
  * Local tools first (no network round-trip), then the MCP server — with the
- * pre-commit syntax check gating msb_github_commit_code, and the profile-field
- * check gating adobe_create_segment / adobe_update_segment (segment-validation.ts).
+ * pre-commit syntax check gating msb_github_commit_code, and every domain
+ * pack's pre-call check (lib/llm/domains; e.g. the profile-field check gating
+ * adobe_create_segment / adobe_update_segment).
  */
 async function callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
   if (isLocalTool(toolName)) {
     return executeLocalTool(toolName, args, signal);
   }
   await validateBeforeCommit(toolName, args);
-  await validateBeforeSegmentWrite(toolName, args, { signal });
+  await checkDomainToolCall(toolName, args, { signal });
   return callMcpTool(toolName, args, { signal });
-}
-
-/**
- * Knowledge-search tools used to ground a retry. Never wrapped in their own
- * retry logic (that would recurse) and never chosen as the RAG tool for
- * themselves. Verified present in the live MCP catalog, Aug 2026.
- */
-const RAG_TOOLS = new Set([
-  'search_adobe_knowledge',
-  'search_all_agents',
-  'query_rag_db',
-  'knowledge_base_health',
-]);
-
-/**
- * Whether `name` is a knowledge-search tool. These are never handed to the
- * model: retrieval happens only at the planning stage (planning-retrieval.ts)
- * and on tool errors (executeMcpToolWithRetry), not on the model's say-so.
- */
-export function isKnowledgeTool(name: string): boolean {
-  return RAG_TOOLS.has(name);
 }
 
 /**
@@ -498,13 +408,12 @@ export interface BuildAiToolsOptions {
    */
   ragJudgmentSink?: RagJudgmentSink;
   /**
-   * Phase 4: Launch-mode validation gate (launch-validation.ts). When present,
-   * each tool call is observed to build property state, and the library handoff
-   * (reactor_create_library / reactor_update_library) is validated and BLOCKED
-   * before it reaches the MCP server if a check fails. Omit (non-Launch runs)
-   * and this is a no-op.
+   * The run's domain gate (lib/llm/domains; Launch's validation gate). When
+   * present, each tool call is observed (Launch builds property state from
+   * results) and may be BLOCKED before it reaches the MCP server (Launch: a
+   * library handoff that fails validation). Omit and this is a no-op.
    */
-  launchGate?: LaunchValidationGate;
+  toolGate?: ToolCallGate;
 }
 
 export interface ExecuteMcpToolWithRetryOptions {
@@ -743,20 +652,20 @@ export function buildAiTools(defs: McpToolDefinition[], opts: BuildAiToolsOption
       inputSchema: jsonSchema(def.inputSchema as never),
       execute: async (input: unknown, { abortSignal }) => {
         const args = (input as Record<string, unknown>) ?? {};
-        // Phase 4: block the library handoff BEFORE the MCP write when the
-        // Launch validation gate is active and a check fails. Throwing here
-        // reuses the loop's tool-error feedback path (the model sees the
-        // reasons and retries) — see launch-validation.ts. No-op off Launch mode.
-        opts.launchGate?.gate(def.name, args);
+        // Block the call BEFORE the MCP write when the run's domain gate
+        // refuses it (Launch: a library handoff that fails validation).
+        // Throwing here reuses the loop's tool-error feedback path (the model
+        // sees the reasons and retries). No-op when the run has no gate.
+        opts.toolGate?.gate(def.name, args);
         const result = await executeMcpToolWithRetry(
           def.name,
           args,
           { maxRetries, availableNames, grounding, deduper, abortSignal, ragJudgmentSink: opts.ragJudgmentSink }
         );
-        // Observe the successful result so property state (installed
-        // extensions, known data elements) and created resources are available
-        // for a later handoff's reference check.
-        opts.launchGate?.observe(def.name, args, result);
+        // Let the gate observe the successful result (Launch: installed
+        // extensions, known data elements and created resources feed a later
+        // handoff's reference check).
+        opts.toolGate?.observe(def.name, args, result);
         return capToolResult(def.name, result);
       },
     });

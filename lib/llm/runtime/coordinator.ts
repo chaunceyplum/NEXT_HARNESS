@@ -34,7 +34,7 @@ import { z } from 'zod';
 import type { AgentRunResult } from './agent';
 import type { AgentStepTrace, ToolApprovalFn, ToolOutcome } from './agent-core';
 import type { ApprovalReason } from '../tools/approval-policy';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
 import { RunTracer, exportSpans, type AttrValue, type Span, type SpanRef } from '../../tracing';
 import { resolveModel } from '../models/model-registry';
@@ -156,7 +156,10 @@ export interface OrchestratorInput {
   /** Run limits, used both for the ledger and (sliced) for each worker's child budget. */
   budgetLimits: RunBudgetLimits;
   modelHealth: ModelHealthTracker;
-  launchGate?: LaunchValidationGate;
+  /** The run's domain tool gate, shared by every worker (Requirement 9.1). */
+  toolGate?: ToolCallGate;
+  /** Gated Launch run: each worker gets the Launch grounding too. */
+  launchMode?: boolean;
   /** Segment/audience run: each worker gets the segment grounding too. */
   segmentMode?: boolean;
   abortSignal?: AbortSignal;
@@ -220,7 +223,8 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
     modelHealth: input.modelHealth,
     tracerParent: coordinatorRef,
     ...(input.runId ? { runId: input.runId } : {}),
-    ...(input.launchGate ? { launchGate: input.launchGate } : {}),
+    ...(input.toolGate ? { toolGate: input.toolGate } : {}),
+    ...(input.launchMode ? { launchMode: true } : {}),
     ...(input.segmentMode ? { segmentMode: true } : {}),
     // Requirement 3.4: serialise the write calls themselves, not only the
     // workers whose declared step tool writes.

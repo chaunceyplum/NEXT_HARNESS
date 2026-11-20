@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { AgentStepDTO, RunStreamEvent, CritiqueInfo, ModelOption, PlanInfo, RouteInfo, RunVersions, TokenUsage } from '@/lib/types';
+import { StepRecord, RunStreamEvent, CritiqueRecord, ModelOption, PlanRecord, RouteRecord, RunVersions, TokenUsage } from '@/lib/types';
 import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import KillSwitch from '@/components/KillSwitch';
@@ -25,13 +25,13 @@ const PLATFORM_GROUPS = [
 interface RunState {
   runId: string;
   /** The run's plan, when it planned first. */
-  plan?: PlanInfo;
+  plan?: PlanRecord;
   planAwaitingApproval?: boolean;
   planSubmitting?: boolean;
-  critique?: CritiqueInfo;
+  critique?: CritiqueRecord;
   /** How an "auto" run picked its model. */
-  route?: RouteInfo;
-  steps: AgentStepDTO[];
+  route?: RouteRecord;
+  steps: StepRecord[];
   toolsConsidered: string[];
   finalText: string;
   /** TASK 1: assistant text accumulated from text_delta events while the run is live. */

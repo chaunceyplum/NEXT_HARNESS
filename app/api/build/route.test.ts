@@ -128,7 +128,7 @@ describe('POST /api/build as a job', () => {
     expect(audited).toContainEqual(expect.objectContaining({ type: 'run_start', actor: 'anonymous' }));
   });
 
-  it('stops only when cancelled, saving the run as failed with its steps', async () => {
+  it('stops only when cancelled, saving the run as cancelled with its steps', async () => {
     saved.length = 0;
     const res = await post();
     const [start] = await firstLines(res, 2);
@@ -137,7 +137,7 @@ describe('POST /api/build as a job', () => {
     await tick();
     const replay = (await (await events.GET(new Request('http://x'), params(start.runId))).text()).trim().split('\n').map((l) => JSON.parse(l));
     expect(replay.at(-1)).toMatchObject({ type: 'error', code: 'CANCELLED', error: expect.stringContaining('Stopped by alice.') });
-    expect(saved.at(-1)).toMatchObject({ status: 'failed', steps: 1 });
+    expect(saved.at(-1)).toMatchObject({ status: 'cancelled', steps: 1 });
   });
 
   it('404s for a run that is not live', async () => {
@@ -258,6 +258,25 @@ describe('POST /api/build — orchestrated runs (Requirements 11.1, 11.3, 12.2)'
     expect(lines.find((l) => l.type === 'approval_request')).toMatchObject({ toolCallId: 'tc-1', reason: 'destructive', workerId: 'r:w2:1' });
     expect(audited).toContainEqual(expect.objectContaining({ type: 'approval', actor: 'alice', workerId: 'r:w2:1' }));
   });
+
+  it('checkpoints the run as awaiting_approval while a call waits, then running again', async () => {
+    saved.length = 0;
+    orchestratedScript = async (opts) => {
+      const decision = opts.approveTool!({ toolCallId: 'tc-2', toolName: 'adobe_delete_segment', input: { id: 's2' }, reason: 'destructive' });
+      await tick();
+      resolveApproval(opts.runId!, 'tc-2', false, 'bob');
+      await decision;
+    };
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'delete the older segment', orchestrate: true }) })
+    );
+    await res.text();
+    await tick();
+    const statuses = saved.map((s) => s.status);
+    expect(statuses).toContain('awaiting_approval');
+    expect(statuses.indexOf('awaiting_approval')).toBeLessThan(statuses.lastIndexOf('running'));
+    expect(statuses.at(-1)).toBe('completed');
+  });
 });
 
 describe('POST /api/build — checkpoint writes', () => {
@@ -302,5 +321,30 @@ describe('POST /api/build — domain mode flags', () => {
       expect(res.status).toBe(400);
       expect((await res.json()).error).toBe(`"${flag}" must be a boolean`);
     }
+  });
+});
+
+describe('POST /api/build — lineage', () => {
+  it('records what a run changed in Adobe, even when it then fails', async () => {
+    saved.length = 0;
+    orchestratedScript = async (opts) => {
+      opts.onStep?.({
+        stepNumber: 1,
+        text: '',
+        toolCalls: [{ toolName: 'adobe_create_segment', input: { name: 'Gold members', sandbox: 'prod' } }],
+        toolResults: [{ toolName: 'adobe_create_segment', output: { id: 'seg-77' } }],
+      });
+      throw new Error('provider down');
+    };
+    const res = await POST(
+      new Request('http://x/api/build', { method: 'POST', body: JSON.stringify({ description: 'create the gold segment', orchestrate: true }) })
+    );
+    await res.text();
+    await tick();
+    const last = saved.at(-1)!;
+    expect(last.status).toBe('failed');
+    expect(last.result?.lineage).toEqual([
+      { ref: { kind: 'adobe:segment', id: 'seg-77', name: 'Gold members', sandbox: 'prod' }, change: 'created', tool: 'adobe_create_segment', step: 1 },
+    ]);
   });
 });

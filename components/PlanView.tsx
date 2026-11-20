@@ -1,8 +1,8 @@
 'use client';
 
-import type { PlanInfo } from '@/lib/types';
+import type { PlanRecord } from '@/lib/types';
 
-const STATUS: Record<PlanInfo['steps'][number]['status'], { label: string; cls: string }> = {
+const STATUS: Record<PlanRecord['steps'][number]['status'], { label: string; cls: string }> = {
   pending: { label: 'pending', cls: 'bg-gray-100 text-gray-700' },
   running: { label: 'running', cls: 'bg-blue-100 text-blue-800' },
   done: { label: 'done', cls: 'bg-green-100 text-green-800' },
@@ -17,7 +17,7 @@ export default function PlanView({
   submitting,
   onDecision,
 }: {
-  plan: PlanInfo;
+  plan: PlanRecord;
   awaitingApproval?: boolean;
   submitting?: boolean;
   onDecision?: (approved: boolean) => void;

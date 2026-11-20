@@ -60,7 +60,7 @@ export { ALWAYS_ON_TOOLS };
 export type { AgentStepTrace, TokenUsage, ToolOutcome, LoopContext, LoopResult, PreparedRun, EarlyResult };
 export type { AgentRunResult, RunAgentOptions } from './agent-options';
 export { prepareRun } from './prepare-run';
-export { resolveLaunchMode } from '../domains/launch/pack';
+export { resolveLaunchMode } from '../domains';
 export { executeLoop } from './agent-loop';
 
 /**
@@ -123,11 +123,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<AgentRunResult> {
         isPinned: ctx.isPinned,
         budgetLimits: ctx.budgetLimits,
         modelHealth: ctx.modelHealth,
-        // Requirement 9.1: the run's single LaunchValidationGate, shared by every
-        // worker. It is already embedded in `ctx.tools` (so a worker's narrowed
-        // tool set calls through the same instance); passing it here also tells
-        // each worker it is in a gated Launch run (worker launchMode grounding).
-        ...(ctx.launchGate ? { launchGate: ctx.launchGate } : {}),
+        // Requirement 9.1: the run's single domain gate, shared by every worker.
+        // It is already embedded in `ctx.tools` (so a worker's narrowed tool set
+        // calls through the same instance). Workers get the Launch grounding
+        // only in a gated (live) Launch run, as before the gate was generic.
+        ...(ctx.toolGate ? { toolGate: ctx.toolGate } : {}),
+        ...(ctx.launchMode && ctx.toolGate ? { launchMode: true } : {}),
         ...(ctx.segmentMode ? { segmentMode: true } : {}),
         ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
         ...(ctx.toolApproval ? { toolApproval: ctx.toolApproval } : {}),

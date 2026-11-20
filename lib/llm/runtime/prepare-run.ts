@@ -12,12 +12,8 @@ import { defaultModelHealth } from '../models/model-health';
 import { resolvePolicy } from '../tools/tool-policy';
 import { listFacts, memoryEnabled, memoryPreamble } from '../../memory-store';
 import { buildPlanTools, makePlan, planPreamble, PlanTracker } from './planner';
-import { launchShortlistQuery, seedLaunchPlan } from '../domains/launch/plan';
-import { resolveDomains } from '../domains';
-import { launchExamplesPreamble, selectLaunchExamples } from '../domains/launch/examples';
+import { resolveDomains, startDomainSessions } from '../domains';
 import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
-import { LaunchValidationGate, PUBLISH_TRANSITION_TOOL } from '../domains/launch/validation';
-import { parseLaunchBrief } from '../domains/launch/brief';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from '../models/model-router';
 import { resolveBudget } from './run-budget';
 import {
@@ -118,29 +114,23 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     opts.knowledge === undefined
       ? undefined
       : { tool: PLANNING_RAG_TOOL, query: userInput, context: planningContext(opts.knowledge) };
-  // Phase 4: the validation gate for a Launch-mode run (launch-validation.ts).
-  // It observes tool results to build property state and BLOCKS the library
-  // handoff until the structural / reference / dry-run checks pass. Non-Launch
-  // runs (and the eval path) get none, so the gate wrapper is a no-op there.
+  // Domain sessions (lib/llm/domains): each active pack's per-run setup. A
+  // Launch run parses the brief into typed requirements, builds its
+  // validation gate and picks worked examples (live runs only), and supplies
+  // the shortlist query and the seeded plan. The eval path (opts.tools) is not
+  // live, so it gets no gate, no parse and no examples.
   const resolvedPolicy = resolvePolicy({ mode: opts.policy, dryRun: opts.dryRun });
-  const launchGate =
-    launchMode && !opts.tools
-      ? new LaunchValidationGate({ dryRun: resolvedPolicy.dryRun, shadow: rolloutMode === 'shadow', publishTarget: opts.publishTarget })
-      : undefined;
-
-  // Phase 2: parse the free-text brief into typed requirements for a live
-  // Launch run, so the shortlist query, the seeded plan and the few-shot
-  // examples are specialised to it. Callers can pass opts.requirements to skip
-  // the parse; the eval path (opts.tools) doesn't parse. Fail-open: a parse
-  // failure runs the generic Launch flow rather than failing the run.
-  let requirements = opts.requirements;
-  if (launchMode && !opts.tools && !requirements) {
-    try {
-      requirements = await stage('Launch brief parse', () => parseLaunchBrief(userInput, startModelKey));
-    } catch (err) {
-      console.warn('[agent] Launch brief parse failed; running without parsed requirements:', err instanceof Error ? err.message : err);
-    }
-  }
+  const session = await startDomainSessions(domains, {
+    userInput,
+    modelKey: startModelKey,
+    live: !opts.tools,
+    publishEnabled,
+    dryRun: resolvedPolicy.dryRun,
+    shadow: rolloutMode === 'shadow',
+    ...(opts.publishTarget ? { publishTarget: opts.publishTarget } : {}),
+    ...(opts.requirements ? { requirements: opts.requirements } : {}),
+  });
+  const toolGate = session.toolGate;
 
   if (opts.tools) {
     // Evals pass opts.tools and bypass the tool policy so scripted tool
@@ -158,8 +148,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       { mode: opts.policy, dryRun: opts.dryRun, dryRunWrites: rolloutMode === 'shadow' },
       ragJudgmentSink,
       opts.platformFilter,
-      { enabled: launchMode, publishEnabled, requirements, gate: launchGate },
-      segmentMode
+      { active: domains, publishEnabled, shortlistQuery: session.shortlistQuery, toolGate }
     );
     const memoryFetch = memoryEnabled()
       ? listFacts().catch((err) => {
@@ -171,7 +160,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     // Planning-stage retrieval (planning-retrieval.ts): the run's one
     // up-front knowledge lookup, shared by the planner and the executor.
     // Skipped when the caller supplied the excerpts (opts.knowledge).
-    const groundingQuery = launchMode ? launchShortlistQuery(userInput, requirements) : userInput;
+    const groundingQuery = session.shortlistQuery ?? userInput;
     const lookup = () =>
       stage('planning knowledge lookup', async () =>
         retrieveForPlanning(groundingQuery, {
@@ -213,13 +202,12 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     if (opts.resumePlan) {
       // Continue the interrupted run's plan rather than planning again.
       planTracker = new PlanTracker(structuredClone(opts.resumePlan.plan), (p) => opts.onPlan?.(p));
-    } else if (launchMode) {
-      // Launch-tagging runs follow a fixed grounding backbone (read property
-      // state -> ground against the KB -> generate -> validate -> populate the
-      // library), so the plan is seeded deterministically from the Launch
-      // template (launch-plan.ts) and specialised with the Phase 2
-      // requirements, rather than asked of the model.
-      planTracker = new PlanTracker(seedLaunchPlan(requirements, publishEnabled), (p) => opts.onPlan?.(p));
+    } else if (session.seedPlan) {
+      // A domain with a fixed backbone seeds the plan instead of asking the
+      // model (Launch: read property state -> ground against the KB ->
+      // generate -> validate -> populate the library, specialised with the
+      // parsed requirements).
+      planTracker = new PlanTracker(session.seedPlan, (p) => opts.onPlan?.(p));
     } else {
       try {
         const plan = await stage(`planner call (${planModel})`, () =>
@@ -258,18 +246,10 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
 
   if (planningRetrieval) userMessage = `${planningRetrieval.context}\n\n${userMessage}`;
 
-  // Phase 5: few-shot grounding. The agent's only knowledge base is the
-  // MCP-owned search_adobe_knowledge, which this repo can't seed, so a small
-  // curated set of known-good rule/data-element example documents lives in
-  // launch-examples.ts. Retrieve the ones closest to the Phase 2 requirements
-  // and inject them ahead of the request, so the generation step pattern-matches
-  // against validated shapes rather than inventing delegate/settings layouts.
-  // Live Launch runs only (the eval path passes opts.tools); nothing to show
-  // when no requirements were parsed or none overlap.
-  if (launchMode && !opts.tools) {
-    const preamble = launchExamplesPreamble(selectLaunchExamples(requirements));
-    if (preamble) userMessage = `${preamble}\n\n${userMessage}`;
-  }
+  // A domain's message preamble leads the request (Launch, Phase 5: the
+  // known-good rule/data-element examples closest to the parsed requirements,
+  // so generation pattern-matches validated shapes). Live runs only.
+  if (session.messagePreamble) userMessage = `${session.messagePreamble}\n\n${userMessage}`;
 
   // TASK 9: gate risky calls on a human decision (live runs only).
   // opts.tools marks the eval path, which bypasses gating — UNLESS opts.approveTool
@@ -280,15 +260,13 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     ? undefined
     : async ({ toolCall, workerId }: Parameters<ToolApprovalFn>[0]) => {
         const call = effectiveToolCall(toolCall.toolName, toolCall.input);
-        // A publish transition's exemption from the outbound gate is decided
-        // from the gate's server-truth stage (launch-validation.ts): a verified
-        // dev/staging target is not gated, production/unknown stay gated (and
-        // production is independently refused by the gate before it runs). The
-        // gate exists only on live Launch runs; otherwise no stage is passed
-        // and behaviour is unchanged.
-        const transitionStage =
-          launchGate && call.toolName === PUBLISH_TRANSITION_TOOL ? launchGate.resolveStageFor(call.input) : undefined;
-        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun, transitionStage });
+        // An outbound call the domain session verified is exempt from the
+        // outbound gate (Launch: a publish transition whose target is a
+        // server-verified dev/staging environment; production and unknown
+        // stages stay gated, and production is refused by the gate before it
+        // runs). Only live Launch runs verify anything.
+        const verifiedOutbound = session.verifiesOutbound?.(call.toolName, call.input) === true;
+        const reason = approvalReason(call.toolName, call.input, { mode: rolloutMode, dryRun, verifiedOutbound });
         if (!reason) return 'not-applicable' as const;
         approvalReasons.set(toolCall.toolCallId, reason);
         if (!opts.approveTool) {
@@ -341,7 +319,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
       // Phase 3 (workers): the run's single gate (Requirement 9.1). Already
       // embedded in `tools`; carried on the ctx so the coordinator hands the
       // same instance to every worker.
-      ...(launchGate ? { launchGate } : {}),
+      ...(toolGate ? { toolGate } : {}),
       baseTracerAttrs,
       ...(opts.thinkingBudget !== undefined ? { thinkingBudget: opts.thinkingBudget } : {}),
       ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),

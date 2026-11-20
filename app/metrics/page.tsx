@@ -80,7 +80,7 @@ export default function MetricsPage() {
               <Tile label="Steps" value={m.stepsMean == null ? '—' : m.stepsMean.toFixed(1)} detail="mean per completed run" />
               <Tile label="Judge pass rate" value={pct(m.judgePassRate)} detail={`${m.judged} run(s) sampled`} />
               <Tile label="Feedback" value={`👍 ${m.thumbsUp} · 👎 ${m.thumbsDown}`} detail={`${m.rated} run(s) rated`} />
-              <Tile label="Completed" value={pct(m.runs ? m.completed / m.runs : undefined)} detail={`${m.runs - m.completed} failed`} />
+              <Tile label="Completed" value={pct(m.runs ? m.completed / m.runs : undefined)} detail={`${m.runs - m.completed} failed, cancelled or unfinished`} />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

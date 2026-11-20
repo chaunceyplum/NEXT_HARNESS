@@ -267,6 +267,23 @@ describe('buildWorkerBrief', () => {
     expect(brief).toContain('call report_result');
   });
 
+  it('gives a dependent step typed references to what an earlier step actually changed', () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'Tag the cart',
+      step: makeStep(),
+      deps: [
+        {
+          stepId: 1,
+          status: 'done',
+          summary: 'created the data element',
+          ids: {},
+          objects: [{ kind: 'reactor:data_element', id: 'DE9', name: 'cart total', change: 'created' }],
+        },
+      ],
+    });
+    expect(brief).toContain('Objects it created reactor:data_element DE9 ("cart total")');
+  });
+
   it("puts the user's own request, with its limits, ahead of the plan goal", () => {
     const brief = buildWorkerBrief({
       runGoal: 'Clean up old segments',
@@ -424,14 +441,14 @@ describe('runWorker', () => {
         step,
         tools: { reactor_create_library: handoff },
         catalog: makeCatalog(['reactor_create_library']),
-        shared: makeShared({ launchGate: gate }),
+        shared: makeShared({ toolGate: gate, launchMode: true }),
       })
     );
 
     // The gate blocked the write (it never completed) and the step is failed.
     expect(handoffSucceeded).toBe(false);
     expect(rec.status).toBe('failed');
-    // The worker ran as a Launch worker because the shared gate was present.
+    // The worker ran as a Launch worker (gated Launch run).
     const launchCall = calls.find((c) => (c.tools ?? []).some((t) => t.name === 'reactor_create_library'));
     expect(launchCall).toBeDefined();
   });

@@ -7,6 +7,8 @@
 
 import { runAgent } from '@/lib/llm/runtime/agent';
 import { waitForApproval } from '@/lib/llm/tools/approvals';
+import { endStatusOnError, transition, type RunStatus } from '@/lib/run-lifecycle';
+import { lineageFromSteps } from '@/lib/llm/tools/object-refs';
 import { APPROVAL_REASON_TEXT } from '@/lib/llm/tools/approval-policy';
 import { getDefaultModelKey } from '@/lib/llm/models/model-registry';
 import { CHECKPOINT_SCHEMA_VERSION, newRunId, saveRun } from '@/lib/run-store';
@@ -16,7 +18,7 @@ import { critiqueAnswer, type Critique } from '@/lib/llm/quality/answer-critic';
 import { auditReads, recordAudit, type AuditEvent } from '@/lib/audit-log';
 import { registerRun } from '@/lib/kill-switch';
 import { startJob, type RunJob } from '@/lib/run-jobs';
-import type { AgentStepDTO, RunRequest, RunRecord, PlanInfo, ResumePlan, WorkerRecord } from '@/lib/types';
+import type { LineageRecord, StepRecord, RunRequest, RunRecord, PlanRecord, ResumePlan, WorkerRecord } from '@/lib/types';
 
 /** The approval id a plan waits under (POST /api/build/approve with this as toolCallId). */
 const PLAN_APPROVAL_ID = 'plan';
@@ -54,7 +56,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     // Checkpoints: the run record is saved as 'running' after every step,
     // so a crash or restart leaves the steps so far (marked 'interrupted' on
     // the next start, and resumable). Saves are chained so the last write wins.
-    const steps: AgentStepDTO[] = [];
+    const steps: StepRecord[] = [];
     // Orchestrated runs only (Requirements 11.2, 12.1, 12.2): the worker
     // records seen so far, keyed by workerId so a later attempt of the same
     // worker replaces the earlier one. Checkpointed with the run so an
@@ -63,7 +65,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     let orchestrated = false;
     // The plan as last emitted, checkpointed so an interrupted orchestrated run
     // can be resumed from its done steps (Requirement 12.4).
-    let latestPlan: PlanInfo | undefined;
+    let latestPlan: PlanRecord | undefined;
     // Streamed tokens pass through the output guardrail too. A credential can
     // span several deltas, so text is held back until it's safe to redact.
     const textRedactor = createStreamRedactor();
@@ -74,6 +76,15 @@ export function startRun(req: RunRequest, actor: string): RunJob {
     // needs writing: a checkpoint superseded before its turn is dropped
     // rather than sent. Without this, a slow store queued one full-record
     // write per step and fell further behind as the run went on.
+    // The record's lifecycle status (lib/run-lifecycle.ts): running, or
+    // awaiting_approval while any tool call or the plan waits on a person.
+    // Orchestrated workers can wait on several approvals at once, so the run
+    // is awaiting_approval until the last one is decided.
+    let status: RunStatus = 'running';
+    let pendingApprovals = 0;
+    // Read through a function: the approval callbacks change `status`, which
+    // TypeScript's narrowing can't see across the awaits below.
+    const currentStatus = (): RunStatus => status;
     let saving: Promise<void> = Promise.resolve();
     let queued: RunRecord | undefined;
     const save = (record: RunRecord) => {
@@ -92,7 +103,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        status: 'running',
+        status,
         durationMs: Date.now() - startedAt,
         request: req,
         result: {
@@ -111,8 +122,30 @@ export function startRun(req: RunRequest, actor: string): RunJob {
             ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
             : {}),
           checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+          ...lineageOf(steps),
         },
       });
+
+    const approvalStarted = () => {
+      if (pendingApprovals++ === 0 && status === 'running') {
+        status = transition(status, 'awaiting_approval');
+        checkpoint();
+      }
+    };
+    const approvalEnded = () => {
+      if (--pendingApprovals === 0 && status === 'awaiting_approval') {
+        status = transition(status, 'running');
+        checkpoint();
+      }
+    };
+    const awaitDecision = async (toolCallId: string) => {
+      approvalStarted();
+      try {
+        return await waitForApproval(runId, toolCallId, abort.signal);
+      } finally {
+        approvalEnded();
+      }
+    };
 
     try {
       // Emit run_start immediately so the client can show a run ID before
@@ -147,7 +180,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         // client (and the per-worker restart below) can file it by lane.
         onStep: (step, workerId) => {
           pushDelta(textRedactor.flush());
-          const redacted: AgentStepDTO = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
+          const redacted: StepRecord = { ...redactOutput(step), ...(workerId ? { workerId } : {}) };
           steps.push(redacted);
           push({ type: 'step', step: redacted, ...(workerId ? { workerId } : {}) });
           checkpoint();
@@ -224,7 +257,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
           ? {
               approvePlan: async (plan) => {
                 push({ type: 'plan', plan: redactOutput(plan), awaitingApproval: true });
-                const decision = await waitForApproval(runId, PLAN_APPROVAL_ID, abort.signal);
+                const decision = await awaitDecision(PLAN_APPROVAL_ID);
                 push({ type: 'approval_resolved', toolCallId: PLAN_APPROVAL_ID, approved: decision.approved, reason: decision.reason });
                 return decision;
               },
@@ -242,7 +275,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
             reasonText: APPROVAL_REASON_TEXT[reason],
             ...(workerId ? { workerId } : {}),
           });
-          const decision = await waitForApproval(runId, toolCallId, abort.signal);
+          const decision = await awaitDecision(toolCallId);
           push({ type: 'approval_resolved', toolCallId, approved: decision.approved, reason: decision.reason });
           void recordAudit([
             {
@@ -308,7 +341,7 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: agentResult.modelKey,
-        status: 'completed',
+        status: (status = transition(currentStatus() === 'awaiting_approval' ? 'running' : currentStatus(), 'completed')),
         durationMs: Date.now() - startedAt,
         toolsConsidered: agentResult.toolsConsidered,
         request: req,
@@ -326,6 +359,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
           critique: agentResult.critique,
           route: agentResult.route,
           versions: agentResult.versions,
+          // What the run changed in Adobe (lib/llm/tools/object-refs.ts).
+          ...lineageOf(agentResult.steps),
           // Requirements 12.1, 14.2: orchestration fields stored inside the
           // existing result JSONB — no table schema change. Absent on
           // single-agent runs, so their record shape is unchanged.
@@ -357,7 +392,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
         createdAt,
         description: req.description,
         model: req.model || getDefaultModelKey(),
-        status: 'failed',
+        // A run stopped by a person or the kill switch is 'cancelled', not 'failed'.
+        status: (status = transition(currentStatus(), endStatusOnError(cancelled))),
         durationMs: Date.now() - startedAt,
         request: req,
         // Keep the checkpointed steps: they show what ran before the failure.
@@ -377,6 +413,8 @@ export function startRun(req: RunRequest, actor: string): RunJob {
                   ? { orchestrated: true, replans: Math.max(0, (latestPlan?.version ?? 1) - 1), workers: [...workers.values()] }
                   : {}),
                 checkpoint: { schemaVersion: CHECKPOINT_SCHEMA_VERSION, step: steps.length, savedAt: new Date().toISOString() },
+                // A failed or cancelled run still records what it changed before it stopped.
+                ...lineageOf(steps),
               },
             }
           : {}),
@@ -390,6 +428,12 @@ export function startRun(req: RunRequest, actor: string): RunJob {
   });
 
   return job;
+}
+
+/** `{ lineage }` when the steps changed any Adobe object, else nothing (keeps the record shape unchanged). */
+function lineageOf(steps: readonly StepRecord[]): { lineage?: LineageRecord[] } {
+  const lineage = lineageFromSteps(steps);
+  return lineage.length ? { lineage } : {};
 }
 
 const MAX_RESUME_CHARS = 6_000;

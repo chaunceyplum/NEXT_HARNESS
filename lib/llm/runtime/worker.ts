@@ -27,9 +27,10 @@
 import { tool, jsonSchema, type Tool, type ToolSet } from 'ai';
 import type { AgentStepTrace, LoopContext, ToolApprovalFn, ToolOutcome } from './agent-core';
 import type { ApprovalReason } from '../tools/approval-policy';
-import type { LaunchValidationGate } from '../domains/launch/validation';
+import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
-import { executeLoop } from './agent';
+import { executeLoop } from './agent-loop';
+import { lineageFromSteps, objectsIn } from '../tools/object-refs';
 import { getDefaultModelKey } from '../models/model-registry';
 import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from '../tools/tool-catalog';
 import type { PlanStep } from './planner';
@@ -43,7 +44,7 @@ import { effectiveToolCall } from '../tools/tool-discovery';
 // Re-homed to lib/types.ts in Task 8.1 (the record/resume phase) so the run
 // record, stream events and resume path share one definition. Re-exported here
 // so existing importers (coordinator, tests) keep importing them from worker.ts.
-// WorkerRecord.steps is typed AgentStepDTO[] there; AgentStepTrace is
+// WorkerRecord.steps is typed StepRecord[] there; AgentStepTrace is
 // structurally identical, so the runtime steps assign without a cast.
 export type { WorkerStatus, WorkerResult, WorkerRecord } from '../../types';
 import type { WorkerResult, WorkerRecord, WorkerStatus } from '../../types';
@@ -225,8 +226,10 @@ export interface SharedRunState {
   runId?: string;
   /** The run's budget ledger; each worker gets a child slice that also charges it. */
   ledger: RunLedger;
-  /** One LaunchValidationGate per run, shared by every worker (Requirement 9.1). */
-  launchGate?: LaunchValidationGate;
+  /** One domain tool gate per run (Launch's validation gate), shared by every worker (Requirement 9.1). */
+  toolGate?: ToolCallGate;
+  /** Gated Launch run: workers get the Launch grounding. */
+  launchMode?: boolean;
   /** Segment/audience run: workers get the segment grounding (segment-context.ts). */
   segmentMode?: boolean;
   /** Set when writes must run one at a time (Launch, LAUNCH_PARALLEL_WRITES off) (Requirement 3.4). */
@@ -327,6 +330,10 @@ export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'request' 
     for (const dep of deps) {
       const ids = Object.keys(dep.ids).length ? ` ids=${JSON.stringify(dep.ids)}` : '';
       lines.push(`- Step ${dep.stepId} [${dep.status}]: ${dep.summary}${ids}${dep.notes ? ` (${dep.notes})` : ''}`);
+      // Typed references to what that step actually changed (from its executed calls).
+      if (dep.objects?.length) {
+        lines.push(`  Objects it ${dep.objects.map((o) => `${o.change} ${o.kind} ${o.id}${o.name ? ` ("${o.name}")` : ''}${o.sandbox ? ` in sandbox ${o.sandbox}` : ''}`).join('; ')}`);
+      }
     }
   }
 
@@ -433,7 +440,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
 
   const ctx: LoopContext = {
     tools,
-    launchMode: Boolean(shared.launchGate),
+    launchMode: shared.launchMode === true,
     publishEnabled: false,
     segmentMode: shared.segmentMode === true,
     userMessage: buildWorkerBrief(input),
@@ -448,7 +455,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     baseTracerAttrs: tracerAttrs,
     // Requirement 14.1: nest the worker's trace under the coordinator span.
     ...(shared.tracerParent ? { tracerParent: shared.tracerParent } : {}),
-    ...(shared.launchGate ? { launchGate: shared.launchGate } : {}),
+    ...(shared.toolGate ? { toolGate: shared.toolGate } : {}),
     // Tag each approval with this worker so the request names it (Requirements 11.3, 15.3).
     ...(shared.toolApproval
       ? { toolApproval: ((approval) => shared.toolApproval!({ ...approval, workerId })) as ToolApprovalFn }
@@ -482,6 +489,9 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
 
     // The model's own report_result status decides done vs failed (Req 5.3, 5.4).
     const status: WorkerStatus = reported.status === 'done' ? 'done' : 'failed';
+    // What the worker actually changed, from its executed tool calls, so a
+    // dependent step gets typed references rather than only the model's ids.
+    const objects = objectsIn(lineageFromSteps(loop.steps, workerId));
     return {
       workerId,
       stepId: step.id,
@@ -489,7 +499,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       modelKey: loop.modelKey,
       status,
       steps: loop.steps,
-      result: reported,
+      result: objects.length ? { ...reported, objects } : reported,
       budgetUsage: spend(),
       startedAt,
       durationMs: Date.now() - startedAtMs,

@@ -379,7 +379,7 @@ export interface WorkerRecord {
   attempt: number;
   modelKey: string;
   status: WorkerStatus;
-  steps: AgentStepDTO[];
+  steps: StepRecord[];
   result?: WorkerResult;
   budgetUsage: BudgetUsage;
   startedAt: string;
@@ -393,7 +393,7 @@ export interface WorkerRecord {
 | Type | Change |
 | --- | --- |
 | `RunRequest` | `orchestrate?: boolean`; `maxWorkers?: number` |
-| `AgentStepDTO` | `workerId?: string` |
+| `StepRecord` | `workerId?: string` |
 | `RunResult`, `AgentRunResult` | `workers?: WorkerRecord[]`; `orchestrated?: boolean`; `replans?: number` |
 | `PlanStep` | `workerId?: string`; `dependsOn` kept on revision |
 | `RunAgentOptions` | `orchestrate?: boolean`; `maxWorkers?: number`; `onWorker?: (w: WorkerRecord) => void` |

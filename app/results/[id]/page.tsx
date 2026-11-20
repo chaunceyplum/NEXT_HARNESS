@@ -3,11 +3,13 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { AgentStepDTO, ApiError, RunResult, RunRecord, WorkerRecord } from '@/lib/types';
+import { StepRecord, ApiError, RunResult, RunRecord, WorkerRecord } from '@/lib/types';
+import { isActive, isResumable } from '@/lib/run-lifecycle';
 import AgentTrace, { WorkerLane } from '@/components/AgentTrace';
 import PlanView from '@/components/PlanView';
 import RunFeedback from '@/components/RunFeedback';
 import AuditTrail from '@/components/AuditTrail';
+import ObjectChanges from '@/components/ObjectChanges';
 
 /** Status badge colors; the badge text always carries the status too. */
 const STATUS_BADGE: Record<string, string> = {
@@ -37,7 +39,7 @@ function buildWorkerLanes(workers: WorkerRecord[]): WorkerLane[] {
  * Taking worker steps from the WorkerRecords keeps lanes populated regardless
  * of how the stored `result.steps` was merged.
  */
-function mergeWorkerSteps(resultSteps: AgentStepDTO[], workers: WorkerRecord[]): AgentStepDTO[] {
+function mergeWorkerSteps(resultSteps: StepRecord[], workers: WorkerRecord[]): StepRecord[] {
   const coordinatorSteps = resultSteps.filter((s) => !s.workerId);
   const workerSteps = workers.flatMap((w) => w.steps.map((s) => ({ ...s, workerId: s.workerId ?? w.workerId })));
   return [...coordinatorSteps, ...workerSteps];
@@ -188,21 +190,25 @@ export default function RunDetailPage() {
               <p className="text-xs text-gray-400 mt-4">{new Date(record.createdAt).toLocaleString()}</p>
             </div>
 
-            {record.status === 'running' && (
+            {isActive(record.status) && (
               <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg text-sm text-blue-900">
-                This run is still in progress; the trace below is its latest checkpoint.{' '}
+                {record.status === 'awaiting_approval'
+                  ? 'This run is waiting for a person to approve a tool call or its plan; the trace below is its latest checkpoint.'
+                  : 'This run is still in progress; the trace below is its latest checkpoint.'}{' '}
                 <Link href={`/?run=${record.id}`} className="font-semibold underline">
                   Watch it live
                 </Link>
               </div>
             )}
 
-            {(record.status === 'interrupted' || record.status === 'failed') && (
+            {isResumable(record.status) && (
               <div className="bg-amber-50 border-l-4 border-amber-500 p-4 rounded-lg text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center gap-3">
                 <p className="flex-1">
                   {record.status === 'interrupted'
                     ? `The server stopped while this run was in progress, after ${record.result?.steps.length ?? 0} step(s).`
-                    : 'This run failed.'}{' '}
+                    : record.status === 'cancelled'
+                      ? `This run was stopped${record.error ? ` (${record.error})` : ''}.`
+                      : 'This run failed.'}{' '}
                   Resuming starts a new run with the same request, told what this one already did so it doesn&apos;t repeat completed changes.
                 </p>
                 <button
@@ -246,6 +252,8 @@ export default function RunDetailPage() {
                 />
               );
             })()}
+
+            {record.result?.lineage?.length ? <ObjectChanges lineage={record.result.lineage} /> : null}
 
             {record.status === 'completed' && <RunFeedback runId={record.id} />}
 
