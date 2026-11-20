@@ -41,8 +41,11 @@ import { resolveModel } from '../models/model-registry';
 import { acquireLoopSlot } from './agent-slots';
 import { estimateCostUsd, toTokenUsage, type SdkUsage } from '../models/pricing';
 import {
+  menuEntries,
   readySteps,
   parallelWidth,
+  toolMenu,
+  type ToolMenuEntry,
   type Plan,
   type PlanStep,
   type PlanTracker,
@@ -514,7 +517,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
         results,
         failed,
         modelKey: input.runModelKey,
-        toolNames: input.toolsConsidered,
+        tools: menuEntries(input.tools, [...input.toolsConsidered, ...['find_tools', 'call_tool', 'search_knowledge', 'recall_objects'].filter((n) => n in input.tools)]),
         abortSignal: input.abortSignal,
       });
       chargeCall(input.runModelKey, reply.usage);
@@ -654,7 +657,7 @@ async function requestReplan(args: {
   results: Map<number, WorkerResult>;
   failed: PlanStep[];
   modelKey: string;
-  toolNames: string[];
+  tools: ToolMenuEntry[];
   abortSignal?: AbortSignal;
 }): Promise<{ object: ReplanResult; usage?: CallUsage }> {
   // The revised plan renumbers the completed steps 1..n in this order and
@@ -691,7 +694,7 @@ async function requestReplan(args: {
         '',
         failureLines.length ? `Failed:\n${failureLines.join('\n')}` : '',
         '',
-        `Tools available: ${args.toolNames.join(', ')}`,
+        `Tools available:\n${toolMenu(args.tools)}`,
       ].join('\n'),
       ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
     });

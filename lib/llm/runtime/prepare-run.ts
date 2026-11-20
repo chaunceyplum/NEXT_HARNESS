@@ -11,7 +11,7 @@ import { stage, type PreparedRun, type EarlyResult, type ToolApprovalFn } from '
 import { defaultModelHealth } from '../models/model-health';
 import { resolvePolicy } from '../tools/tool-policy';
 import { listFacts, memoryEnabled, memoryPreamble } from '../../memory-store';
-import { buildPlanTools, makePlan, planPreamble, PlanTracker } from './planner';
+import { buildPlanTools, makePlan, menuEntries, planPreamble, PlanTracker } from './planner';
 import { resolveDomains, startDomainSessions } from '../domains';
 import { planningContext, PLANNING_RAG_TOOL, retrieveForPlanning, type PlanningRetrieval } from './planning-retrieval';
 import { AUTO_MODEL, routeRequest, type RouteDecision } from '../models/model-router';
@@ -222,7 +222,7 @@ export async function prepareRun(opts: RunAgentOptions): Promise<PreparedRun | E
     } else {
       try {
         const plan = await stage(`planner call (${planModel})`, () =>
-          makePlan(userInput, Object.keys(tools), planModel, planningRetrieval?.context)
+          makePlan(userInput, menuEntries(tools), planModel, planningRetrieval?.context)
         );
         planTracker = new PlanTracker(plan, (p) => opts.onPlan?.(p));
       } catch (err) {

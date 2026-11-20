@@ -101,7 +101,11 @@ export async function selectLiveTools(
     [...toolsConsidered, 'policy_info'].map((name) => [name, callable[name]])
   );
   // TASK 6: discovery over everything the policy allows (see tool-discovery.ts)
-  Object.assign(tools, buildDiscoveryTools(catalog, callable, new Set(toolsConsidered)));
+  // find_tools ranks with the same embedding shortlist as the run's tools.
+  Object.assign(
+    tools,
+    buildDiscoveryTools(catalog, callable, new Set(toolsConsidered), (query, k, include) => shortlistTools(query, { k, include }))
+  );
   if (searchTool) tools[KNOWLEDGE_SEARCH_TOOL] = searchTool;
 
   return { tools, toolsConsidered };

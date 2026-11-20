@@ -19,7 +19,9 @@
 import { tool, jsonSchema, type ToolSet } from 'ai';
 import type { McpToolDefinition } from './tool-catalog';
 
-const MAX_RESULTS = 5;
+const MAX_RESULTS = 8;
+/** Matches returned with their full input schema; the rest carry name + description only, to bound the result size. */
+const MAX_WITH_SCHEMA = 4;
 const MAX_DESCRIPTION_CHARS = 400;
 
 /** The underlying tool a call targets — unwraps call_tool to the tool it proxies. */
@@ -34,19 +36,65 @@ export function effectiveToolCall(toolName: string, input: unknown): { toolName:
  * @param callable     every tool the policy allows, keyed by name
  * @param visibleNames tools the model can already call directly
  */
+/**
+ * Optional semantic ranker for find_tools: the most relevant callable tool
+ * names for a query, best first (tool-selection.ts passes the embedding
+ * shortlist, which falls back to keywords itself). May reject; find_tools
+ * then ranks on keywords alone.
+ */
+export type ToolRanker = (query: string, k: number, include: (name: string) => boolean) => Promise<string[]>;
+
+function tokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 1)
+    .map((t) => (t.length > 3 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t));
+}
+
+/**
+ * Keyword score for one tool: query words found among the tool NAME's words
+ * count 3, in its description 1, and a tool whose name holds every query
+ * word gets a bonus — so "delete segment" puts adobe_delete_segment above
+ * every tool whose description merely mentions segments. Plural/singular
+ * are folded ("segments" ~ "segment").
+ */
+export function keywordScore(query: string, name: string, description: string): number {
+  const q = [...new Set(tokens(query))];
+  if (q.length === 0) return 0;
+  const nameTokens = new Set(tokens(name));
+  const descTokens = new Set(tokens(description));
+  let score = 0;
+  let inName = 0;
+  for (const t of q) {
+    if (nameTokens.has(t)) {
+      score += 3;
+      inName++;
+    } else if (descTokens.has(t)) score += 1;
+  }
+  if (inName === q.length) score += 2;
+  return score;
+}
+
+/**
+ * @param catalog      the full MCP catalog (for descriptions/schemas)
+ * @param callable     every tool the policy allows, keyed by name
+ * @param visibleNames tools the model can already call directly
+ * @param rank         optional semantic ranker (see ToolRanker)
+ */
 export function buildDiscoveryTools(
   catalog: McpToolDefinition[],
   callable: ToolSet,
-  visibleNames: Set<string>
+  visibleNames: Set<string>,
+  rank?: ToolRanker
 ): ToolSet {
-  const index = catalog
-    .filter((t) => t.name in callable)
-    .map((t) => ({ def: t, text: `${t.name}: ${t.description || ''}`.toLowerCase() }));
+  const index = catalog.filter((t) => t.name in callable);
+  const byName = new Map(index.map((t) => [t.name, t]));
 
   const find_tools = tool({
     description:
       'Search the full tool catalog for a tool you need but do not see in your tool list. ' +
-      `Returns up to ${MAX_RESULTS} matches with their input schemas. ` +
+      `Returns up to ${MAX_RESULTS} matches, the best ${MAX_WITH_SCHEMA} with their input schemas. ` +
       'Call a match through call_tool (or directly, if it is already in your tool list).',
     inputSchema: jsonSchema<{ query: string }>({
       type: 'object',
@@ -59,22 +107,27 @@ export function buildDiscoveryTools(
       required: ['query'],
     }),
     execute: async ({ query }: { query: string }) => {
-      const terms = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+      // Keyword score for every callable tool, plus a bonus by semantic rank:
+      // the embedding ranker finds tools phrased differently from the query
+      // ("audience" → segments), keywords keep exact name matches on top.
+      const semantic = rank ? await rank(query, MAX_RESULTS * 2, (n) => byName.has(n)).catch(() => [] as string[]) : [];
+      const semanticBonus = new Map(semantic.map((n, i) => [n, (semantic.length - i) / semantic.length * 3]));
       const matches = index
-        .map((entry) => ({ entry, score: terms.reduce((s, term) => s + (entry.text.includes(term) ? 1 : 0), 0) }))
+        .map((def) => ({ def, score: keywordScore(query, def.name, def.description || '') + (semanticBonus.get(def.name) ?? 0) }))
         .filter((m) => m.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, MAX_RESULTS)
-        .map(({ entry: { def } }) => ({
+        .map(({ def }, i) => ({
           name: def.name,
           description: (def.description || '').slice(0, MAX_DESCRIPTION_CHARS),
-          inputSchema: def.inputSchema,
+          ...(i < MAX_WITH_SCHEMA ? { inputSchema: def.inputSchema } : {}),
           directlyAvailable: visibleNames.has(def.name),
         }));
       return {
         tools: matches,
         message: matches.length
-          ? 'Call one with call_tool({ tool_name, arguments }), where arguments matches its inputSchema.'
+          ? 'Call one with call_tool({ tool_name, arguments }), where arguments matches its inputSchema. ' +
+            'A match listed without an inputSchema: call find_tools with its exact name to get it.'
           : 'No matching tools. Try different wording, or say in your answer that no tool covers this.',
       };
     },

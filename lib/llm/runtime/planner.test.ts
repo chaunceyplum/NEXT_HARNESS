@@ -258,3 +258,19 @@ describe('plan tools', () => {
     ]);
   });
 });
+
+describe('toolMenu', () => {
+  it('gives each tool its first description sentence, capped', async () => {
+    const { toolMenu } = await import('./planner');
+    const menu = toolMenu([
+      { name: 'adobe_list_schemas', description: 'List XDM schemas in the sandbox. Supports paging and filters.' },
+      { name: 'adobe_get_schema', description: 'x'.repeat(400) },
+      'find_tools',
+    ]);
+    expect(menu.split('\n')).toEqual([
+      '- adobe_list_schemas: List XDM schemas in the sandbox.',
+      `- adobe_get_schema: ${'x'.repeat(159)}…`,
+      '- find_tools',
+    ]);
+  });
+});

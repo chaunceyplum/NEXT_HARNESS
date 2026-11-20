@@ -69,7 +69,42 @@ const planSchema = z.object({
 });
 
 /** Ask the model for the minimum plan that achieves the request, using only the tools it can call. */
-export async function makePlan(request: string, toolNames: string[], modelKey: string, context?: string): Promise<Plan> {
+/** A tool as the planner sees it: its name, and its description when known. */
+export type ToolMenuEntry = string | { name: string; description?: string };
+
+const MENU_DESCRIPTION_CHARS = 160;
+
+/** The first sentence of a tool description, cut to MENU_DESCRIPTION_CHARS. */
+function shortDescription(description: string | undefined): string {
+  const text = (description ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const sentence = text.match(/^.+?[.!?](?=\s|$)/)?.[0] ?? text;
+  return sentence.length <= MENU_DESCRIPTION_CHARS ? sentence : `${sentence.slice(0, MENU_DESCRIPTION_CHARS - 1)}…`;
+}
+
+/**
+ * The tool list a planning call sees: one line per tool with what it does.
+ * The planner used to get bare names ("adobe_list_schemas, adobe_get_schema,
+ * …"), so it guessed at what each did and named wrong or non-existent tools
+ * in its steps; a mis-named step tool also mis-narrows an orchestrated
+ * worker's tool set (workerTools).
+ */
+export function toolMenu(tools: readonly ToolMenuEntry[]): string {
+  return tools
+    .map((t) => {
+      const name = typeof t === 'string' ? t : t.name;
+      const description = typeof t === 'string' ? '' : shortDescription(t.description);
+      return description ? `- ${name}: ${description}` : `- ${name}`;
+    })
+    .join('\n');
+}
+
+/** Menu entries for the named tools of a tool set (descriptions read off the AI SDK tools). */
+export function menuEntries(tools: ToolSet, names: readonly string[] = Object.keys(tools)): ToolMenuEntry[] {
+  return names.map((name) => ({ name, description: (tools[name] as { description?: string } | undefined)?.description }));
+}
+
+export async function makePlan(request: string, tools: readonly ToolMenuEntry[], modelKey: string, context?: string): Promise<Plan> {
   const { object } = await generateObject({
     model: resolveModel(modelKey),
     schema: planSchema,
@@ -79,7 +114,7 @@ export async function makePlan(request: string, toolNames: string[], modelKey: s
       'Read before you change: look up anything whose current state matters before a step that modifies it.',
       'Do not plan anything the user did not ask for.',
     ].join('\n'),
-    prompt: `Request: ${request}\n\n${context ? `${context}\n\n` : ''}Tools available: ${toolNames.join(', ')}`,
+    prompt: `Request: ${request}\n\n${context ? `${context}\n\n` : ''}Tools available:\n${toolMenu(tools)}`,
   });
   return normalisePlan(object, 1);
 }
