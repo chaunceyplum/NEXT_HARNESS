@@ -121,6 +121,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
     const historyBound = isHistoryBound(resolvedModelKey);
+    const thinkingOn = Boolean(thinkingProviderOptions);
     const conversationCacheMarker = cacheMarker(resolvedModelKey);
     const providerOptions = mergeProviderOptions(
       thinkingProviderOptions,
@@ -173,6 +174,10 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // for.
           else if (historyBound && isLastStep) {
             notes.push(ctx.forceFinalTool ? `Call ${ctx.forceFinalTool} now.` : FINAL_STEP_NOTE);
+          } else if (thinkingOn && isLastStep && ctx.forceFinalTool) {
+            // Thinking rejects a forced tool choice (only auto / none are
+            // allowed), so a thinking worker is told to call its tool instead.
+            notes.push(`Call ${ctx.forceFinalTool} now.`);
           }
           const withNotes = (base: ModelMessage[]): ModelMessage[] =>
             notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
@@ -201,7 +206,9 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // forceFinalTool unset, so they keep forcing 'none' exactly as
           // before.
           const lastStepToolChoice = ctx.forceFinalTool
-            ? ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
+            ? thinkingOn
+              ? ('auto' as const)
+              : ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
             : ('none' as const);
           return {
             toolChoice: isLastStep ? lastStepToolChoice : 'auto',

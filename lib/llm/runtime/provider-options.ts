@@ -175,6 +175,17 @@ export function mergeProviderOptions(...parts: Array<ProviderOptions | undefined
 
 // ── TASK 10: Extended thinking ────────────────────────────────────────────────
 
+/**
+ * THINKING_MODE: 'adaptive' (default) turns on adaptive thinking for runs
+ * that set no budget, on Claude models that support it; 'off' leaves
+ * thinking off unless a budget is set. It used to be off by default, so the
+ * default model (Sonnet 5 on Bedrock) ran multi-step AEP work without any
+ * thinking. History-bound models (5.5 family) think by default regardless.
+ */
+export function thinkingMode(): 'adaptive' | 'off' {
+  return process.env.THINKING_MODE?.trim().toLowerCase() === 'off' ? 'off' : 'adaptive';
+}
+
 /** Minimum token budget Anthropic accepts for budget-based extended thinking. */
 const THINKING_MIN_TOKENS = 1_024;
 
@@ -191,8 +202,9 @@ const BUDGET_THINKING_MODEL_RE =
 /**
  * Resolve the providerOptions that enable extended thinking for this run, or
  * undefined when it's off. Per-request budget takes precedence over the
- * THINKING_BUDGET_TOKENS env var. Only Claude models (Anthropic direct, or
- * Claude on Bedrock) are eligible.
+ * THINKING_BUDGET_TOKENS env var; with neither, THINKING_MODE decides
+ * (adaptive by default). Only Claude models (Anthropic direct, or Claude on
+ * Bedrock) are eligible.
  */
 export function resolveThinkingProviderOptions(
   modelKey: string,
@@ -202,14 +214,24 @@ export function resolveThinkingProviderOptions(
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
   if (entry.provider !== 'anthropic' && entry.provider !== 'bedrock') return undefined;
 
-  const budget =
-    perRequestBudget ??
-    (process.env.THINKING_BUDGET_TOKENS ? parseInt(process.env.THINKING_BUDGET_TOKENS, 10) : undefined);
-  if (!budget || isNaN(budget) || budget < THINKING_MIN_TOKENS) return undefined;
+  const envBudget = process.env.THINKING_BUDGET_TOKENS?.trim();
+  const budget = perRequestBudget ?? (envBudget ? parseInt(envBudget, 10) : undefined);
+  const budgetModel = BUDGET_THINKING_MODEL_RE.test(entry.modelId);
 
-  const config = BUDGET_THINKING_MODEL_RE.test(entry.modelId)
-    ? { type: 'enabled', budgetTokens: budget }
-    : { type: 'adaptive' };
+  let config: { type: 'enabled'; budgetTokens: number } | { type: 'adaptive' } | undefined;
+  if (budget !== undefined) {
+    // An explicit budget decides: a usable one switches thinking on, and 0
+    // (or anything below the minimum) switches it off.
+    if (!isNaN(budget) && budget >= THINKING_MIN_TOKENS) {
+      config = budgetModel ? { type: 'enabled', budgetTokens: budget } : { type: 'adaptive' };
+    }
+  } else if (thinkingMode() === 'adaptive' && !budgetModel) {
+    // No budget asked for: adaptive thinking by default on the models that
+    // size it themselves. Budget-only models (Haiku 4.5 and older) stay off
+    // unless a budget is set, since there is no budget to give them.
+    config = { type: 'adaptive' };
+  }
+  if (!config) return undefined;
   // Anthropic takes `thinking`; @ai-sdk/amazon-bedrock takes `reasoningConfig`.
   return entry.provider === 'anthropic'
     ? { anthropic: { thinking: config } }

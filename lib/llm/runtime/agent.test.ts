@@ -313,7 +313,8 @@ describe('runAgent loop shape', () => {
     const last = calls.at(-1)!;
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
-    expect(calls[0].providerOptions?.anthropic).toBeUndefined();
+    // No server-side context editing on a model that isn't history-bound.
+    expect((calls[0].providerOptions?.anthropic as Record<string, unknown> | undefined)?.contextManagement).toBeUndefined();
     // The 4 newest results stay intact, and the history is rewritten only
     // when a batch of 4 older ones is compressed (at the 8th result), not
     // once per step, so it stays cached.
@@ -351,6 +352,24 @@ describe('runAgent loop shape', () => {
       expect(result.stopReason).toBeUndefined();
     } finally {
       usage.inputTokens.total = before;
+    }
+  });
+
+  it('turns on adaptive thinking by default, and THINKING_MODE=off / THINKING_BUDGET_TOKENS=0 turn it off', async () => {
+    script = [{ text: 'final' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    expect(calls[0].providerOptions?.anthropic).toMatchObject({ thinking: { type: 'adaptive' } });
+
+    for (const [name, value] of [['THINKING_MODE', 'off'], ['THINKING_BUDGET_TOKENS', '0']] as const) {
+      vi.stubEnv(name, value);
+      try {
+        calls = [];
+        script = [{ text: 'final' }];
+        await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+        expect((calls[0].providerOptions?.anthropic as Record<string, unknown> | undefined)?.thinking, name).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
     }
   });
 

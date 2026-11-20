@@ -47,12 +47,23 @@ describe('modelForTier', () => {
 });
 
 describe('routeRequest', () => {
-  it('routes clear lookups to the cheap tier by rules, without a model call', async () => {
+  it('routes clear lookups to the balanced tier by rules, without a model call', async () => {
     process.env.DEFAULT_MODEL = 'bedrock:balanced';
     const classify = vi.fn();
     const r = await routeRequest('What datasets are profile-enabled?', { registry, health: healthy(), classify });
-    expect(r).toMatchObject({ category: 'lookup', via: 'rules', tier: 'cheap', modelKey: 'bedrock:cheap' });
+    expect(r).toMatchObject({ category: 'lookup', via: 'rules', tier: 'balanced', modelKey: 'bedrock:balanced' });
     expect(classify).not.toHaveBeenCalled();
+  });
+
+  it('lets ROUTE_TIERS put lookups back on the cheap tier', async () => {
+    process.env.DEFAULT_MODEL = 'bedrock:balanced';
+    process.env.ROUTE_TIERS = '{"lookup":"cheap"}';
+    try {
+      const r = await routeRequest('What datasets are profile-enabled?', { registry, health: healthy(), classify: vi.fn() });
+      expect(r).toMatchObject({ tier: 'cheap', modelKey: 'bedrock:cheap' });
+    } finally {
+      delete process.env.ROUTE_TIERS;
+    }
   });
 
   it('asks the model when rules cannot tell, and maps its category', async () => {

@@ -193,8 +193,11 @@ request to a model tier instead of using one model for everything:
 - Clear cases are decided by keyword rules at no cost. The rest go to one
   structured call on the cheap tier, which returns lookup, change, build or
   unclear.
-- Default mapping: lookup → cheap, change → balanced, build → expensive,
-  on the default model's provider (unhealthy models skipped).
+- Default mapping: lookup → balanced, change → balanced, build → expensive,
+  on the default model's provider (unhealthy models skipped). Lookups used
+  to go to the cheap tier, which answered AEP lookups (reading segment PQL,
+  field paths, the business glossary) badly; `ROUTE_TIERS='{"lookup":"cheap"}'`
+  restores that if cost matters more.
 - **unclear** → the run returns the router's clarifying question instead
   of guessing. Low confidence → the default model.
 - A request that names a specific model is never re-routed. Routed runs
@@ -203,7 +206,7 @@ request to a model tier instead of using one model for everything:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MODEL_ROUTING` | `false` | `true` makes Auto the default when a request names no model |
-| `ROUTE_TIERS` | `{"lookup":"cheap","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
+| `ROUTE_TIERS` | `{"lookup":"balanced","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
 | `ROUTER_MIN_CONFIDENCE` | `0.6` | Below this, use the default model |
 | `ROUTER_CLARIFY` | `true` | `false` sends unclear requests to the default model instead of asking |
 
@@ -343,13 +346,21 @@ run's `stopReason` is set so the UI flags the answer as partial.
 
 A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
 
-## Extended thinking (`lib/llm/runtime/agent.ts`)
+## Extended thinking (`lib/llm/runtime/provider-options.ts`)
 
-- `THINKING_BUDGET_TOKENS` (unset = off): turns on extended thinking for
-  Claude models (Anthropic direct or on Bedrock). Values below `1024` are
-  ignored. Older models get a fixed budget of this many tokens; newer ones
-  that reject fixed budgets get adaptive thinking instead. A request's
-  `thinkingBudget` takes precedence.
+- `THINKING_MODE` (default `adaptive`): with no budget set, Claude models
+  that size their own thinking (Sonnet 5, Opus 4.7+, the 5.x family) run
+  with adaptive thinking. Budget-only models (Haiku 4.5 and older) stay off
+  unless a budget is set. `off` restores the old default (no thinking
+  unless a budget is set). It used to be off, so the default model ran
+  multi-step AEP work without thinking.
+- `THINKING_BUDGET_TOKENS`: an explicit budget wins over `THINKING_MODE`.
+  At least `1024` turns thinking on (a fixed budget on older models,
+  adaptive on newer ones); `0` turns it off. A request's `thinkingBudget`
+  takes precedence over both.
+- With thinking on, an orchestrated worker's last step is asked to call
+  `report_result` rather than forced to (the API rejects a forced tool
+  choice while thinking).
 
 ## Tool catalog scope and tool policy (`lib/llm/tools/tool-catalog.ts`, `lib/llm/tools/tool-policy.ts`)
 

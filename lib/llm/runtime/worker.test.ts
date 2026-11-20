@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { tool, jsonSchema, type ToolSet } from 'ai';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -15,7 +15,7 @@ type Scripted =
   | { text: string }
   | { throw: string };
 let script: Scripted[] = [];
-let calls: Array<{ toolChoice?: { type: string; toolName?: string }; tools?: Array<{ name: string }> }> = [];
+let calls: Array<{ toolChoice?: { type: string; toolName?: string }; tools?: Array<{ name: string }>; prompt: unknown[] }> = [];
 let executed: Array<{ name: string; input: unknown }> = [];
 
 vi.mock('../models/model-registry', () => {
@@ -78,6 +78,8 @@ vi.mock('../models/model-registry', () => {
       }),
   };
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS, seenObjects, MAX_SEEN_OBJECTS } = await import('./worker');
 const { ModelHealthTracker } = await import('../models/model-health');
@@ -309,6 +311,8 @@ describe('buildWorkerBrief', () => {
 
 describe('runWorker', () => {
   it('runs the step, forces report_result on the last step, and returns its result (Req 4.2, 4.6)', async () => {
+    // Forcing a tool is only possible with thinking off (see the next test).
+    vi.stubEnv('THINKING_MODE', 'off');
     script = [
       { toolCall: { toolName: 'reactor_create_data_element', input: { id: 'x' } } },
       report({ status: 'done', summary: 'created', ids: { dataElementId: 'DE9' } }),
@@ -329,6 +333,17 @@ describe('runWorker', () => {
     for (const c of calls) {
       expect((c.tools ?? []).map((t) => t.name)).not.toContain('adobe_list_segments');
     }
+  });
+
+  it('with thinking on, asks for report_result instead of forcing it (thinking rejects forced tool choice)', async () => {
+    script = [
+      { toolCall: { toolName: 'reactor_create_data_element', input: { id: 'x' } } },
+      report({ status: 'done', summary: 'created', ids: { dataElementId: 'DE9' } }),
+    ];
+    const rec = await runWorker(baseInput());
+    expect(rec.status).toBe('done');
+    expect(calls.some((c) => c.toolChoice?.type === 'tool')).toBe(false);
+    expect(calls.some((c) => JSON.stringify(c.prompt.at(-1)).includes('Call report_result now.'))).toBe(true);
   });
 
   it('marks the step failed when report_result reports failed (Req 5.4)', async () => {
