@@ -5,7 +5,7 @@
 
 import { type ModelMessage, type SystemModelMessage } from 'ai';
 import { getModelEntry } from '../models/model-registry';
-import { systemPrompt } from './agent-core';
+import { systemPrompt, type PromptOptions } from './agent-core';
 
 // ── TASK 1: Prompt caching ────────────────────────────────────────────────────
 
@@ -17,18 +17,11 @@ import { systemPrompt } from './agent-core';
  * `cachePoint` (and ignores cacheControl), and only Claude models on Bedrock
  * support it.
  */
-export function buildSystemMessage(
-  modelKey: string,
-  toolDiscovery: boolean,
-  memory = false,
-  launchMode = false,
-  publishEnabled = false,
-  segmentMode = false
-): SystemModelMessage {
+export function buildSystemMessage(modelKey: string, promptOptions: PromptOptions): SystemModelMessage {
   const providerOptions = cacheMarker(modelKey);
   return {
     role: 'system',
-    content: systemPrompt({ toolDiscovery, memory, launchMode, publishEnabled, segmentMode }),
+    content: systemPrompt(promptOptions),
     ...(providerOptions ? { providerOptions } : {}),
   };
 }
@@ -103,10 +96,36 @@ export function isHistoryBound(modelKey: string): boolean {
   return Boolean(entry && HISTORY_BOUND_MODEL_RE.test(entry.modelId));
 }
 
-/** Server-side clearing of old tool results starts once a request's input passes this many tokens. */
-const CONTEXT_EDIT_TRIGGER_TOKENS = 30_000;
-/** Most recent tool uses kept intact by server-side context editing. */
-const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
+/**
+ * Server-side clearing of old tool results starts once a request's input
+ * passes this many tokens (CONTEXT_EDIT_TRIGGER_TOKENS, default 100,000).
+ *
+ * It was 30,000, which the system prompt, ~27 tool schemas and a domain
+ * block (the PQL reference alone is ~3K tokens) nearly fill before any
+ * result arrives — so clearing started after a step or two and the model
+ * lost the lists it had just read. 100K stays well inside every current
+ * Claude context window while letting a normal run keep its working set.
+ */
+function contextEditTriggerTokens(): number {
+  const n = Number(process.env.CONTEXT_EDIT_TRIGGER_TOKENS);
+  return Number.isInteger(n) && n >= 10_000 ? n : 100_000;
+}
+
+/** Most recent tool uses kept intact by server-side context editing (CONTEXT_EDIT_KEEP_TOOL_USES, default 6, was 3). */
+export function contextEditKeepToolUses(): number {
+  const n = Number(process.env.CONTEXT_EDIT_KEEP_TOOL_USES);
+  return Number.isInteger(n) && n >= 1 ? n : 6;
+}
+
+/** Input size at which the server may have cleared old results: past it, loop detection forgives re-fetches (run-budget.ts). */
+export { contextEditTriggerTokens };
+
+/**
+ * Tools whose results server-side clearing never removes: find_tools results
+ * carry the schemas call_tool needs, and recall_objects results are the ids
+ * the model is about to act on.
+ */
+export const CONTEXT_EDIT_EXCLUDED_TOOLS: readonly string[] = ['find_tools', 'recall_objects'];
 
 /**
  * Server-side context editing (clear_tool_uses) — the API clears old tool
@@ -117,10 +136,9 @@ const CONTEXT_EDIT_KEEP_TOOL_USES = 3;
 export function contextEditingProviderOptions(modelKey: string): ProviderOptions | undefined {
   const entry = tryGetModelEntry(modelKey);
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
-  const trigger = { type: 'input_tokens', value: CONTEXT_EDIT_TRIGGER_TOKENS };
-  const keep = { type: 'tool_uses', value: CONTEXT_EDIT_KEEP_TOOL_USES };
-  // find_tools results carry the schemas call_tool needs — keep them.
-  const excluded = ['find_tools'];
+  const trigger = { type: 'input_tokens', value: contextEditTriggerTokens() };
+  const keep = { type: 'tool_uses', value: contextEditKeepToolUses() };
+  const excluded = [...CONTEXT_EDIT_EXCLUDED_TOOLS];
   if (entry.provider === 'anthropic') {
     return {
       anthropic: {
@@ -157,6 +175,17 @@ export function mergeProviderOptions(...parts: Array<ProviderOptions | undefined
 
 // ── TASK 10: Extended thinking ────────────────────────────────────────────────
 
+/**
+ * THINKING_MODE: 'adaptive' (default) turns on adaptive thinking for runs
+ * that set no budget, on Claude models that support it; 'off' leaves
+ * thinking off unless a budget is set. It used to be off by default, so the
+ * default model (Sonnet 5 on Bedrock) ran multi-step AEP work without any
+ * thinking. History-bound models (5.5 family) think by default regardless.
+ */
+export function thinkingMode(): 'adaptive' | 'off' {
+  return process.env.THINKING_MODE?.trim().toLowerCase() === 'off' ? 'off' : 'adaptive';
+}
+
 /** Minimum token budget Anthropic accepts for budget-based extended thinking. */
 const THINKING_MIN_TOKENS = 1_024;
 
@@ -173,8 +202,9 @@ const BUDGET_THINKING_MODEL_RE =
 /**
  * Resolve the providerOptions that enable extended thinking for this run, or
  * undefined when it's off. Per-request budget takes precedence over the
- * THINKING_BUDGET_TOKENS env var. Only Claude models (Anthropic direct, or
- * Claude on Bedrock) are eligible.
+ * THINKING_BUDGET_TOKENS env var; with neither, THINKING_MODE decides
+ * (adaptive by default). Only Claude models (Anthropic direct, or Claude on
+ * Bedrock) are eligible.
  */
 export function resolveThinkingProviderOptions(
   modelKey: string,
@@ -184,14 +214,24 @@ export function resolveThinkingProviderOptions(
   if (!entry || !isClaudeModelId(entry.modelId)) return undefined;
   if (entry.provider !== 'anthropic' && entry.provider !== 'bedrock') return undefined;
 
-  const budget =
-    perRequestBudget ??
-    (process.env.THINKING_BUDGET_TOKENS ? parseInt(process.env.THINKING_BUDGET_TOKENS, 10) : undefined);
-  if (!budget || isNaN(budget) || budget < THINKING_MIN_TOKENS) return undefined;
+  const envBudget = process.env.THINKING_BUDGET_TOKENS?.trim();
+  const budget = perRequestBudget ?? (envBudget ? parseInt(envBudget, 10) : undefined);
+  const budgetModel = BUDGET_THINKING_MODEL_RE.test(entry.modelId);
 
-  const config = BUDGET_THINKING_MODEL_RE.test(entry.modelId)
-    ? { type: 'enabled', budgetTokens: budget }
-    : { type: 'adaptive' };
+  let config: { type: 'enabled'; budgetTokens: number } | { type: 'adaptive' } | undefined;
+  if (budget !== undefined) {
+    // An explicit budget decides: a usable one switches thinking on, and 0
+    // (or anything below the minimum) switches it off.
+    if (!isNaN(budget) && budget >= THINKING_MIN_TOKENS) {
+      config = budgetModel ? { type: 'enabled', budgetTokens: budget } : { type: 'adaptive' };
+    }
+  } else if (thinkingMode() === 'adaptive' && !budgetModel) {
+    // No budget asked for: adaptive thinking by default on the models that
+    // size it themselves. Budget-only models (Haiku 4.5 and older) stay off
+    // unless a budget is set, since there is no budget to give them.
+    config = { type: 'adaptive' };
+  }
+  if (!config) return undefined;
   // Anthropic takes `thinking`; @ai-sdk/amazon-bedrock takes `reasoningConfig`.
   return entry.provider === 'anthropic'
     ? { anthropic: { thinking: config } }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { systemPrompt } from './agent-core';
+import { promptOptionsFor, systemPrompt } from './agent-core';
 
 describe('systemPrompt Launch grounding', () => {
   it('omits the Launch object model from non-Launch runs so the cached prefix stays lean', () => {
@@ -61,5 +61,60 @@ describe('systemPrompt publish grounding (conditional)', () => {
     expect(publish).toMatch(/refused in code/i);
     expect(publish).toMatch(/NEVER use action "approve" or "publish"/);
     expect(publish).not.toMatch(/submit → approve → publish\) to the named/);
+  });
+});
+
+describe('systemPrompt recall_objects rule', () => {
+  it('is included only when recall_objects is in the tool set', () => {
+    expect(systemPrompt({ recall: true })).toMatch(/call recall_objects instead of repeating the list call/);
+    expect(systemPrompt({})).not.toMatch(/recall_objects/);
+  });
+
+  it('promptOptionsFor derives every tool flag from the tool set', () => {
+    const t = {} as never;
+    expect(promptOptionsFor({ find_tools: t, recall_objects: t }, { segmentMode: true })).toEqual({
+      toolDiscovery: true,
+      memory: false,
+      recall: true,
+      knowledgeSearch: false,
+      launchMode: false,
+      publishEnabled: false,
+      segmentMode: true,
+    });
+  });
+});
+
+describe('systemPrompt knowledge rule', () => {
+  it('tells the model to search when search_knowledge is present, and allows marked general knowledge either way', () => {
+    const withSearch = systemPrompt({ knowledgeSearch: true });
+    expect(withSearch).toMatch(/call search_knowledge with one specific query/);
+    expect(withSearch).not.toMatch(/You have no knowledge-search tool/);
+    const without = systemPrompt({});
+    expect(without).toMatch(/You have no knowledge-search tool/);
+    for (const p of [withSearch, without]) expect(p).toMatch(/say that part is not from the knowledge base/);
+  });
+});
+
+describe('systemPrompt grounding rules', () => {
+  it('asks for every identifier to be grounded and allows a lookup to resolve one', () => {
+    const p = systemPrompt({ toolDiscovery: true, recall: true });
+    expect(p).toMatch(/never from memory or a plausible-looking guess/);
+    expect(p).toMatch(/a quick read that resolves an id is part of doing the task, not exploration/);
+    expect(p).toMatch(/Read before you change/);
+    expect(p).toMatch(/stored facts, recall_objects or a tool result/);
+  });
+
+  it('no longer tells the model to trust the shortlist or avoid looking', () => {
+    for (const p of [systemPrompt({ toolDiscovery: true }), systemPrompt({})]) {
+      expect(p).not.toMatch(/see what's there/);
+      expect(p).not.toMatch(/trust that they are the ones/);
+      expect(p).toMatch(/the shortlist can miss/);
+    }
+    expect(systemPrompt({ toolDiscovery: true })).toMatch(/look for one with find_tools rather than forcing/);
+    expect(systemPrompt({})).toMatch(/say so rather than forcing/);
+  });
+
+  it('keeps the scope rule: do exactly what was asked', () => {
+    expect(systemPrompt({})).toMatch(/Do exactly what was asked and nothing more/);
   });
 });

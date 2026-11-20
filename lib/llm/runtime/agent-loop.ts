@@ -3,7 +3,7 @@
 import { streamText, stepCountIs, type ModelMessage } from 'ai';
 import { getDefaultModelKey, getModelRegistry, resolveModel } from '../models/model-registry';
 import { effectiveToolCall } from '../tools/tool-discovery';
-import { stage, type LoopContext, type LoopResult } from './agent-core';
+import { promptOptionsFor, stage, type LoopContext, type LoopResult } from './agent-core';
 import { classifyProviderFailure } from '../models/model-health';
 import { classifyTool } from '../tools/tool-policy';
 import { budgetFinalNote, RunBudgetTracker, type BudgetStopReason } from './run-budget';
@@ -16,6 +16,9 @@ import {
   withCacheBreakpoint,
   isHistoryBound,
   contextEditingProviderOptions,
+  contextEditKeepToolUses,
+  contextEditTriggerTokens,
+  CONTEXT_EDIT_EXCLUDED_TOOLS,
   mergeProviderOptions,
   resolveThinkingProviderOptions,
 } from './provider-options';
@@ -97,6 +100,20 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
     tracer = new RunTracer({ ...baseTracerAttrs, 'gen_ai.request.model': resolvedModelKey }, Date.now, ctx.tracerParent);
     // Step index at which a budget forced the wrap-up step; the loop stops after it.
     let forcedAt: number | undefined;
+    // Loop detection vs. lost results: a read whose result was compressed
+    // (below) or cleared server-side (history-bound models) is forgiven once,
+    // so re-fetching it doesn't count toward loop-detected. Reads only —
+    // identical writes are suppressed by the write deduper instead.
+    const forgiven = new Set<string>();
+    const forgive = (toolCallId: string, toolName: string, input: unknown): void => {
+      if (forgiven.has(toolCallId)) return;
+      forgiven.add(toolCallId);
+      const call = effectiveToolCall(toolName, input);
+      if (classifyTool(call.toolName) === 'read') budget.forgive(call.toolName, call.input);
+    };
+    // History-bound models: every tool call so far, oldest first, to work out
+    // which results server-side clearing may have removed.
+    const issued: Array<{ toolCallId: string; toolName: string; input: unknown }> = [];
 
     // TASK 10: resolve thinking config for this model + request combination
     const thinkingProviderOptions = resolveThinkingProviderOptions(resolvedModelKey, ctx.thinkingBudget);
@@ -104,6 +121,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       console.log(`[agent] extended thinking enabled (${resolvedModelKey}): ${JSON.stringify(thinkingProviderOptions)}`);
     }
     const historyBound = isHistoryBound(resolvedModelKey);
+    const thinkingOn = Boolean(thinkingProviderOptions);
     const conversationCacheMarker = cacheMarker(resolvedModelKey);
     const providerOptions = mergeProviderOptions(
       thinkingProviderOptions,
@@ -122,7 +140,7 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
       const stream = streamText({
         model: resolveModel(resolvedModelKey),
         // TASK 1: system prompt with provider-specific cache markers
-        instructions: buildSystemMessage(resolvedModelKey, 'find_tools' in tools, 'remember_fact' in tools, launchMode, publishEnabled, segmentMode === true),
+        instructions: buildSystemMessage(resolvedModelKey, promptOptionsFor(tools, { launchMode, publishEnabled, segmentMode })),
         messages: [{ role: 'user', content: userMessage }],
         tools,
         stopWhen: [stepCountIs(maxSteps), ({ steps }) => forcedAt !== undefined && steps.length > forcedAt],
@@ -156,6 +174,10 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // for.
           else if (historyBound && isLastStep) {
             notes.push(ctx.forceFinalTool ? `Call ${ctx.forceFinalTool} now.` : FINAL_STEP_NOTE);
+          } else if (thinkingOn && isLastStep && ctx.forceFinalTool) {
+            // Thinking rejects a forced tool choice (only auto / none are
+            // allowed), so a thinking worker is told to call its tool instead.
+            notes.push(`Call ${ctx.forceFinalTool} now.`);
           }
           const withNotes = (base: ModelMessage[]): ModelMessage[] =>
             notes.length ? [...base, { role: 'user' as const, content: notes.join('\n\n') }] : base;
@@ -171,11 +193,11 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // TASK 2: compress tool results from steps older than the threshold
           // so large list/read payloads don't accumulate at full size in the
           // context that's resent on every turn. The trace (onStep /
-          // result.steps) keeps the uncompressed (8K-capped) results; only
+          // result.steps) keeps the uncompressed (size-trimmed) results; only
           // the in-flight model context is shrunk. Only compress when there's enough history
           // to be worth it — the most recent RESULT_SUMMARY_THRESHOLD steps
           // stay at full fidelity.
-          const compressedMessages = compressOldToolMessages(messages, steps.length);
+          const compressedMessages = compressOldToolMessages(messages, steps.length, { recall: 'recall_objects' in tools, onCompressed: forgive });
 
           // TASK 3: force text-only on the final allowed step. Phase 2: a
           // worker instead forces its wrap-up tool (report_result) on that
@@ -184,7 +206,9 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
           // forceFinalTool unset, so they keep forcing 'none' exactly as
           // before.
           const lastStepToolChoice = ctx.forceFinalTool
-            ? ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
+            ? thinkingOn
+              ? ('auto' as const)
+              : ({ type: 'tool', toolName: ctx.forceFinalTool } as const)
             : ('none' as const);
           return {
             toolChoice: isLastStep ? lastStepToolChoice : 'auto',
@@ -195,6 +219,13 @@ export async function executeLoop(ctx: LoopContext): Promise<LoopResult> {
         onStepEnd: (step) => {
           const stepNumber = stepIndex++;
           const trace = toStepTrace(step, stepNumber);
+          // This step's request crossed the clearing trigger, so the server may
+          // have cleared every result but the newest few kept tool uses.
+          if (historyBound && (step.usage.inputTokens ?? 0) >= contextEditTriggerTokens()) {
+            const clearable = issued.filter((c) => !CONTEXT_EDIT_EXCLUDED_TOOLS.includes(c.toolName));
+            for (const c of clearable.slice(0, Math.max(0, clearable.length - contextEditKeepToolUses()))) forgive(c.toolCallId, c.toolName, c.input);
+          }
+          if (historyBound) for (const c of step.toolCalls) issued.push({ toolCallId: c.toolCallId, toolName: c.toolName, input: c.input });
           budget.recordStep(
             step.usage,
             step.toolCalls.map((c) => effectiveToolCall(c.toolName, c.input))

@@ -91,7 +91,7 @@ export function idFromResult(result: unknown): string | undefined {
   }
   const obj = asObject(result);
   if (!obj) {
-    // A truncated result (capToolResult) is a string prefix of the JSON.
+    // A text preview (result-trim.ts fallback, or an older sliced result) is a string prefix of the JSON.
     return typeof result === 'string' ? result.match(/"id"\s*:\s*"([^"]+)"/)?.[1] : undefined;
   }
   return str(obj.id) ?? str(asObject(obj.data)?.id) ?? str(obj.$id) ?? str(obj['@id']) ?? str(asObject(obj.result)?.id);

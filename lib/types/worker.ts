@@ -12,13 +12,13 @@ export type WorkerStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled
 
 /**
  * The structured result a worker hands back with the report_result tool
- * (Requirement 5.1). `summary` is capped at 1,000 and `notes` at 500 chars by
- * the tool before it reaches here (Requirement 5.2).
+ * (Requirement 5.1). `summary` is capped at 2,000 and `notes` at 500 chars by
+ * the tool before it reaches here (Requirement 5.2; the summary cap was 1,000).
  */
 export interface WorkerResult {
   stepId: number;
   status: 'done' | 'failed';
-  /** ≤ 1,000 chars. */
+  /** ≤ 2,000 chars. */
   summary: string;
   /** Ids a dependent step needs, e.g. { dataElementId: 'DE123' }. */
   ids: Record<string, string>;
@@ -31,6 +31,21 @@ export interface WorkerResult {
    * changed nothing.
    */
   objects?: ChangedObject[];
+  /**
+   * Objects this worker's tool results showed it (ids from reads, not
+   * changes), from its own steps (object-ledger.ts extractObjects), capped.
+   * Before this, a dependent step got only the ids the model chose to put in
+   * report_result, and an id it read but didn't report was lost. Absent when
+   * it saw none.
+   */
+  seen?: SeenObject[];
+}
+
+/** An object a worker's tool results showed it. */
+export interface SeenObject {
+  id: string;
+  label?: string;
+  kind?: string;
 }
 
 /**

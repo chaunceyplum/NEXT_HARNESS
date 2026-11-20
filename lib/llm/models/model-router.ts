@@ -44,8 +44,15 @@ export function routingEnabledByDefault(): boolean {
   return process.env.MODEL_ROUTING?.trim().toLowerCase() === 'true';
 }
 
+/**
+ * Category → tier. "lookup" used to go to the cheap tier (Haiku 4.5), but on
+ * this platform a lookup is rarely trivial — "which segments target CBM
+ * members?" means reading segment PQL against the business glossary — and
+ * the cheap tier answered those badly. It now goes to balanced; set
+ * ROUTE_TIERS='{"lookup":"cheap"}' to trade quality back for cost.
+ */
 const DEFAULT_TIERS: Record<Exclude<RouteCategory, 'unclear'>, ModelTier> = {
-  lookup: 'cheap',
+  lookup: 'balanced',
   change: 'balanced',
   build: 'expensive',
 };

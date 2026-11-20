@@ -41,8 +41,11 @@ import { resolveModel } from '../models/model-registry';
 import { acquireLoopSlot } from './agent-slots';
 import { estimateCostUsd, toTokenUsage, type SdkUsage } from '../models/pricing';
 import {
+  menuEntries,
   readySteps,
   parallelWidth,
+  toolMenu,
+  type ToolMenuEntry,
   type Plan,
   type PlanStep,
   type PlanTracker,
@@ -514,7 +517,7 @@ export async function runOrchestrated(input: OrchestratorInput): Promise<AgentRu
         results,
         failed,
         modelKey: input.runModelKey,
-        toolNames: input.toolsConsidered,
+        tools: menuEntries(input.tools, [...input.toolsConsidered, ...['find_tools', 'call_tool', 'search_knowledge', 'recall_objects'].filter((n) => n in input.tools)]),
         abortSignal: input.abortSignal,
       });
       chargeCall(input.runModelKey, reply.usage);
@@ -654,7 +657,7 @@ async function requestReplan(args: {
   results: Map<number, WorkerResult>;
   failed: PlanStep[];
   modelKey: string;
-  toolNames: string[];
+  tools: ToolMenuEntry[];
   abortSignal?: AbortSignal;
 }): Promise<{ object: ReplanResult; usage?: CallUsage }> {
   // The revised plan renumbers the completed steps 1..n in this order and
@@ -691,7 +694,7 @@ async function requestReplan(args: {
         '',
         failureLines.length ? `Failed:\n${failureLines.join('\n')}` : '',
         '',
-        `Tools available: ${args.toolNames.join(', ')}`,
+        `Tools available:\n${toolMenu(args.tools)}`,
       ].join('\n'),
       ...(args.abortSignal ? { abortSignal: args.abortSignal } : {}),
     });
@@ -716,6 +719,9 @@ interface SynthesisResult {
  * falls back to a plain list of the step summaries so the run still returns an
  * answer (Error-handling table: "Synthesis call fails").
  */
+/** Found objects per step shown to the synthesis call (changed objects are always shown). */
+const SYNTHESIS_SEEN_OBJECTS = 20;
+
 async function synthesize(args: {
   goal: string;
   request?: string;
@@ -730,7 +736,15 @@ async function synthesize(args: {
     const r = args.results.get(s.id);
     const ids = r && Object.keys(r.ids).length ? ` ids=${JSON.stringify(r.ids)}` : '';
     const detail = r ? `${r.summary}${ids}${r.notes ? ` — ${r.notes}` : ''}` : s.note ?? '';
-    return `- Step ${s.id} [${s.status}] ${s.description}${detail ? `: ${detail}` : ''}`;
+    // What the step verifiably changed and found (from its tool calls, not
+    // the model's report), so the answer's ids come from real results.
+    const changed = r?.objects?.length
+      ? `\n    changed: ${r.objects.map((o) => `${o.change} ${o.kind} ${o.id}${o.name ? ` ("${o.name}")` : ''}`).join('; ')}`
+      : '';
+    const found = r?.seen?.length
+      ? `\n    found: ${r.seen.slice(0, SYNTHESIS_SEEN_OBJECTS).map((o) => `${o.id}${o.label ? ` ("${o.label}")` : ''}`).join('; ')}${r.seen.length > SYNTHESIS_SEEN_OBJECTS ? `; +${r.seen.length - SYNTHESIS_SEEN_OBJECTS} more` : ''}`
+      : '';
+    return `- Step ${s.id} [${s.status}] ${s.description}${detail ? `: ${detail}` : ''}${changed}${found}`;
   });
 
   const prompt = [

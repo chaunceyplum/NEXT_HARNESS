@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, afterEach } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import { tool, jsonSchema, type ToolSet } from 'ai';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
@@ -15,7 +15,7 @@ type Scripted =
   | { text: string }
   | { throw: string };
 let script: Scripted[] = [];
-let calls: Array<{ toolChoice?: { type: string; toolName?: string }; tools?: Array<{ name: string }> }> = [];
+let calls: Array<{ toolChoice?: { type: string; toolName?: string }; tools?: Array<{ name: string }>; prompt: unknown[] }> = [];
 let executed: Array<{ name: string; input: unknown }> = [];
 
 vi.mock('../models/model-registry', () => {
@@ -79,7 +79,9 @@ vi.mock('../models/model-registry', () => {
   };
 });
 
-const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS } = await import('./worker');
+afterEach(() => vi.unstubAllEnvs());
+
+const { runWorker, workerTools, reportResultTool, buildWorkerBrief, serialiseWrites, WriteLock, MAX_SUMMARY_CHARS, MAX_NOTES_CHARS, seenObjects, MAX_SEEN_OBJECTS } = await import('./worker');
 const { ModelHealthTracker } = await import('../models/model-health');
 const { RunLedger, resolveBudget } = await import('./run-budget');
 const { LaunchValidationGate } = await import('../domains/launch/validation');
@@ -221,11 +223,11 @@ describe('serialiseWrites (Req 3.4)', () => {
 });
 
 describe('reportResultTool', () => {
-  it('truncates summary to 1,000 and notes to 500 chars and binds the step id (Req 5.1, 5.2)', async () => {
+  it('truncates summary to 2,000 and notes to 500 chars and binds the step id (Req 5.1, 5.2)', async () => {
     let got: unknown;
     const t = reportResultTool(7, (r) => { got = r; });
     await t.execute!(
-      { status: 'done', summary: 's'.repeat(1_500), ids: { dataElementId: 'DE1' }, notes: 'n'.repeat(900) },
+      { status: 'done', summary: 's'.repeat(2_500), ids: { dataElementId: 'DE1' }, notes: 'n'.repeat(900) },
       { toolCallId: 'c', messages: [] } as never
     );
     expect(got).toMatchObject({ stepId: 7, status: 'done', ids: { dataElementId: 'DE1' } });
@@ -267,6 +269,15 @@ describe('buildWorkerBrief', () => {
     expect(brief).toContain('call report_result');
   });
 
+  it('hands a dependent step the objects an earlier step\'s reads found', () => {
+    const brief = buildWorkerBrief({
+      runGoal: 'Apply the field group',
+      step: makeStep(),
+      deps: [{ stepId: 1, status: 'done', summary: 'listed schemas', ids: {}, seen: [{ id: 'https://ns.adobe.com/acme/schemas/aaa', label: 'Web Interactions', kind: 'schemas' }] }],
+    });
+    expect(brief).toContain('Objects it found: schemas https://ns.adobe.com/acme/schemas/aaa ("Web Interactions")');
+  });
+
   it('gives a dependent step typed references to what an earlier step actually changed', () => {
     const brief = buildWorkerBrief({
       runGoal: 'Tag the cart',
@@ -300,6 +311,8 @@ describe('buildWorkerBrief', () => {
 
 describe('runWorker', () => {
   it('runs the step, forces report_result on the last step, and returns its result (Req 4.2, 4.6)', async () => {
+    // Forcing a tool is only possible with thinking off (see the next test).
+    vi.stubEnv('THINKING_MODE', 'off');
     script = [
       { toolCall: { toolName: 'reactor_create_data_element', input: { id: 'x' } } },
       report({ status: 'done', summary: 'created', ids: { dataElementId: 'DE9' } }),
@@ -320,6 +333,17 @@ describe('runWorker', () => {
     for (const c of calls) {
       expect((c.tools ?? []).map((t) => t.name)).not.toContain('adobe_list_segments');
     }
+  });
+
+  it('with thinking on, asks for report_result instead of forcing it (thinking rejects forced tool choice)', async () => {
+    script = [
+      { toolCall: { toolName: 'reactor_create_data_element', input: { id: 'x' } } },
+      report({ status: 'done', summary: 'created', ids: { dataElementId: 'DE9' } }),
+    ];
+    const rec = await runWorker(baseInput());
+    expect(rec.status).toBe('done');
+    expect(calls.some((c) => c.toolChoice?.type === 'tool')).toBe(false);
+    expect(calls.some((c) => JSON.stringify(c.prompt.at(-1)).includes('Call report_result now.'))).toBe(true);
   });
 
   it('marks the step failed when report_result reports failed (Req 5.4)', async () => {
@@ -451,5 +475,30 @@ describe('runWorker', () => {
     // The worker ran as a Launch worker (gated Launch run).
     const launchCall = calls.find((c) => (c.tools ?? []).some((t) => t.name === 'reactor_create_library'));
     expect(launchCall).toBeDefined();
+  });
+});
+
+describe('seenObjects', () => {
+  const steps = [
+    {
+      toolResults: [
+        { toolName: 'adobe_list_schemas', output: { results: [{ $id: 's1', title: 'Web' }, { $id: 's2', title: 'Email' }] } },
+        { toolName: 'adobe_get_schema', output: undefined, error: '404 not found' },
+        { toolName: 'report_result', output: { id: 'ignored' } },
+      ],
+    },
+    { toolResults: [{ toolName: 'adobe_create_field_group', output: { $id: 'fg1', title: 'Attribution' } }, { toolName: 'adobe_list_schemas', output: { results: [{ $id: 's1', title: 'Web' }] } }] },
+  ];
+
+  it('collects ids from successful results, deduped, without what the worker changed', () => {
+    expect(seenObjects(steps, new Set(['fg1']))).toEqual([
+      { id: 's1', label: 'Web', kind: 'schemas' },
+      { id: 's2', label: 'Email', kind: 'schemas' },
+    ]);
+  });
+
+  it('caps the list', () => {
+    const many = [{ toolResults: [{ toolName: 'adobe_list_datasets', output: Array.from({ length: 200 }, (_, i) => ({ id: `ds${i}` })) }] }];
+    expect(seenObjects(many, new Set())).toHaveLength(MAX_SEEN_OBJECTS);
   });
 });

@@ -11,7 +11,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { systemPrompt } from './llm/runtime/agent-core';
+import { systemPrompt, type PromptOptions } from './llm/runtime/agent-core';
 
 /** First 12 hex chars of the sha256 of `input`. The project-wide version-hash convention. */
 export function shortHash(input: string): string {
@@ -31,13 +31,13 @@ export function shortHash(input: string): string {
  * Each defaults false, keeping the eval's historical value stable — a
  * non-publish/non-launch run's fingerprint does not shift.
  */
-export function promptVersion(
-  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean } = {}
-): string {
+export function promptVersion(opts: PromptOptions = {}): string {
   return shortHash(
     systemPrompt({
       toolDiscovery: opts.toolDiscovery ?? false,
       memory: opts.memory ?? false,
+      recall: opts.recall ?? false,
+      knowledgeSearch: opts.knowledgeSearch ?? false,
       launchMode: opts.launchMode ?? false,
       publishEnabled: opts.publishEnabled ?? false,
       segmentMode: opts.segmentMode ?? false,

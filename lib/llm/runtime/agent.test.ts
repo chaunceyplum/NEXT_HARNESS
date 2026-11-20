@@ -307,20 +307,70 @@ describe('runAgent loop shape', () => {
   it('on other models, compresses old tool results in batches and forces text on the last step', async () => {
     // Different arguments each time, so loop detection doesn't end the run early.
     const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
-    script = [...['a', 'b', 'c', 'd', 'e', 'f'].map(listPage), { text: 'final' }];
-    await runAgent({ userInput: 'list segments six times', modelKey: 'test:plain', maxSteps: 7 });
+    script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map(listPage), { text: 'final' }];
+    await runAgent({ userInput: 'list segments eight times', modelKey: 'test:plain', maxSteps: 9 });
 
     const last = calls.at(-1)!;
     expect(last.toolChoice?.type).toBe('none');
     expect(JSON.stringify(last.prompt)).toContain('[compressed to save context]');
-    expect(calls[0].providerOptions?.anthropic).toBeUndefined();
-    // The history is rewritten only when a batch of 4 old results is
-    // compressed (at the 6th result), not once per step, so it stays cached.
+    // No server-side context editing on a model that isn't history-bound.
+    expect((calls[0].providerOptions?.anthropic as Record<string, unknown> | undefined)?.contextManagement).toBeUndefined();
+    // The 4 newest results stay intact, and the history is rewritten only
+    // when a batch of 4 older ones is compressed (at the 8th result), not
+    // once per step, so it stays cached.
     const rewrites = calls.slice(1).filter((c, i) => {
       const prev = withoutMarkers(calls[i].prompt);
       return JSON.stringify(withoutMarkers(c.prompt).slice(0, prev.length)) !== JSON.stringify(prev);
     });
     expect(rewrites).toHaveLength(1);
+  });
+
+  it('does not call re-fetching a compressed result a loop', async () => {
+    const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
+    // 8 distinct lists, so the 4 oldest (a..d) are compressed, then 'a' again three times.
+    // Without forgiveness 'a' would be on its 4th identical call and the run would stop.
+    script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'a', 'a', 'a'].map(listPage), { text: 'final' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', maxSteps: 13 });
+    expect(result.stopReason).toBeUndefined();
+    expect(result.finalText).toBe('final');
+  });
+
+  it('still stops a real loop on a result that was never compressed', async () => {
+    const same: Scripted = { toolCall: { toolName: 'adobe_list_segments', input: { id: 'z' } } };
+    script = [same, same, same, same, same, { text: 'final' }];
+    const result = await runAgent({ userInput: 'list segments', modelKey: 'test:plain', maxSteps: 8 });
+    expect(result.stopReason).toBe('loop-detected');
+  });
+
+  it('on history-bound models, forgives re-fetches once input passes the clearing trigger', async () => {
+    const listPage = (id: string): Scripted => ({ toolCall: { toolName: 'adobe_list_segments', input: { id } } });
+    const before = usage.inputTokens.total;
+    usage.inputTokens.total = 120_000; // past the 100K default: the server may have cleared all but 6 tool uses
+    try {
+      script = [...['a', 'b', 'c', 'd', 'e', 'f', 'g', 'a', 'a', 'a'].map(listPage), { text: 'final' }];
+      const result = await runAgent({ userInput: 'list segments', modelKey: 'test:sonnet55', maxSteps: 12 });
+      expect(result.stopReason).toBeUndefined();
+    } finally {
+      usage.inputTokens.total = before;
+    }
+  });
+
+  it('turns on adaptive thinking by default, and THINKING_MODE=off / THINKING_BUDGET_TOKENS=0 turn it off', async () => {
+    script = [{ text: 'final' }];
+    await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+    expect(calls[0].providerOptions?.anthropic).toMatchObject({ thinking: { type: 'adaptive' } });
+
+    for (const [name, value] of [['THINKING_MODE', 'off'], ['THINKING_BUDGET_TOKENS', '0']] as const) {
+      vi.stubEnv(name, value);
+      try {
+        calls = [];
+        script = [{ text: 'final' }];
+        await runAgent({ userInput: 'list segments', modelKey: 'test:plain' });
+        expect((calls[0].providerOptions?.anthropic as Record<string, unknown> | undefined)?.thinking, name).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    }
   });
 
   it('marks only the system prompt and the newest message for caching', async () => {
@@ -517,7 +567,7 @@ describe('runAgent plan-first', () => {
 });
 
 describe('runAgent knowledge retrieval', () => {
-  it('never offers the model a knowledge-search tool, directly or through call_tool', async () => {
+  it('never offers the model the raw MCP knowledge tool, directly or through call_tool', async () => {
     script = [
       { toolCall: { toolName: 'call_tool', input: { tool_name: 'search_adobe_knowledge', arguments: { query: 'merge policy' } } } },
       { text: 'no search' },
@@ -526,6 +576,27 @@ describe('runAgent knowledge retrieval', () => {
     expect((calls[0].tools ?? []).map((t) => t.name)).not.toContain('search_adobe_knowledge');
     expect(result.steps[0].toolResults[0].error).toMatch(/not available on this run/);
     expect(executed).toEqual([]);
+  });
+
+  it('offers search_knowledge, which searches the knowledge base through the MCP tool, and says so in the prompt', async () => {
+    script = [{ toolCall: { toolName: 'search_knowledge', input: { query: 'merge policy' } } }, { text: 'done' }];
+    const result = await runAgent({ userInput: 'explain merge policies', modelKey: 'test:plain' });
+    expect((calls[0].tools ?? []).map((t) => t.name)).toContain('search_knowledge');
+    expect(JSON.stringify(calls[0].prompt[0])).toContain('call search_knowledge');
+    expect(executed).toEqual([{ name: 'search_adobe_knowledge', input: { query: 'merge policy' } }]);
+    expect(result.steps[0].toolResults[0].output).toMatchObject({ search: '1 of 4' });
+  });
+
+  it('drops search_knowledge (and its prompt rule) with KNOWLEDGE_SEARCHES_PER_RUN=0', async () => {
+    vi.stubEnv('KNOWLEDGE_SEARCHES_PER_RUN', '0');
+    try {
+      script = [{ text: 'done' }];
+      await runAgent({ userInput: 'explain merge policies', modelKey: 'test:plain' });
+      expect((calls[0].tools ?? []).map((t) => t.name)).not.toContain('search_knowledge');
+      expect(JSON.stringify(calls[0].prompt[0])).toContain('You have no knowledge-search tool');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('hands the planning-stage excerpts to the planner and the executor', async () => {

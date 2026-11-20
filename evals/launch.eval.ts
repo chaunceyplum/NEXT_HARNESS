@@ -38,6 +38,7 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import { runAgent } from '@/lib/llm/runtime/agent';
+import { objectLedgerEnabled } from '@/lib/llm/tools/object-ledger';
 import { promptVersion } from '@/lib/version';
 import { ModelHealthTracker } from '@/lib/llm/models/model-health';
 import { estimateCostUsd } from '@/lib/llm/models/pricing';
@@ -105,7 +106,7 @@ const judgeFallbackKey = judgeFallbackModelKey(judgeKey);
 const trials = trialsPerFixture();
 // Launch-mode prompt version: this suite runs with launchMode: true, so the
 // recorded version matches what runAgent builds here (object-model grounding on).
-const promptVersionHash = promptVersion({ launchMode: true });
+const promptVersionHash = promptVersion({ launchMode: true, recall: objectLedgerEnabled() });
 const pre = await preflight('launch eval', [
   { role: 'model under test', key: modelKey, source: modelSource('model') },
   { role: 'judge', key: judgeKey, source: modelSource('judge') },

@@ -193,8 +193,11 @@ request to a model tier instead of using one model for everything:
 - Clear cases are decided by keyword rules at no cost. The rest go to one
   structured call on the cheap tier, which returns lookup, change, build or
   unclear.
-- Default mapping: lookup → cheap, change → balanced, build → expensive,
-  on the default model's provider (unhealthy models skipped).
+- Default mapping: lookup → balanced, change → balanced, build → expensive,
+  on the default model's provider (unhealthy models skipped). Lookups used
+  to go to the cheap tier, which answered AEP lookups (reading segment PQL,
+  field paths, the business glossary) badly; `ROUTE_TIERS='{"lookup":"cheap"}'`
+  restores that if cost matters more.
 - **unclear** → the run returns the router's clarifying question instead
   of guessing. Low confidence → the default model.
 - A request that names a specific model is never re-routed. Routed runs
@@ -203,7 +206,7 @@ request to a model tier instead of using one model for everything:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MODEL_ROUTING` | `false` | `true` makes Auto the default when a request names no model |
-| `ROUTE_TIERS` | `{"lookup":"cheap","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
+| `ROUTE_TIERS` | `{"lookup":"balanced","change":"balanced","build":"expensive"}` | Category → tier overrides (partial JSON is merged) |
 | `ROUTER_MIN_CONFIDENCE` | `0.6` | Below this, use the default model |
 | `ROUTER_CLARIFY` | `true` | `false` sends unclear requests to the default model instead of asking |
 
@@ -270,6 +273,50 @@ RAG_JUDGE_MODEL=bedrock:cheap   # any registry key; defaults to DEFAULT_MODEL
 
 ---
 
+## Tool result size (`lib/llm/tools/result-trim.ts`)
+
+Every tool result is trimmed before the model sees it. Trimming is
+structural, never a slice of the JSON text: long strings are shortened
+first, then list items lose their nested detail, then they keep only their
+identity fields (id, `$id`, name, title, type, status, `*_id` …). Only if
+even that index is too big are lists cut, and the result then says how many
+items were left out. Each trimmed result carries a `_trimmed` note.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TOOL_RESULT_MAX_CHARS` | `10000` | Size a trimmed result must fit. Min 1000. |
+| `TOOL_RESULT_INDEX_MAX_CHARS` | `20000` | Larger ceiling for an identity-only index of a big list, so every id survives. Never below `TOOL_RESULT_MAX_CHARS`. |
+
+## Context retention (`lib/llm/tools/object-ledger.ts`, `lib/llm/runtime/context-compression.ts`, `lib/llm/runtime/provider-options.ts`)
+
+Older tool results leave the model's context as a run goes on. The object
+ledger keeps the ids they carried: every object a tool result shows (its
+`$id` / `id`, name or title, kind and sandbox) is recorded for the run, and
+the `recall_objects` tool reads it back, so the model never needs to repeat
+a list call or guess an id. Compressed results also name the ids they held.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OBJECT_LEDGER` | `true` | `false` turns the ledger and `recall_objects` off. |
+| `CONTEXT_EDIT_TRIGGER_TOKENS` | `100000` | History-bound models (Opus/Sonnet/Haiku 5.5): input size at which the API starts clearing old tool results server-side. Was 30000. Min 10000. |
+| `CONTEXT_EDIT_KEEP_TOOL_USES` | `6` | Most recent tool uses that server-side clearing keeps. Was 3. |
+
+On other models the 4 most recent tool messages stay at full size (was 2);
+older results above 500 chars are compressed in batches of 4.
+
+## Knowledge search (`lib/llm/tools/knowledge-search.ts`)
+
+Besides the one up-front planning lookup and tool-error grounding, the model
+can search the knowledge base itself with `search_knowledge`, a few times
+per run. Results go through the same wrapper as before (capped at 4,000
+chars, weak-retrieval hint, sampled by the RAG judge); a repeated query
+returns the stored result without using a search. The raw MCP knowledge
+tools are still never handed to the model.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KNOWLEDGE_SEARCHES_PER_RUN` | `4` | Searches per run (per worker in an orchestrated run). `0` removes the tool and restores planning-only retrieval. Max 20. |
+
 ## Tool call timeouts (`lib/fetch-timeout.ts`)
 
 Every outbound request in the tool path has a deadline. A timeout surfaces
@@ -299,13 +346,21 @@ run's `stopReason` is set so the UI flags the answer as partial.
 
 A request can set tighter `maxTokens` / `maxCostUsd`, never looser ones.
 
-## Extended thinking (`lib/llm/runtime/agent.ts`)
+## Extended thinking (`lib/llm/runtime/provider-options.ts`)
 
-- `THINKING_BUDGET_TOKENS` (unset = off): turns on extended thinking for
-  Claude models (Anthropic direct or on Bedrock). Values below `1024` are
-  ignored. Older models get a fixed budget of this many tokens; newer ones
-  that reject fixed budgets get adaptive thinking instead. A request's
-  `thinkingBudget` takes precedence.
+- `THINKING_MODE` (default `adaptive`): with no budget set, Claude models
+  that size their own thinking (Sonnet 5, Opus 4.7+, the 5.x family) run
+  with adaptive thinking. Budget-only models (Haiku 4.5 and older) stay off
+  unless a budget is set. `off` restores the old default (no thinking
+  unless a budget is set). It used to be off, so the default model ran
+  multi-step AEP work without thinking.
+- `THINKING_BUDGET_TOKENS`: an explicit budget wins over `THINKING_MODE`.
+  At least `1024` turns thinking on (a fixed budget on older models,
+  adaptive on newer ones); `0` turns it off. A request's `thinkingBudget`
+  takes precedence over both.
+- With thinking on, an orchestrated worker's last step is asked to call
+  `report_result` rather than forced to (the API rejects a forced tool
+  choice while thinking).
 
 ## Tool catalog scope and tool policy (`lib/llm/tools/tool-catalog.ts`, `lib/llm/tools/tool-policy.ts`)
 
@@ -482,6 +537,11 @@ If planning fails, the run continues without a plan.
     the original answer".
   - `npm run eval:critic` measures the critic's catch rate and false-flag
     rate on labelled answers. Run it before switching to `revise`.
+  - `JUDGE_ACTIVITY_MAX_CHARS` (default `40000`, was a fixed 6000): size of
+    the tool-activity evidence the critic, the online judge and the eval
+    judge see. Every call line is kept and results are trimmed
+    structurally; when over budget, read results shrink first and their
+    bodies are dropped oldest first, so writes and errors keep detail.
 - **Retrieval hints:** a knowledge search that returns nothing, or results
   sharing almost none of the query's key terms, gets a `_retrievalHint`
   telling the model to rewrite the query and search once more (or say

@@ -19,13 +19,15 @@ import type { RagJudgmentSink, RagJudgmentEntry } from '../tools/tool-catalog';
 import type { RouteDecision } from '../models/model-router';
 import type { AttrValue, SpanRef } from '../../tracing';
 import type { ToolCallGate } from '../tools/tool-policy';
+import type { ObjectLedger } from '../tools/object-ledger';
 import { domainPromptBlocks } from '../domains';
 
 /**
  * Tools always available regardless of the shortlist, because the requests
- * that need them don't reliably embed close enough to win a slot. No
- * knowledge-search tool belongs here: the model never gets one — retrieval
- * runs at planning (planning-retrieval.ts) and on tool errors only.
+ * that need them don't reliably embed close enough to win a slot. No raw
+ * knowledge-search tool belongs here: the model searches only through
+ * search_knowledge (knowledge-search.ts, added in tool-selection.ts with a
+ * per-run limit), besides the planning lookup and tool-error grounding.
  *
  * Only list names that are actually present in the live MCP catalog —
  * ALWAYS_ON_TOOLS is filtered against it in agent.ts, so a stale name here
@@ -86,9 +88,41 @@ function getEnvironmentContext(): string {
  *   runs about segments, audiences or PQL. Defaults false, so every other
  *   run's prompt and fingerprint are unchanged.
  */
-export function systemPrompt(
-  opts: { toolDiscovery?: boolean; memory?: boolean; launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean } = {}
-): string {
+/**
+ * Everything the system prompt varies on. The tool flags (toolDiscovery,
+ * memory, recall) say whether a tool is in the run's tool set, so a rule is
+ * only included when the tool it names exists — build them with
+ * promptOptionsFor() rather than by hand.
+ */
+export interface PromptOptions {
+  toolDiscovery?: boolean;
+  memory?: boolean;
+  /** recall_objects (object-ledger.ts) is in the tool set. */
+  recall?: boolean;
+  /** search_knowledge (knowledge-search.ts) is in the tool set. */
+  knowledgeSearch?: boolean;
+  launchMode?: boolean;
+  publishEnabled?: boolean;
+  segmentMode?: boolean;
+}
+
+/** The prompt flags for a tool set plus the run's domain modes. One source for the loop and for promptVersion. */
+export function promptOptionsFor(
+  tools: ToolSet,
+  modes: { launchMode?: boolean; publishEnabled?: boolean; segmentMode?: boolean }
+): PromptOptions {
+  return {
+    toolDiscovery: 'find_tools' in tools,
+    memory: 'remember_fact' in tools,
+    recall: 'recall_objects' in tools,
+    knowledgeSearch: 'search_knowledge' in tools,
+    launchMode: modes.launchMode === true,
+    publishEnabled: modes.publishEnabled === true,
+    segmentMode: modes.segmentMode === true,
+  };
+}
+
+export function systemPrompt(opts: PromptOptions = {}): string {
   const envCtx = getEnvironmentContext();
 
   const lines = [
@@ -115,18 +149,27 @@ export function systemPrompt(
   lines.push(
     '',
     'Rules:',
-    '- Before calling any tool, work out the minimal ordered sequence of concrete steps that satisfies the request — think like a software engineer scoping a task, not like someone exploring. Then execute that sequence. Do not start calling tools to "see what\'s there" on an ambiguous or broad request; narrow it down in your reasoning first.',
+    '- Before acting, work out the ordered steps the request needs — think like a software engineer scoping a task. Then execute them.',
+    '- Ground every identifier you use. Sandbox names, schema / field group / dataset / segment ids, Launch property and library ids, CJA data view ids and field paths must come from the request, the deployment context, stored facts, ' + (opts.recall ? 'recall_objects ' : '') + 'or a tool result in this run — never from memory or a plausible-looking guess. When one is missing, look it up with the narrowest list, get or search call that returns it; a quick read that resolves an id is part of doing the task, not exploration.',
+    '- Read before you change: check the current state of anything a write depends on (does it exist, what are its current fields, which version) unless this run already read it. Do not make reads that no step needs, and do not browse broadly "just in case".',
     '- Do exactly what was asked and nothing more. Do not add unrequested features, extra abstractions, speculative scaffolding, or "while I\'m at it" work the user did not ask for — even if it seems like a natural next step. If the request is genuinely ambiguous or smaller/larger than what a full solution would need, do the literal ask and say so in your final answer rather than guessing at expanded scope.',
-    '- Always prefer the narrowest tool that satisfies the request. Do not call broad or unrelated tools "just in case" — the tools you see were picked for this request, so trust that they are the ones worth considering.',
+    '- Prefer the narrowest tool that does each step. The tools you see were shortlisted for this request, but the shortlist can miss: if none fits a step, ' + (opts.toolDiscovery ? 'look for one with find_tools' : 'say so') + ' rather than forcing an unrelated tool to do it.',
     ...(opts.toolDiscovery
       ? ['- If a step needs a tool that is not in your tool list, call find_tools with a short description of the capability, then run the match with call_tool. Only do this for a concrete gap — not to browse the catalog.']
+      : []),
+    ...(opts.recall
+      ? [
+          '- Ids and names that earlier tool results showed stay available through recall_objects, even after those results are compressed or cleared from your context. When you need one again, call recall_objects instead of repeating the list call, and never reconstruct or guess an id from memory.',
+        ]
       : []),
     ...(opts.memory
       ? [
           '- When you confirm a stable identifier that later runs will need (which sandbox is production, a Launch property id, the repo tags live in, a merge policy id), save it with remember_fact. Only save identifiers you verified with a tool, never credentials, personal data or one-off results. If a fact from memory turns out to be wrong, correct it with remember_fact.',
         ]
       : []),
-    '- You have no knowledge-search tool. Knowledge-base excerpts, when any were found, are provided with the request; a tool error may also carry knowledge-base findings in its retry history (raggedBefore). Ground your actions in those, and when your answer relies on them, name the source titles you used.',
+    opts.knowledgeSearch
+      ? '- Knowledge-base excerpts, when any were found, are provided with the request, and a tool error may carry more in its retry history (raggedBefore). When you need documented behaviour, constraints, required fields or how-to steps those do not cover — especially before a write whose correct arguments you are unsure of — call search_knowledge with one specific query. Its searches are limited per run, so do not repeat or loosely vary a query. When your answer relies on knowledge-base results, name the source titles; when the knowledge base has nothing on a point, you may answer from general Adobe knowledge, but say that part is not from the knowledge base.'
+      : '- You have no knowledge-search tool. Knowledge-base excerpts, when any were found, are provided with the request; a tool error may also carry knowledge-base findings in its retry history (raggedBefore). Ground your actions in those, and when your answer relies on them, name the source titles you used. Where they do not cover something, you may answer from general Adobe knowledge, but say that part is not from the knowledge base.',
     '- If the same underlying operation fails twice in a row (whether via the same tool call retried, or a different tool aimed at the same goal), stop — do not try a third variation of the same approach. Switch to a meaningfully different approach instead (e.g. set every needed field at creation time rather than creating first and updating after, if the update step is what keeps failing), or if no such approach exists with the tools you have, say exactly what\'s blocking you in your final answer. Looping through delete/recreate/update variations of the same failing call burns the step budget and the context window without getting closer to an answer.',
     // TASK 4: destructive-scope rule. The human confirmation itself is
     // enforced in code (agent.ts toolApproval) — this keeps the model from
@@ -275,6 +318,14 @@ export interface LoopContext {
    * the SAME instance to every worker.
    */
   toolGate?: ToolCallGate;
+  /**
+   * The run's object ledger (object-ledger.ts): every id a tool result showed.
+   * Already wired into `tools` (results are recorded as they come back, and
+   * recall_objects reads it); carried here so the coordinator can hand each
+   * worker's dependants the objects that worker saw. Unset when the ledger is
+   * off (OBJECT_LEDGER=false).
+   */
+  objectLedger?: ObjectLedger;
   /** Base attributes for the run trace span. */
   baseTracerAttrs: Record<string, AttrValue>;
   /**

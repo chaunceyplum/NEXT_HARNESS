@@ -31,6 +31,7 @@ import type { ToolCallGate } from '../tools/tool-policy';
 import type { ModelHealthTracker } from '../models/model-health';
 import { executeLoop } from './agent-loop';
 import { lineageFromSteps, objectsIn } from '../tools/object-refs';
+import { extractObjects } from '../tools/object-ledger';
 import { getDefaultModelKey } from '../models/model-registry';
 import { PLATFORM_GROUPS, toolMatchesPlatforms, type McpToolDefinition } from '../tools/tool-catalog';
 import type { PlanStep } from './planner';
@@ -47,10 +48,12 @@ import { effectiveToolCall } from '../tools/tool-discovery';
 // WorkerRecord.steps is typed StepRecord[] there; AgentStepTrace is
 // structurally identical, so the runtime steps assign without a cast.
 export type { WorkerStatus, WorkerResult, WorkerRecord } from '../../types';
-import type { WorkerResult, WorkerRecord, WorkerStatus } from '../../types';
+import type { SeenObject, WorkerResult, WorkerRecord, WorkerStatus } from '../../types';
 
 /** Caps from Requirement 5.2. report_result truncates to these before reporting. */
-export const MAX_SUMMARY_CHARS = 1_000;
+export const MAX_SUMMARY_CHARS = 2_000;
+/** Objects a worker saw that are handed to its dependants (the rest stay reachable through recall_objects). */
+export const MAX_SEEN_OBJECTS = 60;
 export const MAX_NOTES_CHARS = 500;
 
 /** Name of the tool a worker loop is forced to end on (Requirement 4.6). */
@@ -60,7 +63,7 @@ export const REPORT_RESULT_TOOL = 'report_result';
  * report_result (Requirements 5.1, 5.2): the only way a worker reports back.
  * The step id is bound by the caller (the worker knows its own step), so the
  * model only supplies status, summary, ids and optional notes. `summary` is
- * truncated to 1,000 and `notes` to 500 characters before the result is
+ * truncated to 2,000 and `notes` to 500 characters before the result is
  * handed to `sink` — the cap is enforced in code, not asked of the model.
  *
  * `sink` is called once per successful call; the coordinator reads the last
@@ -117,13 +120,37 @@ function normaliseIds(ids: Record<string, string> | undefined): Record<string, s
   return out;
 }
 
+/**
+ * The objects a worker's successful tool results showed it, deduped by id,
+ * excluding ones it changed (already in `objects`), capped at
+ * MAX_SEEN_OBJECTS. Synthetic tools are skipped by extractObjects' callers'
+ * convention: only catalog-looking results carry ids worth handing on.
+ */
+export function seenObjects(steps: ReadonlyArray<{ toolResults: Array<{ toolName: string; output: unknown; error?: string }> }>, changed: Set<string>): SeenObject[] {
+  const out = new Map<string, SeenObject>();
+  for (const step of steps) {
+    for (const r of step.toolResults) {
+      if (r.error || SEEN_SKIP_TOOLS.has(r.toolName)) continue;
+      for (const o of extractObjects(r.output, r.toolName)) {
+        if (changed.has(o.id) || out.has(o.id)) continue;
+        out.set(o.id, { id: o.id, ...(o.label ? { label: o.label } : {}), ...(o.kind ? { kind: o.kind } : {}) });
+        if (out.size >= MAX_SEEN_OBJECTS) return [...out.values()];
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+/** Results that carry no platform objects (or only echo ones already known). */
+const SEEN_SKIP_TOOLS = new Set(['report_result', 'update_plan', 'revise_plan', 'find_tools', 'policy_info', 'search_knowledge', 'recall_objects']);
+
 // ── Tool narrowing ──────────────────────────────────────────────────────────────
 
 /** Tools a worker is never given, whatever its step (Requirement 4.3). */
 const EXCLUDED_WORKER_TOOLS = new Set(['remember_fact', 'update_plan', 'revise_plan']);
 
-/** Always kept (when present in the run's tool set) so a worker can discover and call tools it wasn't handed directly. */
-const WORKER_KEEP_TOOLS = new Set(['find_tools', 'call_tool']);
+/** Always kept (when present in the run's tool set) so a worker can discover and call tools it wasn't handed directly, and search the knowledge base. */
+const WORKER_KEEP_TOOLS = new Set(['find_tools', 'call_tool', 'search_knowledge', 'recall_objects']);
 
 /** The PLATFORM_GROUPS group names a tool belongs to (usually one; some tools match none). */
 function platformsOf(toolName: string): string[] {
@@ -334,6 +361,11 @@ export function buildWorkerBrief(input: Pick<WorkerInput, 'runGoal' | 'request' 
       if (dep.objects?.length) {
         lines.push(`  Objects it ${dep.objects.map((o) => `${o.change} ${o.kind} ${o.id}${o.name ? ` ("${o.name}")` : ''}${o.sandbox ? ` in sandbox ${o.sandbox}` : ''}`).join('; ')}`);
       }
+      // Objects its reads found (ids it may not have put in report_result).
+      if (dep.seen?.length) {
+        const shown = dep.seen.map((o) => `${o.kind ? `${o.kind} ` : ''}${o.id}${o.label ? ` ("${o.label}")` : ''}`).join('; ');
+        lines.push(`  Objects it found: ${shown}${dep.seen.length >= MAX_SEEN_OBJECTS ? '; more via recall_objects' : ''}`);
+      }
     }
   }
 
@@ -492,6 +524,8 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
     // What the worker actually changed, from its executed tool calls, so a
     // dependent step gets typed references rather than only the model's ids.
     const objects = objectsIn(lineageFromSteps(loop.steps, workerId));
+    const seen = seenObjects(loop.steps, new Set(objects.map((o) => o.id)));
+    const result: WorkerResult = { ...reported, ...(objects.length ? { objects } : {}), ...(seen.length ? { seen } : {}) };
     return {
       workerId,
       stepId: step.id,
@@ -499,7 +533,7 @@ export async function runWorker(input: WorkerInput): Promise<WorkerRecord> {
       modelKey: loop.modelKey,
       status,
       steps: loop.steps,
-      result: objects.length ? { ...reported, objects } : reported,
+      result,
       budgetUsage: spend(),
       startedAt,
       durationMs: Date.now() - startedAtMs,

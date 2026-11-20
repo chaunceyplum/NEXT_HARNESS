@@ -21,7 +21,7 @@
 export type { RunStatus } from '../run-lifecycle';
 export type { AdobeObjectKind, AdobeObjectRef, AdobePlatform, ChangedObject, LineageRecord, ObjectChange } from './adobe';
 export type { ToolCallRecord, ToolResultRecord, StepRecord, TokenUsage } from './agent';
-export type { WorkerStatus, WorkerResult, WorkerRecord } from './worker';
+export type { WorkerStatus, WorkerResult, WorkerRecord, SeenObject } from './worker';
 export type { PlanRecord } from './plan';
 export type { RagJudgment, RagJudgmentRecord, CritiqueRecord } from './quality';
 export type { RouteRecord, ModelOption } from './model';
